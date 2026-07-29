@@ -219,3 +219,6 @@ __marimo__/
 
 # Vscode settings
 .vscode/
+
+# Third party libraries
+third_parties/
