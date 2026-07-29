@@ -4,6 +4,7 @@
 
 ```bash
 uv sync
+uv run python -m isaacsim --generate-vscode-settings
 ```
 
 ## install ros2-jazzy-desktop in ubuntu24.04
@@ -52,3 +53,15 @@ terminal 2:
 source /opt/ros/jazzy/setup.bash
 ros2 run demo_nodes_py listener
 ```
+
+### connect ros2 and isaacsim
+
+before running isaacsim:
+```bash
+export ROS_DISTRO=jazzy
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/path/to/isaacsim/exts/isaacsim.ros2.bridge/jazzy/lib
+```
+enable the ROS 2 Bridge Extension
+
+Tools -> Robotics -> ROS 2 OmniGraphs -> Clock
