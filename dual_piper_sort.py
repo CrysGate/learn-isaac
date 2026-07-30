@@ -135,7 +135,27 @@ OVERHEAD_CAMERA_CLIPPING_RANGE: Final = (0.10, 6.0)
 LEFT_WRIST_CAMERA_NAME: Final = "left_wrist_camera"
 RIGHT_WRIST_CAMERA_NAME: Final = "right_wrist_camera"
 OVERHEAD_CAMERA_NAME: Final = "overhead_camera"
+CAMERA_SENSOR_PRIM_NAME: Final = "D435Sensor"
+LEFT_WRIST_CAMERA_PRIM_PATH: Final = (
+    f"{LEFT_PIPER_PRIM_PATH}/{PIPER_CAMERA_MOUNT_REL_PATH}/"
+    f"{CAMERA_SENSOR_PRIM_NAME}"
+)
+RIGHT_WRIST_CAMERA_PRIM_PATH: Final = (
+    f"{RIGHT_PIPER_PRIM_PATH}/{PIPER_CAMERA_MOUNT_REL_PATH}/"
+    f"{CAMERA_SENSOR_PRIM_NAME}"
+)
+OVERHEAD_CAMERA_PRIM_PATH: Final = (
+    f"{CAMERA_STAND_PRIM_PATH}/{CAMERA_SENSOR_PRIM_NAME}"
+)
+# The Piper helper is a ROS optical frame.  A local 180 degree X rotation
+# converts its +Z optical direction to the USD camera's -Z viewing direction.
+WRIST_CAMERA_LOCAL_USD_ORIENTATION: Final = (0.0, 1.0, 0.0, 0.0)
+# This lies inside the rendered D455 housing near the centre of its front mask.
+OVERHEAD_CAMERA_POSITION: Final = (0.0225, -0.041, 1.600)
 OVERHEAD_CAMERA_TARGET: Final = (0.0, -0.05, TABLE_TOP_Z)
+OVERHEAD_CAMERA_IMAGE_UP: Final = (0.0, 1.0, 0.0)
+CAMERA_RENDER_WARMUP_STEPS: Final = 24
+CAMERA_TARGET_PIXEL_MARGIN: Final = 2.0
 SCENE_PREVIEW_EYE: Final = (2.1, -2.3, 1.9)
 SCENE_PREVIEW_TARGET: Final = (0.0, -0.05, 0.75)
 
@@ -246,6 +266,11 @@ CAMERA_SPECS: Final = (
         OVERHEAD_CAMERA_CLIPPING_RANGE,
     ),
 )
+CAMERA_PRIM_PATHS: Final = {
+    LEFT_WRIST_CAMERA_NAME: LEFT_WRIST_CAMERA_PRIM_PATH,
+    RIGHT_WRIST_CAMERA_NAME: RIGHT_WRIST_CAMERA_PRIM_PATH,
+    OVERHEAD_CAMERA_NAME: OVERHEAD_CAMERA_PRIM_PATH,
+}
 
 _EXPECTED_DOLL_HEIGHTS: Final = (0.13, 0.11, 0.09, 0.07, 0.05)
 _EXPECTED_USD_DEFAULT_PRIMS: Final = {
@@ -1407,6 +1432,403 @@ def exercise_and_validate_robots(
     }
 
 
+def camera_intrinsics(spec: CameraSpec) -> list[list[float]]:
+    """Return the configured pinhole matrix without importing Isaac Sim."""
+
+    width, height = spec.resolution
+    focal_pixels = width * spec.focal_length_mm / spec.horizontal_aperture_mm
+    return [
+        [focal_pixels, 0.0, width / 2.0],
+        [0.0, focal_pixels, height / 2.0],
+        [0.0, 0.0, 1.0],
+    ]
+
+
+def _look_at_world_quaternion(
+    position: Sequence[float],
+    target: Sequence[float],
+    image_up: Sequence[float],
+) -> Any:
+    """Build a wxyz orientation for Isaac's +X-forward world camera axes."""
+
+    import numpy as np
+    from isaacsim.core.utils.numpy.rotations import (  # type: ignore[import-not-found]
+        rot_matrices_to_quats,
+    )
+
+    forward = np.asarray(target, dtype=np.float64) - np.asarray(
+        position, dtype=np.float64
+    )
+    forward_norm = float(np.linalg.norm(forward))
+    if forward_norm <= 1.0e-9:
+        raise ValueError("Camera position and look-at target must differ")
+    forward /= forward_norm
+    up = np.asarray(image_up, dtype=np.float64)
+    up -= float(np.dot(up, forward)) * forward
+    up_norm = float(np.linalg.norm(up))
+    if up_norm <= 1.0e-9:
+        raise ValueError("Camera image-up direction is parallel to its optical axis")
+    up /= up_norm
+    left = np.cross(up, forward)
+    rotation = np.column_stack((forward, left, up))
+    return rot_matrices_to_quats(rotation).astype(np.float32)
+
+
+def _camera_spec_by_name() -> dict[str, CameraSpec]:
+    return {spec.name: spec for spec in CAMERA_SPECS}
+
+
+def create_cameras(world: Any) -> dict[str, Any]:
+    """Create two wrist D435 approximations and one stand-mounted overhead view."""
+
+    import numpy as np
+    from isaacsim.sensors.camera import Camera  # type: ignore[import-not-found]
+
+    for parent_path in (
+        f"{LEFT_PIPER_PRIM_PATH}/{PIPER_CAMERA_MOUNT_REL_PATH}",
+        f"{RIGHT_PIPER_PRIM_PATH}/{PIPER_CAMERA_MOUNT_REL_PATH}",
+        CAMERA_STAND_PRIM_PATH,
+    ):
+        if not world.stage.GetPrimAtPath(parent_path):
+            raise ValueError(f"Camera parent prim does not exist: {parent_path}")
+
+    specs = _camera_spec_by_name()
+    cameras: dict[str, Any] = {}
+    for name in (LEFT_WRIST_CAMERA_NAME, RIGHT_WRIST_CAMERA_NAME):
+        spec = specs[name]
+        camera = Camera(
+            prim_path=CAMERA_PRIM_PATHS[name],
+            name=name,
+            frequency=spec.frequency_hz,
+            resolution=spec.resolution,
+            translation=np.zeros(3, dtype=np.float32),
+            orientation=np.asarray(
+                WRIST_CAMERA_LOCAL_USD_ORIENTATION, dtype=np.float32
+            ),
+            annotator_device="cpu",
+        )
+        # Explicitly preserve the authored helper as the parent frame; "usd"
+        # avoids an additional camera-axis conversion on this local rotation.
+        camera.set_local_pose(
+            translation=np.zeros(3, dtype=np.float32),
+            orientation=np.asarray(
+                WRIST_CAMERA_LOCAL_USD_ORIENTATION, dtype=np.float32
+            ),
+            camera_axes="usd",
+        )
+        cameras[name] = camera
+
+    overhead_spec = specs[OVERHEAD_CAMERA_NAME]
+    overhead = Camera(
+        prim_path=OVERHEAD_CAMERA_PRIM_PATH,
+        name=OVERHEAD_CAMERA_NAME,
+        frequency=overhead_spec.frequency_hz,
+        resolution=overhead_spec.resolution,
+        annotator_device="cpu",
+    )
+    overhead.set_world_pose(
+        position=np.asarray(OVERHEAD_CAMERA_POSITION, dtype=np.float32),
+        orientation=_look_at_world_quaternion(
+            OVERHEAD_CAMERA_POSITION,
+            OVERHEAD_CAMERA_TARGET,
+            OVERHEAD_CAMERA_IMAGE_UP,
+        ),
+        camera_axes="world",
+    )
+    cameras[OVERHEAD_CAMERA_NAME] = overhead
+
+    for spec in CAMERA_SPECS:
+        camera = cameras[spec.name]
+        camera.set_focal_length(spec.focal_length_mm)
+        camera.set_horizontal_aperture(spec.horizontal_aperture_mm)
+        camera.set_clipping_range(*spec.clipping_range)
+        camera.initialize(attach_rgb_annotator=True)
+        camera.add_distance_to_image_plane_to_frame()
+    return cameras
+
+
+def _quaternion_rotate_vector(
+    quaternion: Sequence[float], vector: Sequence[float]
+) -> list[float]:
+    """Rotate a 3-vector by a wxyz quaternion."""
+
+    import numpy as np
+
+    w, x, y, z = normalize_quaternion(quaternion)
+    rotation = np.asarray(
+        (
+            (
+                1.0 - 2.0 * (y * y + z * z),
+                2.0 * (x * y - z * w),
+                2.0 * (x * z + y * w),
+            ),
+            (
+                2.0 * (x * y + z * w),
+                1.0 - 2.0 * (x * x + z * z),
+                2.0 * (y * z - x * w),
+            ),
+            (
+                2.0 * (x * z - y * w),
+                2.0 * (y * z + x * w),
+                1.0 - 2.0 * (x * x + y * y),
+            ),
+        ),
+        dtype=np.float64,
+    )
+    return (rotation @ np.asarray(vector, dtype=np.float64)).tolist()
+
+
+def read_camera_observations(cameras: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    """Read RGB uint8 and metric image-plane depth, normalizing invalid depth."""
+
+    import numpy as np
+
+    observations: dict[str, dict[str, Any]] = {}
+    for spec in CAMERA_SPECS:
+        camera = cameras[spec.name]
+        rgb_data = camera.get_rgb(device="cpu")
+        depth_data = camera.get_depth(device="cpu")
+        if rgb_data is None or depth_data is None:
+            raise RuntimeError(f"{spec.name}: RGB-D annotators returned no data")
+        rgb = np.asarray(rgb_data)
+        depth = np.asarray(depth_data)
+        if rgb.shape != (spec.resolution[1], spec.resolution[0], 3):
+            raise ValueError(f"{spec.name}: unexpected RGB shape {rgb.shape}")
+        if depth.shape != (spec.resolution[1], spec.resolution[0]):
+            raise ValueError(f"{spec.name}: unexpected depth shape {depth.shape}")
+        if rgb.dtype != np.uint8:
+            raise ValueError(f"{spec.name}: expected RGB uint8, found {rgb.dtype}")
+        if depth.dtype != np.float32:
+            raise ValueError(f"{spec.name}: expected depth float32, found {depth.dtype}")
+        depth = depth.copy()
+        depth[~np.isfinite(depth)] = np.nan
+        observations[spec.name] = {
+            "rgb": rgb.copy(),
+            "depth": depth,
+            "rendering_time_s": float(
+                camera.get_current_frame().get("rendering_time", 0.0)
+            ),
+        }
+    return observations
+
+
+def _camera_target(name: str) -> tuple[float, float, float]:
+    if name == LEFT_WRIST_CAMERA_NAME:
+        path = f"{LEFT_PIPER_PRIM_PATH}/{PIPER_TOOL_REL_PATH}"
+        return tuple(_xform_world_pose(path, "left_camera_target")[0])
+    if name == RIGHT_WRIST_CAMERA_NAME:
+        path = f"{RIGHT_PIPER_PRIM_PATH}/{PIPER_TOOL_REL_PATH}"
+        return tuple(_xform_world_pose(path, "right_camera_target")[0])
+    return OVERHEAD_CAMERA_TARGET
+
+
+def validate_and_capture_cameras(
+    world: Any,
+    cameras: dict[str, Any],
+    *,
+    output_dir: Path | None = None,
+) -> dict[str, Any]:
+    """Render, validate calibration/poses/data/cadence, and optionally save previews."""
+
+    import numpy as np
+
+    expected_names = {spec.name for spec in CAMERA_SPECS}
+    if set(cameras) != expected_names:
+        raise ValueError(
+            f"Expected cameras {sorted(expected_names)}, found {sorted(cameras)}"
+        )
+
+    timestamps: dict[str, list[float]] = {name: [] for name in cameras}
+    for _ in range(CAMERA_RENDER_WARMUP_STEPS):
+        world.step(render=True)
+        for name, camera in cameras.items():
+            timestamp = float(
+                camera.get_current_frame().get("rendering_time", 0.0)
+            )
+            if timestamp > 0.0 and (
+                not timestamps[name]
+                or not math.isclose(
+                    timestamp, timestamps[name][-1], abs_tol=1.0e-9
+                )
+            ):
+                timestamps[name].append(timestamp)
+
+    observations = read_camera_observations(cameras)
+    specs = _camera_spec_by_name()
+    report: dict[str, Any] = {}
+    if output_dir is not None:
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+    for name, camera in cameras.items():
+        spec = specs[name]
+        prim_path = CAMERA_PRIM_PATHS[name]
+        prim = world.stage.GetPrimAtPath(prim_path)
+        if not prim or prim.GetTypeName() != "Camera":
+            raise ValueError(f"{name}: missing Camera prim at {prim_path}")
+        if tuple(camera.get_resolution()) != spec.resolution:
+            raise ValueError(f"{name}: resolution configuration changed")
+        if not math.isclose(
+            float(camera.get_frequency()), spec.frequency_hz, abs_tol=1.0e-9
+        ):
+            raise ValueError(f"{name}: camera frequency is not 30 Hz")
+        if not math.isclose(
+            float(camera.get_focal_length()),
+            spec.focal_length_mm,
+            abs_tol=1.0e-5,
+        ):
+            raise ValueError(f"{name}: focal length configuration changed")
+        if not math.isclose(
+            float(camera.get_horizontal_aperture()),
+            spec.horizontal_aperture_mm,
+            abs_tol=1.0e-5,
+        ):
+            raise ValueError(f"{name}: horizontal aperture configuration changed")
+        clipping_range = tuple(float(value) for value in camera.get_clipping_range())
+        _assert_vector_close(
+            clipping_range,
+            spec.clipping_range,
+            label=f"{name} clipping range",
+            tolerance=1.0e-5,
+        )
+
+        actual_intrinsics = np.asarray(
+            camera.get_intrinsics_matrix(device="cpu"), dtype=np.float64
+        )
+        expected_intrinsics = np.asarray(camera_intrinsics(spec), dtype=np.float64)
+        if not np.allclose(actual_intrinsics, expected_intrinsics, atol=1.0e-4):
+            raise ValueError(
+                f"{name}: intrinsics differ: {actual_intrinsics.tolist()}"
+            )
+
+        position, quaternion = camera.get_world_pose(camera_axes="world")
+        target = np.asarray(_camera_target(name), dtype=np.float64)
+        optical_forward = np.asarray(
+            _quaternion_rotate_vector(quaternion, (1.0, 0.0, 0.0)),
+            dtype=np.float64,
+        )
+        target_direction = target - np.asarray(position, dtype=np.float64)
+        target_distance = float(np.linalg.norm(target_direction))
+        target_direction /= target_distance
+        target_alignment = float(np.dot(optical_forward, target_direction))
+        if target_alignment < math.cos(math.radians(30.0)):
+            raise ValueError(
+                f"{name}: optical axis misses its target, cosine={target_alignment}"
+            )
+        target_pixel = np.asarray(
+            camera.get_image_coords_from_world_points(target.reshape(1, 3)),
+            dtype=np.float64,
+        )[0]
+        width, height = spec.resolution
+        if not (
+            CAMERA_TARGET_PIXEL_MARGIN
+            <= target_pixel[0]
+            < width - CAMERA_TARGET_PIXEL_MARGIN
+            and CAMERA_TARGET_PIXEL_MARGIN
+            <= target_pixel[1]
+            < height - CAMERA_TARGET_PIXEL_MARGIN
+        ):
+            raise ValueError(
+                f"{name}: target projects outside the image at {target_pixel.tolist()}"
+            )
+
+        rgb = observations[name]["rgb"]
+        depth = observations[name]["depth"]
+        finite_depth = np.isfinite(depth)
+        finite_ratio = float(np.mean(finite_depth))
+        if finite_ratio <= 0.05:
+            raise ValueError(f"{name}: only {finite_ratio:.3%} finite depth pixels")
+        if int(np.ptp(rgb.astype(np.int16))) == 0:
+            raise ValueError(f"{name}: rendered RGB frame is uniform")
+        finite_values = depth[finite_depth]
+        if (
+            float(np.min(finite_values)) < spec.clipping_range[0] - 1.0e-3
+            or float(np.max(finite_values)) > spec.clipping_range[1] + 1.0e-3
+        ):
+            raise ValueError(f"{name}: finite depth violates the clipping range")
+
+        unique_timestamps = timestamps[name]
+        cadence = [
+            later - earlier
+            for earlier, later in zip(unique_timestamps, unique_timestamps[1:])
+        ]
+        if len(cadence) < 2:
+            raise RuntimeError(
+                f"{name}: insufficient timestamp changes to verify camera cadence"
+            )
+        median_period = float(np.median(np.asarray(cadence)))
+        if not math.isclose(
+            median_period, 1.0 / spec.frequency_hz, abs_tol=5.0e-3
+        ):
+            raise ValueError(
+                f"{name}: observed period {median_period:.6f} s is not 30 Hz"
+            )
+
+        preview: dict[str, Any] = {}
+        if output_dir is not None:
+            from PIL import Image
+
+            rgb_path = output_dir / f"{name}_rgb.png"
+            depth_path = output_dir / f"{name}_depth.png"
+            Image.fromarray(rgb).save(rgb_path)
+            depth_visual = np.zeros(depth.shape, dtype=np.uint8)
+            low, high = np.percentile(finite_values, (1.0, 99.0))
+            if high > low:
+                normalized = np.clip((depth - low) / (high - low), 0.0, 1.0)
+                depth_visual[finite_depth] = (
+                    255.0 * (1.0 - normalized[finite_depth])
+                ).astype(np.uint8)
+            Image.fromarray(depth_visual).save(depth_path)
+            preview = {
+                "rgb_path": str(rgb_path.resolve()),
+                "depth_path": str(depth_path.resolve()),
+            }
+
+        report[name] = {
+            "prim_path": prim_path,
+            "parent_path": str(prim.GetParent().GetPath()),
+            "model": "logical Intel RealSense D435 pinhole RGB-D",
+            "resolution_wh": list(spec.resolution),
+            "frequency_hz": spec.frequency_hz,
+            "observed_period_s": median_period,
+            "rgb": {
+                "shape": list(rgb.shape),
+                "dtype": str(rgb.dtype),
+                "channel_order": CAMERA_RGB_CHANNEL_ORDER,
+                "minimum": int(np.min(rgb)),
+                "maximum": int(np.max(rgb)),
+            },
+            "depth": {
+                "shape": list(depth.shape),
+                "dtype": str(depth.dtype),
+                "definition": spec.depth_definition,
+                "unit": CAMERA_DEPTH_UNIT,
+                "invalid_value": CAMERA_INVALID_DEPTH,
+                "finite_ratio": finite_ratio,
+                "finite_minimum_m": float(np.min(finite_values)),
+                "finite_maximum_m": float(np.max(finite_values)),
+            },
+            "calibration": {
+                "focal_length_mm": float(camera.get_focal_length()),
+                "horizontal_aperture_mm": float(
+                    camera.get_horizontal_aperture()
+                ),
+                "clipping_range_m": list(clipping_range),
+                "intrinsics": actual_intrinsics.tolist(),
+                "world_position_m": np.asarray(position).tolist(),
+                "world_quaternion_wxyz": np.asarray(quaternion).tolist(),
+            },
+            "coverage": {
+                "target_world_m": target.tolist(),
+                "target_pixel_uv": target_pixel.tolist(),
+                "optical_axis_target_cosine": target_alignment,
+                "target_distance_m": target_distance,
+            },
+            "rendering_time_s": observations[name]["rendering_time_s"],
+            **preview,
+        }
+    return report
+
+
 def build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -1436,7 +1858,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_argument_parser().parse_args(argv)
-    if args.mode in {"audit", "scene", "robots"}:
+    if args.mode in {"audit", "scene", "robots", "cameras"}:
         # SimulationApp.close() shuts down the Python process in Isaac Sim 5.1,
         # so all useful output must be emitted and flushed before that call.
         validate_static_assets()
@@ -1458,7 +1880,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 world, args.output_dir / "scene" / preview_name
             )
             marker = "SCENE_SMOKE_OK"
-        else:
+        elif args.mode == "robots":
             world = create_scene()
             robots = create_robots(world)
             report = {
@@ -1472,6 +1894,25 @@ def main(argv: Sequence[str] | None = None) -> int:
                 world, args.output_dir / "robots" / preview_name
             )
             marker = "ROBOT_SMOKE_OK"
+        else:
+            world = create_scene()
+            robots = create_robots(world)
+            cameras = create_cameras(world)
+            preview_directory = args.output_dir / "cameras" / (
+                "headless" if args.headless else "headed"
+            )
+            report = {
+                "scene": validate_scene(world),
+                "robots_at_home": validate_robots_at_home(
+                    robots, label="camera_smoke"
+                ),
+                "cameras": validate_and_capture_cameras(
+                    world,
+                    cameras,
+                    output_dir=preview_directory,
+                ),
+            }
+            marker = "CAMERA_SMOKE_OK"
         print(marker)
         print(json.dumps(report, indent=2, sort_keys=True, default=str))
         sys.stdout.flush()

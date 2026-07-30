@@ -62,6 +62,39 @@ class StaticAssetAndConstantTests(unittest.TestCase):
         )
         self.assertEqual(len(subject.PIPER_HOME_DOF_POSITION), 8)
 
+    def test_three_d435_pinhole_contracts(self) -> None:
+        self.assertEqual(len(subject.CAMERA_SPECS), 3)
+        self.assertEqual(
+            {spec.name for spec in subject.CAMERA_SPECS},
+            {
+                subject.LEFT_WRIST_CAMERA_NAME,
+                subject.RIGHT_WRIST_CAMERA_NAME,
+                subject.OVERHEAD_CAMERA_NAME,
+            },
+        )
+        for spec in subject.CAMERA_SPECS:
+            intrinsics = subject.camera_intrinsics(spec)
+            self.assertEqual(spec.resolution, (640, 480))
+            self.assertEqual(spec.frequency_hz, 30)
+            self.assertTrue(math.isclose(intrinsics[0][0], intrinsics[1][1]))
+            self.assertEqual(intrinsics[0][2], 320.0)
+            self.assertEqual(intrinsics[1][2], 240.0)
+        self.assertTrue(
+            subject.LEFT_WRIST_CAMERA_PRIM_PATH.startswith(
+                subject.LEFT_PIPER_PRIM_PATH
+            )
+        )
+        self.assertTrue(
+            subject.RIGHT_WRIST_CAMERA_PRIM_PATH.startswith(
+                subject.RIGHT_PIPER_PRIM_PATH
+            )
+        )
+        self.assertTrue(
+            subject.OVERHEAD_CAMERA_PRIM_PATH.startswith(
+                subject.CAMERA_STAND_PRIM_PATH
+            )
+        )
+
     def test_static_asset_and_urdf_audit(self) -> None:
         report = subject.validate_static_assets()
         joints = report["urdf"]["joints"]
@@ -85,10 +118,43 @@ class IsaacUsdAssetIntegrationTest(unittest.TestCase):
     def setUpClass(cls) -> None:
         cls.world = subject.create_scene()
         cls.robots = None
+        cls.cameras = None
+
+    @classmethod
+    def ensure_robots(cls):
+        if cls.robots is None:
+            cls.robots = subject.create_robots(cls.world)
+        return cls.robots
+
+    def test_camera_rgb_depth_calibration_and_coverage(self) -> None:
+        self.ensure_robots()
+        if self.__class__.cameras is None:
+            self.__class__.cameras = subject.create_cameras(self.world)
+        report = subject.validate_and_capture_cameras(
+            self.world, self.__class__.cameras
+        )
+        self.assertEqual(
+            set(report),
+            {
+                subject.LEFT_WRIST_CAMERA_NAME,
+                subject.RIGHT_WRIST_CAMERA_NAME,
+                subject.OVERHEAD_CAMERA_NAME,
+            },
+        )
+        for camera_report in report.values():
+            self.assertEqual(camera_report["rgb"]["shape"], [480, 640, 3])
+            self.assertEqual(camera_report["rgb"]["dtype"], "uint8")
+            self.assertEqual(camera_report["depth"]["shape"], [480, 640])
+            self.assertEqual(camera_report["depth"]["dtype"], "float32")
+            self.assertEqual(camera_report["depth"]["unit"], "m")
+            self.assertAlmostEqual(
+                camera_report["observed_period_s"],
+                1.0 / 30.0,
+                delta=5.0e-3,
+            )
 
     def test_robot_home_gripper_and_workspace(self) -> None:
-        if self.__class__.robots is None:
-            self.__class__.robots = subject.create_robots(self.world)
+        self.ensure_robots()
         report = subject.exercise_and_validate_robots(
             self.world, self.__class__.robots
         )

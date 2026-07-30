@@ -54,3 +54,14 @@
 - 问题与处理：首个探针沿用旧示例假定只有 7 DOF，`set_joint_positions` 报 `(1,7)` 到 `(1,8)` shape mismatch；实际 USD/PhysX 暴露顺序为六个 arm joints、`gripper_joint`、`joint8` 共 8 DOF，改为初始化全部 8 DOF，但 action 只下发六臂关节加 `gripper_joint`，让 `joint8` 由 mimic schema 跟随。USD 的 `joint8` 下限为 `-0.007 m`，与 URDF 的 `0 m` 不同，因此以实际 USD limit 记录，控制目标仍限制在 `[0,0.05] m`。
 - 参考资料：`.venv/lib/python3.11/site-packages/isaacsim/exts/isaacsim.core.api/isaacsim/core/api/robots/robot.py`；`.venv/lib/python3.11/site-packages/isaacsim/exts/isaacsim.core.prims/isaacsim/core/prims/impl/single_articulation.py`；`.venv/lib/python3.11/site-packages/isaacsim/exts/isaacsim.core.prims/isaacsim/core/prims/impl/articulation.py`；`Assets/Robots/piper/Piper.usd`。
 - Commit message：`feat: validate dual Piper articulations`
+
+## 2026-07-30 23:42 — 挂载并验证三路逻辑 D435 RGB-D 相机
+
+- 目标：在两个 `link6/camera` helper 和顶部实体支架下创建三台可真实出图的 640×480、30 Hz 逻辑 D435，固化标定、深度语义、挂载层级与视野验收。
+- 完成内容：实现 `create_cameras()`、相机 world look-at、RGB-D 统一读帧和 `validate_and_capture_cameras()`；腕部相机严格使用资产 `robot_config.yml` 指定的局部 X 轴 180° USD 光轴转换，顶部相机放入支架自带 D455 外壳并看向桌面中心；三路均设置 pinhole `f=1.93 mm`、水平 aperture `2.65 mm`、RGB uint8/RGB、image-plane depth float32/m、非有限深度转 NaN；验证 render product 的真实时间戳、内外参、裁剪、非空画面、深度范围、目标投影和 prim parent；保存 headed/headless RGB 与深度预览。
+- 修改文件：`dual_piper_sort.py`、`test_dual_piper_sort.py`、`dual-piper-dev-log.md`。
+- 运行命令：`git status --short`；`uv run python - <<'PY' ...` 读取双腕 helper world pose 和支架各 mesh world bbox；`uv run python test_dual_piper_sort.py --mode fast`；两次 `uv run python test_dual_piper_sort.py --mode integration --headless`；`uv run python dual_piper_sort.py --mode cameras --headless`；`uv run python dual_piper_sort.py --mode cameras`；`uv run python -m py_compile dual_piper_sort.py test_dual_piper_sort.py`；`git diff --check`。
+- 验证结果：fast 7/7、最终集成 11/11 通过；headed/headless 均输出 `CAMERA_SMOKE_OK` 且退出码 0；三路实际 RGB shape/dtype 均为 `[480,640,3] uint8`，depth 均为 `[480,640] float32`、单位 m；三路时间戳中位周期均为 `0.033333335 s`；实际内参为 `fx=fy=466.1132,cx=320,cy=240`；左右腕目标像素约为 `[320,389.26]`、光轴对夹爪中心 cosine `0.95236`，顶部桌心约为 `[320,240]`、cosine 接近 1；顶部有效深度比例 100%，两腕各 33.33%，其余按契约转 NaN；目视确认腕部画面同时包含双指和前方桌面，顶部画面覆盖中央桌面与两臂边缘。
+- 问题与处理：第一次集成测试的所有实现侧相机验收已经通过，但测试末尾用 `math.isclose` 默认的近零容差比较 `0.033333335` 与 `1/30`，造成单个假失败；失败退出时未调用 `SimulationApp.close()`，SyntheticData graph 在 Python atexit 又产生 shutdown crash。把测试容差改为与实现一致的 `5 ms` 后 11/11 正常通过并由 `close()` 干净退出。Camera 初始化时会报告默认 aperture 被调整为 4:3 方像素 aperture，这是设置明确 D435 aperture 前的正常中间状态，最终读回值和内参均已严格验证。
+- 参考资料：`Assets/Robots/piper/robot_config.yml`；`Assets/Robots/piper/piper_description/urdf/piper.urdf`；`.venv/lib/python3.11/site-packages/isaacsim/exts/isaacsim.sensors.camera/isaacsim/sensors/camera/camera.py`；`.venv/lib/python3.11/site-packages/isaacsim/exts/isaacsim.core.utils/isaacsim/core/utils/rotations.py`。
+- Commit message：`feat: add three D435 RGB-D cameras`
