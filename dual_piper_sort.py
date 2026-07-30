@@ -19,6 +19,8 @@ import argparse
 import json
 import math
 import re
+import selectors
+import subprocess
 import sys
 import xml.etree.ElementTree as ET
 from dataclasses import asdict, dataclass
@@ -186,6 +188,45 @@ MATRYOSHKA_TABLE_HEIGHT_TOLERANCE: Final = 0.008
 MATRYOSHKA_SETTLE_MAX_STEPS: Final = 1_440
 MATRYOSHKA_STABLE_CONSECUTIVE_STEPS: Final = 30
 
+# cuRobo owns only the six arm joints.  The active gripper joint is locked
+# open in its kinematic model (the URDF mimic parser follows joint8
+# automatically) and is commanded explicitly in simulation.
+CUROBO_DEVICE: Final = "cuda:0"
+CUROBO_NUM_IK_SEEDS: Final = 16
+CUROBO_NUM_TRAJOPT_SEEDS: Final = 4
+CUROBO_MAX_PLAN_ATTEMPTS: Final = 5
+CUROBO_POSITION_TOLERANCE_M: Final = 0.008
+CUROBO_ORIENTATION_TOLERANCE_RAD: Final = 0.08
+CUROBO_COLLISION_ACTIVATION_DISTANCE_M: Final = 0.005
+CUROBO_COLLISION_CACHE: Final = {"cuboid": 32, "sphere": 160}
+CUROBO_ATTACHED_OBJECT_LINK: Final = "attached_object"
+CUROBO_ATTACHED_OBJECT_SPHERES: Final = 4
+CUROBO_ATTACHED_OBJECT_INSET_M: Final = 0.007
+CUROBO_MAX_TRAJECTORY_STEPS: Final = 1_000
+CUROBO_MAX_EXECUTION_ERROR_RAD: Final = 0.08
+CUROBO_WORKER_RESPONSE_PREFIX: Final = "CUROBO_WORKER_RESPONSE "
+CUROBO_WORKER_TIMEOUT_S: Final = 60.0
+GRASP_JOINT_ROOT: Final = "/World/GraspJoints"
+PICK_SMOKE_ASSET_ID: Final = "00001"
+PICK_GRIPPER_CLOSE_STEPS: Final = 120
+PICK_RELEASE_SETTLE_STEPS: Final = 60
+
+# In this top-down tool pose, gripper_center +X points down from the wrist to
+# the grasp point.  Tool +Y lies along world +X, making the fingers close
+# across the doll in the table X direction.
+PIPER_TOP_DOWN_TOOL_WORLD_ORIENTATION: Final = (
+    0.5,
+    0.5,
+    0.5,
+    -0.5,
+)
+PIPER_FINGER_CENTER_BELOW_TOOL_M: Final = 0.040
+PIPER_GRASP_TOOL_HEIGHT_ABOVE_TABLE_M: Final = 0.082
+PIPER_PREGRASP_CLEARANCE_M: Final = 0.110
+PIPER_LIFT_CLEARANCE_M: Final = 0.130
+PIPER_PREPLACE_CLEARANCE_M: Final = 0.120
+PIPER_RETREAT_CLEARANCE_M: Final = 0.130
+
 
 @dataclass(frozen=True)
 class PoseSpec:
@@ -252,6 +293,87 @@ def normalize_quaternion(
     if norm <= 0.0:
         raise ValueError("Cannot normalize a zero quaternion")
     return tuple(float(component) / norm for component in quaternion)  # type: ignore[return-value]
+
+
+def quaternion_conjugate(
+    quaternion: Sequence[float],
+) -> tuple[float, float, float, float]:
+    """Return the conjugate of a normalized-or-unnormalized wxyz quaternion."""
+
+    w, x, y, z = (float(value) for value in quaternion)
+    return (w, -x, -y, -z)
+
+
+def quaternion_multiply(
+    first: Sequence[float],
+    second: Sequence[float],
+) -> tuple[float, float, float, float]:
+    """Compose two wxyz quaternions as ``first * second``."""
+
+    aw, ax, ay, az = (float(value) for value in first)
+    bw, bx, by, bz = (float(value) for value in second)
+    return normalize_quaternion(
+        (
+            aw * bw - ax * bx - ay * by - az * bz,
+            aw * bx + ax * bw + ay * bz - az * by,
+            aw * by - ax * bz + ay * bw + az * bx,
+            aw * bz + ax * by - ay * bx + az * bw,
+        )
+    )
+
+
+def world_pose_to_robot_base(spec: RobotSpec, pose: PoseSpec) -> PoseSpec:
+    """Express a world pose in one Piper base frame."""
+
+    inverse_base_orientation = quaternion_conjugate(
+        normalize_quaternion(spec.base_pose.quaternion)
+    )
+    world_offset = tuple(
+        pose.position[index] - spec.base_pose.position[index]
+        for index in range(3)
+    )
+    base_position = _quaternion_rotate_vector(
+        inverse_base_orientation,
+        world_offset,
+    )
+    base_orientation = quaternion_multiply(
+        inverse_base_orientation,
+        pose.quaternion,
+    )
+    return PoseSpec(base_position, base_orientation)
+
+
+def robot_base_pose_to_world(spec: RobotSpec, pose: PoseSpec) -> PoseSpec:
+    """Express a pose from one Piper base frame in world coordinates."""
+
+    world_offset = _quaternion_rotate_vector(
+        spec.base_pose.quaternion,
+        pose.position,
+    )
+    world_position = tuple(
+        spec.base_pose.position[index] + world_offset[index]
+        for index in range(3)
+    )
+    world_orientation = quaternion_multiply(
+        spec.base_pose.quaternion,
+        pose.quaternion,
+    )
+    return PoseSpec(world_position, world_orientation)
+
+
+def pose_relative_to(parent: PoseSpec, child: PoseSpec) -> PoseSpec:
+    """Express ``child`` in ``parent`` coordinates."""
+
+    inverse_parent_orientation = quaternion_conjugate(
+        normalize_quaternion(parent.quaternion)
+    )
+    offset = tuple(
+        child.position[index] - parent.position[index] for index in range(3)
+    )
+    return PoseSpec(
+        _quaternion_rotate_vector(inverse_parent_orientation, offset),
+        quaternion_multiply(inverse_parent_orientation, child.quaternion),
+    )
 
 
 CAMERA_STAND_ORIENTATION: Final = normalize_quaternion(
@@ -406,6 +528,1176 @@ def compute_doll_target_layout() -> tuple[DollPlacement, ...]:
         if index < len(center_distances):
             current_y += center_distances[index]
     return tuple(placements)
+
+
+def build_curobo_robot_config() -> dict[str, Any]:
+    """Build the in-memory six-DOF Piper model used by cuRobo."""
+
+    collision_links = (
+        "link1",
+        "link2",
+        "link3",
+        "link4",
+        "link5",
+        "link6",
+        "link7",
+        "link8",
+        CUROBO_ATTACHED_OBJECT_LINK,
+    )
+    collision_spheres = {
+        "link1": [{"center": [0.0, 0.0, 0.0], "radius": 0.045}],
+        "link2": [
+            {"center": [x, 0.0, 0.0], "radius": 0.052}
+            for x in (0.020, 0.085, 0.150, 0.215, 0.280)
+        ],
+        "link3": [
+            {"center": [0.0, y, 0.0], "radius": 0.046}
+            for y in (0.0, -0.055, -0.110, -0.165, -0.210)
+        ],
+        "link4": [{"center": [0.0, 0.0, 0.0], "radius": 0.043}],
+        "link5": [
+            {"center": [0.0, y, 0.0], "radius": 0.040}
+            for y in (0.0, -0.050, -0.090)
+        ],
+        "link6": [
+            {"center": [-0.060, 0.0, 0.027], "radius": 0.045},
+            {"center": [-0.005, 0.0, 0.035], "radius": 0.045},
+            {"center": [-0.020, -0.060, 0.058], "radius": 0.030},
+            {"center": [-0.020, 0.060, 0.058], "radius": 0.030},
+        ],
+        "link7": [
+            {"center": [0.0, -0.013, -0.020], "radius": 0.028},
+            {"center": [0.0, -0.013, -0.058], "radius": 0.028},
+        ],
+        "link8": [
+            {"center": [0.0, 0.013, -0.020], "radius": 0.028},
+            {"center": [0.0, 0.013, -0.058], "radius": 0.028},
+        ],
+    }
+    self_collision_ignore = {
+        # The retracted zero pose folds link5 alongside link1/link2.  The
+        # conservative spheres overlap there even though the authored meshes
+        # retain clearance, so those measured home-neighbour pairs are ignored.
+        "link1": ["link2", "link3", "link4", "link5"],
+        "link2": ["link3", "link4", "link5"],
+        "link3": ["link4", "link5"],
+        "link4": ["link5", "link6"],
+        "link5": ["link6", "link7", "link8"],
+        "link6": ["link7", "link8", CUROBO_ATTACHED_OBJECT_LINK],
+        "link7": ["link8", CUROBO_ATTACHED_OBJECT_LINK],
+        "link8": [CUROBO_ATTACHED_OBJECT_LINK],
+    }
+    return {
+        "robot_cfg": {
+            "kinematics": {
+                "format_version": 2.0,
+                "urdf_path": str(PIPER_URDF),
+                "asset_root_path": str(PIPER_URDF.parents[2]),
+                "base_link": PIPER_BASE_LINK,
+                "tool_frames": [PIPER_TOOL_LINK],
+                "collision_link_names": list(collision_links),
+                "collision_sphere_buffer": 0.0,
+                "collision_spheres": collision_spheres,
+                "self_collision_buffer": {
+                    link_name: 0.0 for link_name in collision_links
+                },
+                "self_collision_ignore": self_collision_ignore,
+                "grasp_contact_link_names": [
+                    "link6",
+                    "link7",
+                    "link8",
+                    CUROBO_ATTACHED_OBJECT_LINK,
+                ],
+                "lock_joints": {
+                    "gripper_joint": PIPER_OPEN_GRIPPER_POSITION,
+                },
+                "extra_collision_spheres": {
+                    CUROBO_ATTACHED_OBJECT_LINK: CUROBO_ATTACHED_OBJECT_SPHERES,
+                },
+                "extra_links": {
+                    CUROBO_ATTACHED_OBJECT_LINK: {
+                        "link_name": CUROBO_ATTACHED_OBJECT_LINK,
+                        "parent_link_name": PIPER_TOOL_LINK,
+                        "joint_name": "attached_object_fixed",
+                        "joint_type": "FIXED",
+                        "fixed_transform": [
+                            0.0,
+                            0.0,
+                            0.0,
+                            1.0,
+                            0.0,
+                            0.0,
+                            0.0,
+                        ],
+                    }
+                },
+                "cspace": {
+                    "joint_names": list(PIPER_ARM_JOINT_NAMES),
+                    "default_joint_position": list(PIPER_HOME_JOINT_POSITION),
+                    "cspace_distance_weight": [1.0, 1.0, 1.0, 0.8, 0.8, 0.6],
+                    "null_space_weight": [1.0, 1.0, 1.0, 0.5, 0.5, 0.4],
+                    "max_acceleration": [4.0, 4.0, 4.0, 6.0, 6.0, 6.0],
+                    "max_jerk": [80.0] * 6,
+                    "velocity_scale": [0.35] * 6,
+                    "acceleration_scale": [0.40] * 6,
+                },
+            }
+        }
+    }
+
+
+def build_curobo_planner(seed: int) -> Any:
+    """Create an actual GPU cuRobo planner from the in-memory Piper config."""
+
+    import torch
+    from curobo.motion_planner import MotionPlanner, MotionPlannerCfg
+    from curobo.types import DeviceCfg
+
+    planner_config = MotionPlannerCfg.create(
+        robot=build_curobo_robot_config(),
+        collision_cache=dict(CUROBO_COLLISION_CACHE),
+        self_collision_check=True,
+        device_cfg=DeviceCfg(device=CUROBO_DEVICE, dtype=torch.float32),
+        num_ik_seeds=CUROBO_NUM_IK_SEEDS,
+        num_trajopt_seeds=CUROBO_NUM_TRAJOPT_SEEDS,
+        position_tolerance=CUROBO_POSITION_TOLERANCE_M,
+        orientation_tolerance=CUROBO_ORIENTATION_TOLERANCE_RAD,
+        use_cuda_graph=False,
+        random_seed=seed,
+        optimizer_collision_activation_distance=(
+            CUROBO_COLLISION_ACTIVATION_DISTANCE_M
+        ),
+        interpolation_dt=CONTROL_DT,
+        interpolation_buffer_size=CUROBO_MAX_TRAJECTORY_STEPS,
+    )
+    planner = MotionPlanner(planner_config)
+    if planner.joint_names != list(PIPER_ARM_JOINT_NAMES):
+        planner.destroy()
+        raise ValueError(
+            f"cuRobo joint order {planner.joint_names} does not match "
+            f"{PIPER_ARM_JOINT_NAMES}"
+        )
+    if planner.tool_frames != [PIPER_TOOL_LINK]:
+        planner.destroy()
+        raise ValueError(
+            f"cuRobo tool frames {planner.tool_frames} do not contain "
+            f"{PIPER_TOOL_LINK}"
+        )
+    return planner
+
+
+def _robot_spec_by_name(name: str) -> RobotSpec:
+    """Resolve a serialized robot name without accepting arbitrary poses."""
+
+    for spec in ROBOT_SPECS:
+        if spec.name == name:
+            return spec
+    raise ValueError(f"Unknown Piper name {name!r}")
+
+
+def _pose_spec_from_mapping(value: dict[str, Any]) -> PoseSpec:
+    """Decode one JSON pose while retaining the program's pose convention."""
+
+    position = value["position"]
+    quaternion = value["quaternion"]
+    if len(position) != 3 or len(quaternion) != 4:
+        raise ValueError(f"Invalid serialized pose: {value!r}")
+    return PoseSpec(
+        tuple(float(component) for component in position),  # type: ignore[arg-type]
+        normalize_quaternion(quaternion),
+    )
+
+
+def _curobo_report_to_json(report: dict[str, Any]) -> dict[str, Any]:
+    """Convert the one ndarray in a planner report to plain JSON values."""
+
+    converted = dict(report)
+    converted["joint_position"] = report["joint_position"].tolist()
+    return converted
+
+
+def attach_curobo_doll(
+    planner: Any,
+    robot: RobotSpec,
+    current_joint_position: Sequence[float],
+    asset_id: str,
+    doll_world_pose: PoseSpec,
+) -> dict[str, Any]:
+    """Attach a conservative doll sphere model to cuRobo's tool link."""
+
+    import torch
+    from curobo.types import JointState, Pose
+
+    specs_by_id = {spec.asset_id: spec for spec in get_doll_specs()}
+    spec = specs_by_id[asset_id]
+    sphere_count = min(
+        CUROBO_ATTACHED_OBJECT_SPHERES,
+        max(1, math.ceil(spec.height / (2.0 * spec.footprint_radius))),
+    )
+    if sphere_count == 1:
+        sphere_z = [0.0]
+    else:
+        half_span = max(0.0, spec.height / 2.0 - spec.footprint_radius)
+        sphere_z = [
+            -half_span + 2.0 * half_span * index / (sphere_count - 1)
+            for index in range(sphere_count)
+        ]
+    collision_radius = max(
+        0.005,
+        spec.footprint_radius - CUROBO_ATTACHED_OBJECT_INSET_M,
+    )
+    sphere_tensor = torch.as_tensor(
+        [
+            [0.0, 0.0, center_z, collision_radius]
+            for center_z in sphere_z
+        ],
+        device=CUROBO_DEVICE,
+        dtype=torch.float32,
+    )
+    current_state = JointState.from_position(
+        torch.as_tensor(
+            [[float(value) for value in current_joint_position]],
+            device=CUROBO_DEVICE,
+            dtype=torch.float32,
+        ),
+        joint_names=list(PIPER_ARM_JOINT_NAMES),
+    )
+    base_object_pose = world_pose_to_robot_base(robot, doll_world_pose)
+    world_objects_pose_offset = Pose(
+        position=torch.as_tensor(
+            [base_object_pose.position],
+            device=CUROBO_DEVICE,
+            dtype=torch.float32,
+        ),
+        quaternion=torch.as_tensor(
+            [base_object_pose.quaternion],
+            device=CUROBO_DEVICE,
+            dtype=torch.float32,
+        ),
+    )
+    planner.attachment_manager.update(
+        sphere_tensor,
+        current_state,
+        link_name=CUROBO_ATTACHED_OBJECT_LINK,
+        world_objects_pose_offset=world_objects_pose_offset,
+    )
+    return {
+        "asset_id": asset_id,
+        "sphere_count": sphere_count,
+        "physical_footprint_radius_m": spec.footprint_radius,
+        "collision_sphere_radius_m": collision_radius,
+        "collision_inset_m": CUROBO_ATTACHED_OBJECT_INSET_M,
+        "sphere_centers_object_m": [
+            [0.0, 0.0, center_z] for center_z in sphere_z
+        ],
+        "world_pose": asdict(doll_world_pose),
+        "base_pose": asdict(base_object_pose),
+    }
+
+
+def run_curobo_planner_worker(seed: int) -> int:
+    """Serve cuRobo planning requests in a Warp-isolated child process.
+
+    Isaac Sim 5.1 loads its bundled Warp 1.8 module into the simulation
+    process.  The installed cuRobo build uses Warp 1.15 APIs, so importing
+    both packages in one interpreter is unsafe.  This mode starts before any
+    Isaac import and owns one persistent GPU planner.
+    """
+
+    protocol_stdout = sys.stdout
+
+    def respond(payload: dict[str, Any]) -> None:
+        print(
+            CUROBO_WORKER_RESPONSE_PREFIX
+            + json.dumps(payload, separators=(",", ":"), sort_keys=True),
+            file=protocol_stdout,
+            flush=True,
+        )
+
+    planner: Any | None = None
+    try:
+        planner = build_curobo_planner(seed)
+        respond({"ok": True, "command": "ready", "seed": seed})
+        for raw_line in sys.stdin:
+            try:
+                request = json.loads(raw_line)
+                command = request["command"]
+                if command == "shutdown":
+                    respond({"ok": True, "command": command})
+                    return 0
+                active_robot = _robot_spec_by_name(request["active_robot"])
+                if command == "attach":
+                    report = attach_curobo_doll(
+                        planner,
+                        active_robot,
+                        request["current_joint_position"],
+                        request["asset_id"],
+                        _pose_spec_from_mapping(request["doll_world_pose"]),
+                    )
+                    respond(
+                        {"ok": True, "command": command, "report": report}
+                    )
+                    continue
+                if command == "detach":
+                    planner.attachment_manager.detach(
+                        link_name=CUROBO_ATTACHED_OBJECT_LINK
+                    )
+                    respond({"ok": True, "command": command})
+                    continue
+                other_robot = _robot_spec_by_name(request["other_robot"])
+                if active_robot.name == other_robot.name:
+                    raise ValueError("Active and other Piper must differ")
+                doll_poses = {
+                    asset_id: _pose_spec_from_mapping(pose)
+                    for asset_id, pose in request.get("doll_poses", {}).items()
+                }
+                scene = build_curobo_scene(
+                    planner,
+                    active_robot,
+                    other_robot,
+                    request["other_joint_position"],
+                    doll_poses,
+                    request.get("excluded_doll_ids", ()),
+                )
+                planner.update_world(scene)
+                if command == "plan_position":
+                    report = plan_curobo_to_position(
+                        planner,
+                        active_robot,
+                        request["current_joint_position"],
+                        request["world_goal_position"],
+                        prefer_tool_x_down=bool(
+                            request.get("prefer_tool_x_down", True)
+                        ),
+                        preferred_world_orientation=request.get(
+                            "preferred_world_orientation"
+                        ),
+                    )
+                elif command == "plan_pose":
+                    report = plan_curobo_pose(
+                        planner,
+                        active_robot,
+                        request["current_joint_position"],
+                        _pose_spec_from_mapping(request["world_goal"]),
+                    )
+                elif command == "plan_joint":
+                    report = plan_curobo_joint_goal(
+                        planner,
+                        active_robot,
+                        request["current_joint_position"],
+                        request["goal_joint_position"],
+                    )
+                else:
+                    raise ValueError(f"Unknown cuRobo worker command {command!r}")
+                respond(
+                    {
+                        "ok": True,
+                        "command": command,
+                        "report": _curobo_report_to_json(report),
+                    }
+                )
+            except Exception as error:
+                respond(
+                    {
+                        "ok": False,
+                        "error_type": type(error).__name__,
+                        "error": str(error),
+                    }
+                )
+    except Exception as error:
+        respond(
+            {
+                "ok": False,
+                "command": "ready",
+                "error_type": type(error).__name__,
+                "error": str(error),
+            }
+        )
+        return 1
+    finally:
+        if planner is not None:
+            planner.destroy()
+    return 0
+
+
+class CuroboPlannerWorker:
+    """Small synchronous client for the isolated persistent planner."""
+
+    def __init__(self, seed: int) -> None:
+        self.seed = int(seed)
+        self._process = subprocess.Popen(
+            [
+                sys.executable,
+                str(Path(__file__).resolve()),
+                "--mode",
+                "planner-worker",
+                "--seed",
+                str(self.seed),
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        self._diagnostic_lines: list[str] = []
+        ready = self._read_response()
+        if not ready.get("ok") or ready.get("command") != "ready":
+            self.close()
+            raise RuntimeError(f"cuRobo worker startup failed: {ready}")
+
+    @property
+    def diagnostic_lines(self) -> tuple[str, ...]:
+        return tuple(self._diagnostic_lines)
+
+    def _read_response(self) -> dict[str, Any]:
+        stdout = self._process.stdout
+        if stdout is None:
+            raise RuntimeError("cuRobo worker stdout is unavailable")
+        selector = selectors.DefaultSelector()
+        selector.register(stdout, selectors.EVENT_READ)
+        try:
+            while True:
+                if not selector.select(CUROBO_WORKER_TIMEOUT_S):
+                    raise TimeoutError(
+                        "cuRobo worker exceeded "
+                        f"{CUROBO_WORKER_TIMEOUT_S:.1f} s"
+                    )
+                line = stdout.readline()
+                if not line:
+                    return_code = self._process.poll()
+                    raise RuntimeError(
+                        "cuRobo worker exited before responding "
+                        f"(return code {return_code}); tail="
+                        f"{self._diagnostic_lines[-20:]}"
+                    )
+                stripped = line.rstrip()
+                if stripped.startswith(CUROBO_WORKER_RESPONSE_PREFIX):
+                    return json.loads(
+                        stripped[len(CUROBO_WORKER_RESPONSE_PREFIX) :]
+                    )
+                self._diagnostic_lines.append(stripped)
+                del self._diagnostic_lines[:-200]
+        finally:
+            selector.close()
+
+    def request(self, payload: dict[str, Any]) -> dict[str, Any]:
+        stdin = self._process.stdin
+        if stdin is None or self._process.poll() is not None:
+            raise RuntimeError("cuRobo worker is not running")
+        stdin.write(json.dumps(payload, separators=(",", ":")) + "\n")
+        stdin.flush()
+        response = self._read_response()
+        if not response.get("ok"):
+            raise RuntimeError(
+                "cuRobo worker planning failed: "
+                f"{response.get('error_type')}: {response.get('error')}"
+            )
+        return response
+
+    def plan_position(
+        self,
+        *,
+        active_robot: RobotSpec,
+        other_robot: RobotSpec,
+        current_joint_position: Sequence[float],
+        other_joint_position: Sequence[float],
+        world_goal_position: Sequence[float],
+        doll_poses: dict[str, PoseSpec] | None = None,
+        excluded_doll_ids: Sequence[str] = (),
+        prefer_tool_x_down: bool = True,
+        preferred_world_orientation: Sequence[float] | None = None,
+    ) -> dict[str, Any]:
+        response = self.request(
+            {
+                "command": "plan_position",
+                "active_robot": active_robot.name,
+                "other_robot": other_robot.name,
+                "current_joint_position": [
+                    float(value) for value in current_joint_position
+                ],
+                "other_joint_position": [
+                    float(value) for value in other_joint_position
+                ],
+                "world_goal_position": [
+                    float(value) for value in world_goal_position
+                ],
+                "doll_poses": {
+                    asset_id: asdict(pose)
+                    for asset_id, pose in (doll_poses or {}).items()
+                },
+                "excluded_doll_ids": list(excluded_doll_ids),
+                "prefer_tool_x_down": prefer_tool_x_down,
+                "preferred_world_orientation": (
+                    None
+                    if preferred_world_orientation is None
+                    else [
+                        float(value)
+                        for value in preferred_world_orientation
+                    ]
+                ),
+            }
+        )
+        return response["report"]
+
+    def plan_joint(
+        self,
+        *,
+        active_robot: RobotSpec,
+        other_robot: RobotSpec,
+        current_joint_position: Sequence[float],
+        other_joint_position: Sequence[float],
+        goal_joint_position: Sequence[float],
+        doll_poses: dict[str, PoseSpec] | None = None,
+        excluded_doll_ids: Sequence[str] = (),
+    ) -> dict[str, Any]:
+        response = self.request(
+            {
+                "command": "plan_joint",
+                "active_robot": active_robot.name,
+                "other_robot": other_robot.name,
+                "current_joint_position": [
+                    float(value) for value in current_joint_position
+                ],
+                "other_joint_position": [
+                    float(value) for value in other_joint_position
+                ],
+                "goal_joint_position": [
+                    float(value) for value in goal_joint_position
+                ],
+                "doll_poses": {
+                    asset_id: asdict(pose)
+                    for asset_id, pose in (doll_poses or {}).items()
+                },
+                "excluded_doll_ids": list(excluded_doll_ids),
+            }
+        )
+        return response["report"]
+
+    def plan_pose(
+        self,
+        *,
+        active_robot: RobotSpec,
+        other_robot: RobotSpec,
+        current_joint_position: Sequence[float],
+        other_joint_position: Sequence[float],
+        world_goal: PoseSpec,
+        doll_poses: dict[str, PoseSpec] | None = None,
+        excluded_doll_ids: Sequence[str] = (),
+    ) -> dict[str, Any]:
+        response = self.request(
+            {
+                "command": "plan_pose",
+                "active_robot": active_robot.name,
+                "other_robot": other_robot.name,
+                "current_joint_position": [
+                    float(value) for value in current_joint_position
+                ],
+                "other_joint_position": [
+                    float(value) for value in other_joint_position
+                ],
+                "world_goal": asdict(world_goal),
+                "doll_poses": {
+                    asset_id: asdict(pose)
+                    for asset_id, pose in (doll_poses or {}).items()
+                },
+                "excluded_doll_ids": list(excluded_doll_ids),
+            }
+        )
+        return response["report"]
+
+    def attach(
+        self,
+        *,
+        active_robot: RobotSpec,
+        current_joint_position: Sequence[float],
+        asset_id: str,
+        doll_world_pose: PoseSpec,
+    ) -> dict[str, Any]:
+        response = self.request(
+            {
+                "command": "attach",
+                "active_robot": active_robot.name,
+                "current_joint_position": [
+                    float(value) for value in current_joint_position
+                ],
+                "asset_id": asset_id,
+                "doll_world_pose": asdict(doll_world_pose),
+            }
+        )
+        return response["report"]
+
+    def detach(self, *, active_robot: RobotSpec) -> None:
+        self.request(
+            {
+                "command": "detach",
+                "active_robot": active_robot.name,
+            }
+        )
+
+    def close(self) -> None:
+        process = self._process
+        if process.poll() is not None:
+            return
+        try:
+            self.request({"command": "shutdown"})
+            process.wait(timeout=10.0)
+        except Exception:
+            process.terminate()
+            try:
+                process.wait(timeout=5.0)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=5.0)
+
+    def __enter__(self) -> CuroboPlannerWorker:
+        return self
+
+    def __exit__(self, *_: Any) -> None:
+        self.close()
+
+
+def build_curobo_scene(
+    planner: Any,
+    active_robot: RobotSpec,
+    other_robot: RobotSpec,
+    other_joint_position: Sequence[float],
+    doll_poses: dict[str, PoseSpec] | None = None,
+    excluded_doll_ids: Sequence[str] = (),
+) -> Any:
+    """Build the active arm's collision world in its own base frame."""
+
+    import torch
+    from curobo.scene import Cuboid, Scene, Sphere
+    from curobo.types import JointState
+
+    cuboids: list[Any] = []
+    spheres: list[Any] = []
+
+    def cuboid_from_world(
+        name: str,
+        pose: PoseSpec,
+        dims: Sequence[float],
+    ) -> None:
+        base_pose = world_pose_to_robot_base(active_robot, pose)
+        cuboids.append(
+            Cuboid(
+                name=name,
+                pose=[*base_pose.position, *base_pose.quaternion],
+                dims=[float(value) for value in dims],
+            )
+        )
+
+    cuboid_from_world(
+        "table",
+        PoseSpec(TABLE_POSITION, TABLE_ORIENTATION),
+        TABLE_SIZE,
+    )
+    cuboid_from_world(
+        "ground",
+        PoseSpec(GROUND_POSITION, GROUND_ORIENTATION),
+        GROUND_SIZE,
+    )
+
+    stand_source_corners = [
+        (x, y, z)
+        for x in (
+            CAMERA_STAND_SOURCE_BBOX_MIN[0],
+            CAMERA_STAND_SOURCE_BBOX_MAX[0],
+        )
+        for y in (
+            CAMERA_STAND_SOURCE_BBOX_MIN[1],
+            CAMERA_STAND_SOURCE_BBOX_MAX[1],
+        )
+        for z in (
+            CAMERA_STAND_SOURCE_BBOX_MIN[2],
+            CAMERA_STAND_SOURCE_BBOX_MAX[2],
+        )
+    ]
+    stand_world_corners = [
+        tuple(
+            CAMERA_STAND_POSITION[index] + rotated[index]
+            for index in range(3)
+        )
+        for rotated in (
+            _quaternion_rotate_vector(CAMERA_STAND_ORIENTATION, corner)
+            for corner in stand_source_corners
+        )
+    ]
+    stand_min = tuple(
+        min(corner[index] for corner in stand_world_corners)
+        for index in range(3)
+    )
+    stand_max = tuple(
+        max(corner[index] for corner in stand_world_corners)
+        for index in range(3)
+    )
+    cuboid_from_world(
+        "camera_stand_conservative_bbox",
+        PoseSpec(
+            tuple((stand_min[index] + stand_max[index]) / 2.0 for index in range(3)),
+            IDENTITY_QUATERNION,
+        ),
+        tuple(stand_max[index] - stand_min[index] for index in range(3)),
+    )
+
+    # The room is far outside the tabletop workspace.  Four conservative wall
+    # slabs retain it in the collision world without duplicating its floor.
+    room_x_min, room_x_max = -4.6153, 4.6153
+    room_y_min, room_y_max = -3.4970, 4.9532
+    room_z_center, room_height = 2.12, 4.38
+    wall_thickness = 0.05
+    cuboid_from_world(
+        "room_wall_x_min",
+        PoseSpec((room_x_min, 0.7281, room_z_center), IDENTITY_QUATERNION),
+        (wall_thickness, room_y_max - room_y_min, room_height),
+    )
+    cuboid_from_world(
+        "room_wall_x_max",
+        PoseSpec((room_x_max, 0.7281, room_z_center), IDENTITY_QUATERNION),
+        (wall_thickness, room_y_max - room_y_min, room_height),
+    )
+    cuboid_from_world(
+        "room_wall_y_min",
+        PoseSpec((0.0, room_y_min, room_z_center), IDENTITY_QUATERNION),
+        (room_x_max - room_x_min, wall_thickness, room_height),
+    )
+    cuboid_from_world(
+        "room_wall_y_max",
+        PoseSpec((0.0, room_y_max, room_z_center), IDENTITY_QUATERNION),
+        (room_x_max - room_x_min, wall_thickness, room_height),
+    )
+
+    cuboid_from_world(
+        f"{other_robot.name}_base",
+        PoseSpec(
+            (
+                other_robot.base_pose.position[0],
+                other_robot.base_pose.position[1],
+                other_robot.base_pose.position[2] + 0.060,
+            ),
+            other_robot.base_pose.quaternion,
+        ),
+        (0.130, 0.130, 0.120),
+    )
+    other_state = JointState.from_position(
+        torch.as_tensor(
+            [list(float(value) for value in other_joint_position)],
+            device=CUROBO_DEVICE,
+            dtype=torch.float32,
+        ),
+        joint_names=list(PIPER_ARM_JOINT_NAMES),
+    )
+    other_spheres = (
+        planner.compute_kinematics(other_state)
+        .robot_spheres.detach()
+        .cpu()
+        .reshape(-1, 4)
+        .tolist()
+    )
+    for index, (x, y, z, radius) in enumerate(other_spheres):
+        if radius <= 0.0:
+            continue
+        world_offset = _quaternion_rotate_vector(
+            other_robot.base_pose.quaternion,
+            (x, y, z),
+        )
+        world_center = tuple(
+            other_robot.base_pose.position[axis] + world_offset[axis]
+            for axis in range(3)
+        )
+        base_center = world_pose_to_robot_base(
+            active_robot,
+            PoseSpec(world_center, IDENTITY_QUATERNION),
+        ).position
+        spheres.append(
+            Sphere(
+                name=f"{other_robot.name}_sphere_{index:02d}",
+                pose=[*base_center, 1.0, 0.0, 0.0, 0.0],
+                radius=float(radius),
+            )
+        )
+
+    if doll_poses:
+        specs_by_id = {spec.asset_id: spec for spec in get_doll_specs()}
+        excluded = set(excluded_doll_ids)
+        for asset_id, world_pose in doll_poses.items():
+            if asset_id in excluded:
+                continue
+            spec = specs_by_id[asset_id]
+            radius = spec.footprint_radius
+            count = max(1, math.ceil(spec.height / (2.0 * radius)))
+            bottom_z = world_pose.position[2] - spec.height / 2.0
+            if count == 1:
+                z_values = [bottom_z + spec.height / 2.0]
+            else:
+                z_values = [
+                    bottom_z
+                    + radius
+                    + index
+                    * (spec.height - 2.0 * radius)
+                    / (count - 1)
+                    for index in range(count)
+                ]
+            for index, center_z in enumerate(z_values):
+                base_center = world_pose_to_robot_base(
+                    active_robot,
+                    PoseSpec(
+                        (
+                            world_pose.position[0],
+                            world_pose.position[1],
+                            center_z,
+                        ),
+                        IDENTITY_QUATERNION,
+                    ),
+                ).position
+                spheres.append(
+                    Sphere(
+                        name=f"doll_{asset_id}_{index}",
+                        pose=[*base_center, 1.0, 0.0, 0.0, 0.0],
+                        radius=radius,
+                    )
+                )
+    if len(cuboids) > CUROBO_COLLISION_CACHE["cuboid"]:
+        raise ValueError("cuRobo cuboid cache is too small for the planning world")
+    if len(spheres) > CUROBO_COLLISION_CACHE["sphere"]:
+        raise ValueError("cuRobo sphere cache is too small for the planning world")
+    return Scene(cuboid=cuboids, sphere=spheres)
+
+
+def plan_curobo_pose(
+    planner: Any,
+    robot: RobotSpec,
+    current_joint_position: Sequence[float],
+    world_goal: PoseSpec,
+) -> dict[str, Any]:
+    """Plan one collision-checked six-joint trajectory with actual cuRobo."""
+
+    import torch
+    from curobo.types import GoalToolPose, JointState, Pose
+
+    base_goal = world_pose_to_robot_base(robot, world_goal)
+    current_state = JointState.from_position(
+        torch.as_tensor(
+            [list(float(value) for value in current_joint_position)],
+            device=CUROBO_DEVICE,
+            dtype=torch.float32,
+        ),
+        joint_names=list(PIPER_ARM_JOINT_NAMES),
+    )
+    goal_pose = Pose(
+        position=torch.as_tensor(
+            [base_goal.position],
+            device=CUROBO_DEVICE,
+            dtype=torch.float32,
+        ),
+        quaternion=torch.as_tensor(
+            [base_goal.quaternion],
+            device=CUROBO_DEVICE,
+            dtype=torch.float32,
+        ),
+    )
+    goal = GoalToolPose.from_poses(
+        {PIPER_TOOL_LINK: goal_pose},
+        ordered_tool_frames=[PIPER_TOOL_LINK],
+    )
+    result = planner.plan_pose(
+        goal,
+        current_state,
+        max_attempts=CUROBO_MAX_PLAN_ATTEMPTS,
+        enable_graph_attempt=1,
+    )
+    if result is None or not bool(result.success.any().item()):
+        raise RuntimeError(
+            f"cuRobo failed to plan {robot.name} to world goal "
+            f"{world_goal.position}"
+        )
+    trajectory = result.get_interpolated_plan()
+    positions = _extract_curobo_arm_positions(trajectory)
+    if positions.shape[0] > CUROBO_MAX_TRAJECTORY_STEPS:
+        raise RuntimeError(
+            f"cuRobo trajectory has {positions.shape[0]} steps, over "
+            f"{CUROBO_MAX_TRAJECTORY_STEPS}"
+        )
+    return {
+        "joint_position": positions.numpy(),
+        "joint_names": list(PIPER_ARM_JOINT_NAMES),
+        "planning_time_s": float(result.total_time),
+        "solve_time_s": float(result.solve_time),
+        "world_goal": asdict(world_goal),
+        "base_goal": asdict(base_goal),
+        "success": True,
+    }
+
+
+def _extract_curobo_arm_positions(trajectory: Any) -> Any:
+    """Extract the six planned arm joints from cuRobo's dense state."""
+
+    trajectory_width = trajectory.position.shape[-1]
+    trajectory_positions = trajectory.position.detach().cpu().reshape(
+        -1,
+        trajectory_width,
+    )
+    arm_indices = [
+        trajectory.joint_names.index(joint_name)
+        for joint_name in PIPER_ARM_JOINT_NAMES
+    ]
+    return trajectory_positions[:, arm_indices]
+
+
+def plan_curobo_to_position(
+    planner: Any,
+    robot: RobotSpec,
+    current_joint_position: Sequence[float],
+    world_goal_position: Sequence[float],
+    *,
+    prefer_tool_x_down: bool = True,
+    preferred_world_orientation: Sequence[float] | None = None,
+) -> dict[str, Any]:
+    """Use cuRobo position IK plus collision-checked c-space planning.
+
+    Piper's restricted wrist range makes a single exact vertical tool
+    quaternion unnecessarily brittle.  cuRobo therefore generates a finite
+    set of position-valid IK solutions; solutions whose tool +X points most
+    downward are tried first, and cuRobo validates and plans every selected
+    c-space trajectory.
+    """
+
+    import torch
+    from curobo.types import GoalToolPose, JointState, Pose, ToolPoseCriteria
+
+    joint_names = list(PIPER_ARM_JOINT_NAMES)
+    current_state = JointState.from_position(
+        torch.as_tensor(
+            [list(float(value) for value in current_joint_position)],
+            device=CUROBO_DEVICE,
+            dtype=torch.float32,
+        ),
+        joint_names=joint_names,
+    )
+    base_goal = world_pose_to_robot_base(
+        robot,
+        PoseSpec(
+            tuple(float(value) for value in world_goal_position),  # type: ignore[arg-type]
+            IDENTITY_QUATERNION,
+        ),
+    )
+    goal_pose = Pose(
+        position=torch.as_tensor(
+            [base_goal.position],
+            device=CUROBO_DEVICE,
+            dtype=torch.float32,
+        ),
+        quaternion=torch.as_tensor(
+            [IDENTITY_QUATERNION],
+            device=CUROBO_DEVICE,
+            dtype=torch.float32,
+        ),
+    )
+    goal = GoalToolPose.from_poses(
+        {PIPER_TOOL_LINK: goal_pose},
+        ordered_tool_frames=[PIPER_TOOL_LINK],
+    )
+
+    # Change only the IK rollout.  Mutating the trajectory optimizer's pose
+    # criteria also affects c-space planning in this cuRobo version.
+    planner.ik_solver.update_tool_pose_criteria(
+        {PIPER_TOOL_LINK: ToolPoseCriteria.track_position()}
+    )
+    try:
+        ik_result = planner.ik_solver.solve_pose(
+            goal,
+            return_seeds=CUROBO_NUM_IK_SEEDS,
+            current_state=current_state,
+        )
+    finally:
+        planner.ik_solver.update_tool_pose_criteria(
+            {PIPER_TOOL_LINK: ToolPoseCriteria()}
+        )
+    if not bool(ik_result.success.any().item()):
+        raise RuntimeError(
+            f"cuRobo position IK failed for {robot.name} at "
+            f"{tuple(world_goal_position)}"
+        )
+
+    solutions = ik_result.solution[ik_result.success]
+    solution_states = JointState.from_position(
+        solutions,
+        joint_names=joint_names,
+    )
+    tool_poses = planner.compute_kinematics(solution_states).tool_poses
+    tool_quaternions = tool_poses.quaternion.reshape(-1, 4)
+    w, x, y, z = tool_quaternions.unbind(-1)
+    tool_x_world_z = 2.0 * (x * z - w * y)
+    joint_distance = torch.linalg.vector_norm(
+        solutions - current_state.position,
+        dim=-1,
+    )
+    orientation_error = None
+    if preferred_world_orientation is not None:
+        preferred_base_orientation = world_pose_to_robot_base(
+            robot,
+            PoseSpec(
+                tuple(float(value) for value in world_goal_position),  # type: ignore[arg-type]
+                normalize_quaternion(preferred_world_orientation),
+            ),
+        ).quaternion
+        preferred_quaternion = torch.as_tensor(
+            preferred_base_orientation,
+            device=CUROBO_DEVICE,
+            dtype=torch.float32,
+        )
+        orientation_dot = torch.abs(
+            torch.sum(tool_quaternions * preferred_quaternion, dim=-1)
+        ).clamp(max=1.0)
+        orientation_error = 2.0 * torch.acos(orientation_dot)
+        candidate_score = orientation_error + 0.02 * joint_distance
+    elif prefer_tool_x_down:
+        candidate_score = tool_x_world_z + 0.02 * joint_distance
+    else:
+        candidate_score = 0.02 * joint_distance
+
+    failures: list[dict[str, Any]] = []
+    for candidate_index in torch.argsort(candidate_score).tolist():
+        candidate = solutions[candidate_index : candidate_index + 1]
+        candidate_state = JointState.from_position(
+            candidate,
+            joint_names=joint_names,
+        )
+        result = planner.plan_cspace(
+            candidate_state,
+            current_state,
+            max_attempts=CUROBO_MAX_PLAN_ATTEMPTS,
+            enable_graph_attempt=1,
+        )
+        if result is None or not bool(result.success.any().item()):
+            failures.append(
+                {
+                    "candidate_index": candidate_index,
+                    "tool_x_world_z": float(
+                        tool_x_world_z[candidate_index].item()
+                    ),
+                }
+            )
+            continue
+        trajectory = result.get_interpolated_plan()
+        positions = _extract_curobo_arm_positions(trajectory)
+        if positions.shape[0] > CUROBO_MAX_TRAJECTORY_STEPS:
+            failures.append(
+                {
+                    "candidate_index": candidate_index,
+                    "trajectory_steps": int(positions.shape[0]),
+                }
+            )
+            continue
+        selected_base_pose = PoseSpec(
+            tuple(
+                float(value)
+                for value in tool_poses.position.reshape(-1, 3)[
+                    candidate_index
+                ]
+                .detach()
+                .cpu()
+                .tolist()
+            ),  # type: ignore[arg-type]
+            tuple(
+                float(value)
+                for value in tool_quaternions[candidate_index]
+                .detach()
+                .cpu()
+                .tolist()
+            ),  # type: ignore[arg-type]
+        )
+        selected_world_pose = robot_base_pose_to_world(
+            robot,
+            selected_base_pose,
+        )
+        return {
+            "joint_position": positions.numpy(),
+            "joint_names": joint_names,
+            "planning_time_s": float(result.total_time),
+            "solve_time_s": float(result.solve_time),
+            "ik_success_count": int(ik_result.success.sum().item()),
+            "selected_candidate_index": int(candidate_index),
+            "tool_x_world_z": float(
+                tool_x_world_z[candidate_index].item()
+            ),
+            "preferred_orientation_error_rad": (
+                None
+                if orientation_error is None
+                else float(orientation_error[candidate_index].item())
+            ),
+            "world_goal_position": [
+                float(value) for value in world_goal_position
+            ],
+            "selected_world_tool_pose": asdict(selected_world_pose),
+            "failed_candidates": failures,
+            "success": True,
+        }
+    raise RuntimeError(
+        f"cuRobo found {solutions.shape[0]} IK solutions for {robot.name} at "
+        f"{tuple(world_goal_position)}, but no collision-free trajectory; "
+        f"failures={failures}"
+    )
+
+
+def plan_curobo_joint_goal(
+    planner: Any,
+    robot: RobotSpec,
+    current_joint_position: Sequence[float],
+    goal_joint_position: Sequence[float],
+) -> dict[str, Any]:
+    """Plan a collision-checked cuRobo trajectory to an explicit arm state."""
+
+    import torch
+    from curobo.types import JointState
+
+    joint_names = list(PIPER_ARM_JOINT_NAMES)
+    current_state = JointState.from_position(
+        torch.as_tensor(
+            [list(float(value) for value in current_joint_position)],
+            device=CUROBO_DEVICE,
+            dtype=torch.float32,
+        ),
+        joint_names=joint_names,
+    )
+    goal_state = JointState.from_position(
+        torch.as_tensor(
+            [list(float(value) for value in goal_joint_position)],
+            device=CUROBO_DEVICE,
+            dtype=torch.float32,
+        ),
+        joint_names=joint_names,
+    )
+    result = planner.plan_cspace(
+        goal_state,
+        current_state,
+        max_attempts=CUROBO_MAX_PLAN_ATTEMPTS,
+        enable_graph_attempt=1,
+    )
+    if result is None or not bool(result.success.any().item()):
+        raise RuntimeError(
+            f"cuRobo failed to plan {robot.name} from "
+            f"{tuple(current_joint_position)} to {tuple(goal_joint_position)}"
+        )
+    positions = _extract_curobo_arm_positions(
+        result.get_interpolated_plan()
+    )
+    if positions.shape[0] > CUROBO_MAX_TRAJECTORY_STEPS:
+        raise RuntimeError(
+            f"cuRobo trajectory has {positions.shape[0]} steps, over "
+            f"{CUROBO_MAX_TRAJECTORY_STEPS}"
+        )
+    return {
+        "joint_position": positions.numpy(),
+        "joint_names": joint_names,
+        "planning_time_s": float(result.total_time),
+        "solve_time_s": float(result.solve_time),
+        "goal_joint_position": [
+            float(value) for value in goal_joint_position
+        ],
+        "success": True,
+    }
 
 
 def _planar_distance(first: PoseSpec, second: PoseSpec) -> float:
@@ -1448,6 +2740,62 @@ def _command_position(
     )
 
 
+def execute_curobo_trajectory(
+    world: Any,
+    robot: Any,
+    trajectory_report: dict[str, Any],
+    *,
+    render: bool = False,
+    frame_callback: Any | None = None,
+) -> dict[str, Any]:
+    """Execute cuRobo's 30 Hz arm positions through the articulation drive."""
+
+    import numpy as np
+
+    positions = np.asarray(
+        trajectory_report["joint_position"],
+        dtype=np.float64,
+    )
+    if positions.ndim != 2 or positions.shape[1] != len(
+        PIPER_ARM_JOINT_NAMES
+    ):
+        raise ValueError(
+            f"Expected [T,6] cuRobo trajectory, found {positions.shape}"
+        )
+    physics_steps_per_control = (
+        PHYSICS_FREQUENCY_HZ // CONTROL_FREQUENCY_HZ
+    )
+    maximum_tracking_error = 0.0
+    for frame_index, command in enumerate(positions):
+        _command_position(robot, command, range(6))
+        for substep in range(physics_steps_per_control):
+            world.step(render=render and substep == physics_steps_per_control - 1)
+        actual = np.asarray(robot.get_joint_positions()[:6], dtype=np.float64)
+        tracking_error = float(np.max(np.abs(actual - command)))
+        maximum_tracking_error = max(maximum_tracking_error, tracking_error)
+        if frame_callback is not None:
+            frame_callback(frame_index, command, actual)
+
+    final_actual = np.asarray(robot.get_joint_positions()[:6], dtype=np.float64)
+    final_command = positions[-1]
+    final_error = float(np.max(np.abs(final_actual - final_command)))
+    if final_error > CUROBO_MAX_EXECUTION_ERROR_RAD:
+        raise RuntimeError(
+            f"cuRobo trajectory execution ended with {final_error:.6f} rad "
+            f"error, over {CUROBO_MAX_EXECUTION_ERROR_RAD:.6f}"
+        )
+    return {
+        "control_frames": int(positions.shape[0]),
+        "physics_steps": int(
+            positions.shape[0] * physics_steps_per_control
+        ),
+        "maximum_tracking_error_rad": maximum_tracking_error,
+        "final_tracking_error_rad": final_error,
+        "final_actual_joint_position": final_actual.tolist(),
+        "final_command_joint_position": final_command.tolist(),
+    }
+
+
 def _step_until(
     world: Any,
     predicate: Any,
@@ -1476,6 +2824,545 @@ def _xform_world_pose(prim_path: str, name: str) -> tuple[list[float], list[floa
     )
     position, quaternion = xform.get_world_pose()
     return position.tolist(), quaternion.tolist()
+
+
+def _simulation_grasp_joint_path(
+    robot: RobotSpec,
+    asset_id: str,
+) -> str:
+    return f"{GRASP_JOINT_ROOT}/{robot.name}_{asset_id}"
+
+
+def create_simulation_grasp_joint(
+    world: Any,
+    robot: RobotSpec,
+    asset_id: str,
+    doll: Any,
+) -> dict[str, Any]:
+    """Fix a physically contacted doll to link6 at its current relative pose."""
+
+    from pxr import Gf, Sdf, UsdPhysics  # type: ignore[import-not-found]
+
+    stage = world.stage
+    if not stage.GetPrimAtPath(GRASP_JOINT_ROOT):
+        stage.DefinePrim(GRASP_JOINT_ROOT, "Xform")
+    joint_path = _simulation_grasp_joint_path(robot, asset_id)
+    if stage.GetPrimAtPath(joint_path):
+        raise ValueError(f"Grasp joint already exists: {joint_path}")
+
+    body_path = f"{robot.prim_path}/{PIPER_WRIST_LINK}"
+    body_position, body_quaternion = _xform_world_pose(
+        body_path,
+        f"{robot.name}_{asset_id}_grasp_body",
+    )
+    doll_position, doll_quaternion = doll.get_world_pose()
+    relative_pose = pose_relative_to(
+        PoseSpec(tuple(body_position), tuple(body_quaternion)),
+        PoseSpec(
+            tuple(float(value) for value in doll_position),
+            tuple(float(value) for value in doll_quaternion),
+        ),
+    )
+
+    joint = UsdPhysics.FixedJoint.Define(stage, joint_path)
+    joint.CreateBody0Rel().SetTargets([Sdf.Path(body_path)])
+    joint.CreateBody1Rel().SetTargets([Sdf.Path(_doll_prim_path(asset_id))])
+    joint.CreateLocalPos0Attr(
+        Gf.Vec3f(*(float(value) for value in relative_pose.position))
+    )
+    joint.CreateLocalRot0Attr(
+        Gf.Quatf(
+            float(relative_pose.quaternion[0]),
+            Gf.Vec3f(
+                *(float(value) for value in relative_pose.quaternion[1:])
+            ),
+        )
+    )
+    joint.CreateLocalPos1Attr(Gf.Vec3f(0.0, 0.0, 0.0))
+    joint.CreateLocalRot1Attr(Gf.Quatf(1.0, Gf.Vec3f(0.0, 0.0, 0.0)))
+    joint.CreateCollisionEnabledAttr(False)
+    world.step(render=False)
+    return {
+        "joint_path": joint_path,
+        "body0": body_path,
+        "body1": _doll_prim_path(asset_id),
+        "body0_to_doll_pose": asdict(relative_pose),
+        "collision_enabled": False,
+    }
+
+
+def remove_simulation_grasp_joint(
+    world: Any,
+    robot: RobotSpec,
+    asset_id: str,
+) -> None:
+    joint_path = _simulation_grasp_joint_path(robot, asset_id)
+    if not world.stage.GetPrimAtPath(joint_path):
+        raise ValueError(f"Grasp joint does not exist: {joint_path}")
+    if not world.stage.RemovePrim(joint_path):
+        raise RuntimeError(f"Failed to remove grasp joint {joint_path}")
+    world.step(render=False)
+
+
+def run_curobo_motion_smoke(
+    world: Any,
+    robots: dict[str, Any],
+    *,
+    seed: int,
+    render: bool,
+) -> dict[str, Any]:
+    """Execute one real cuRobo reach and return trajectory in Isaac Sim."""
+
+    import numpy as np
+
+    active_spec = LEFT_PIPER
+    other_spec = RIGHT_PIPER
+    active_robot = robots[active_spec.name]
+    other_robot = robots[other_spec.name]
+    initial = validate_robots_at_home(robots, label="curobo_initial")
+    world_goal = (-0.18, -0.02, 0.96)
+
+    with CuroboPlannerWorker(seed) as worker:
+        reach_plan = worker.plan_position(
+            active_robot=active_spec,
+            other_robot=other_spec,
+            current_joint_position=active_robot.get_joint_positions()[:6],
+            other_joint_position=other_robot.get_joint_positions()[:6],
+            world_goal_position=world_goal,
+        )
+        reach_execution = execute_curobo_trajectory(
+            world,
+            active_robot,
+            reach_plan,
+            render=render,
+        )
+        reached_position, reached_quaternion = _xform_world_pose(
+            f"{active_spec.prim_path}/{PIPER_TOOL_REL_PATH}",
+            "left_curobo_reached_tool",
+        )
+        position_error = float(
+            np.linalg.norm(
+                np.asarray(reached_position, dtype=np.float64)
+                - np.asarray(world_goal, dtype=np.float64)
+            )
+        )
+        if position_error > 0.02:
+            raise RuntimeError(
+                f"Executed cuRobo reach missed by {position_error:.6f} m"
+            )
+
+        return_plan = worker.plan_joint(
+            active_robot=active_spec,
+            other_robot=other_spec,
+            current_joint_position=active_robot.get_joint_positions()[:6],
+            other_joint_position=other_robot.get_joint_positions()[:6],
+            goal_joint_position=PIPER_HOME_JOINT_POSITION,
+        )
+        return_execution = execute_curobo_trajectory(
+            world,
+            active_robot,
+            return_plan,
+            render=render,
+        )
+        diagnostics = list(worker.diagnostic_lines)
+
+    final = validate_robots_at_home(robots, label="curobo_final")
+    return {
+        "planner": "cuRobo MotionPlanner in isolated Warp process",
+        "planner_seed": seed,
+        "world_goal_position_m": list(world_goal),
+        "reached_tool_world_pose": {
+            "position": reached_position,
+            "quaternion": reached_quaternion,
+        },
+        "reach_position_error_m": position_error,
+        "reach_plan": reach_plan,
+        "reach_execution": reach_execution,
+        "return_plan": return_plan,
+        "return_execution": return_execution,
+        "worker_diagnostic_tail": diagnostics[-20:],
+        "initial_robots": initial,
+        "final_robots": final,
+    }
+
+
+def _current_doll_poses(dolls: dict[str, Any]) -> dict[str, PoseSpec]:
+    states = _doll_state_report(dolls)
+    return {
+        asset_id: PoseSpec(
+            tuple(state["position_m"]),  # type: ignore[arg-type]
+            tuple(state["quaternion_wxyz"]),  # type: ignore[arg-type]
+        )
+        for asset_id, state in states.items()
+    }
+
+
+def run_curobo_pick_place_smoke(
+    world: Any,
+    robots: dict[str, Any],
+    dolls: dict[str, Any],
+    *,
+    planner_seed: int,
+    render: bool,
+) -> dict[str, Any]:
+    """Pick, transport, place, and return home with one actual Piper."""
+
+    import numpy as np
+
+    asset_id = PICK_SMOKE_ASSET_ID
+    active_spec = LEFT_PIPER
+    other_spec = RIGHT_PIPER
+    active_robot = robots[active_spec.name]
+    other_robot = robots[other_spec.name]
+    doll = dolls[asset_id]
+    specs_by_id = {spec.asset_id: spec for spec in get_doll_specs()}
+    doll_spec = specs_by_id[asset_id]
+    target_by_id = {
+        placement.asset_id: placement
+        for placement in compute_doll_target_layout()
+    }
+    target_center = target_by_id[asset_id].pose.position
+    initial_robots = validate_robots_at_home(
+        robots,
+        label="pick_place_initial",
+    )
+    initial_doll_poses = _current_doll_poses(dolls)
+    initial_doll_pose = initial_doll_poses[asset_id]
+
+    plans: dict[str, Any] = {}
+    executions: dict[str, Any] = {}
+    grasp_joint: dict[str, Any] | None = None
+    attachment: dict[str, Any] | None = None
+
+    with CuroboPlannerWorker(planner_seed) as worker:
+        pregrasp_goal = (
+            initial_doll_pose.position[0],
+            initial_doll_pose.position[1],
+            initial_doll_pose.position[2] + PIPER_PREGRASP_CLEARANCE_M,
+        )
+        plans["pregrasp"] = worker.plan_position(
+            active_robot=active_spec,
+            other_robot=other_spec,
+            current_joint_position=active_robot.get_joint_positions()[:6],
+            other_joint_position=other_robot.get_joint_positions()[:6],
+            world_goal_position=pregrasp_goal,
+            doll_poses=_current_doll_poses(dolls),
+        )
+        executions["pregrasp"] = execute_curobo_trajectory(
+            world,
+            active_robot,
+            plans["pregrasp"],
+            render=render,
+        )
+        pregrasp_pose = _pose_spec_from_mapping(
+            plans["pregrasp"]["selected_world_tool_pose"]
+        )
+
+        grasp_goal = (
+            initial_doll_pose.position[0],
+            initial_doll_pose.position[1],
+            initial_doll_pose.position[2]
+            + PIPER_FINGER_CENTER_BELOW_TOOL_M,
+        )
+        plans["grasp"] = worker.plan_position(
+            active_robot=active_spec,
+            other_robot=other_spec,
+            current_joint_position=active_robot.get_joint_positions()[:6],
+            other_joint_position=other_robot.get_joint_positions()[:6],
+            world_goal_position=grasp_goal,
+            doll_poses=_current_doll_poses(dolls),
+            excluded_doll_ids=(asset_id,),
+            preferred_world_orientation=pregrasp_pose.quaternion,
+        )
+        executions["grasp"] = execute_curobo_trajectory(
+            world,
+            active_robot,
+            plans["grasp"],
+            render=render,
+        )
+
+        _command_position(
+            active_robot,
+            (PIPER_CLOSED_GRIPPER_POSITION,),
+            (6,),
+        )
+        for step in range(PICK_GRIPPER_CLOSE_STEPS):
+            world.step(render=render and step == PICK_GRIPPER_CLOSE_STEPS - 1)
+
+        tool_position, tool_quaternion = _xform_world_pose(
+            f"{active_spec.prim_path}/{PIPER_TOOL_REL_PATH}",
+            "left_pick_grasp_tool",
+        )
+        closed_doll_poses = _current_doll_poses(dolls)
+        closed_doll_pose = closed_doll_poses[asset_id]
+        finger_center_offset = _quaternion_rotate_vector(
+            tool_quaternion,
+            (PIPER_FINGER_CENTER_BELOW_TOOL_M, 0.0, 0.0),
+        )
+        finger_center = tuple(
+            tool_position[index] + finger_center_offset[index]
+            for index in range(3)
+        )
+        grasp_center_error = float(
+            np.linalg.norm(
+                np.asarray(finger_center, dtype=np.float64)
+                - np.asarray(closed_doll_pose.position, dtype=np.float64)
+            )
+        )
+        closed_separation = _finger_separation(
+            active_spec,
+            "pick_contact",
+        )
+        if grasp_center_error > doll_spec.footprint_radius + 0.02:
+            raise RuntimeError(
+                f"{asset_id}: finger centre missed doll by "
+                f"{grasp_center_error:.6f} m"
+            )
+        if closed_separation >= PIPER_OPEN_FINGER_SEPARATION_M - 0.005:
+            raise RuntimeError(
+                f"{asset_id}: gripper did not close around the doll; "
+                f"separation={closed_separation:.6f} m"
+            )
+
+        grasp_joint = create_simulation_grasp_joint(
+            world,
+            active_spec,
+            asset_id,
+            doll,
+        )
+        attached_tool_position, attached_tool_quaternion = _xform_world_pose(
+            f"{active_spec.prim_path}/{PIPER_TOOL_REL_PATH}",
+            "left_pick_attached_tool",
+        )
+        attached_doll_pose = _current_doll_poses(dolls)[asset_id]
+        attachment = worker.attach(
+            active_robot=active_spec,
+            current_joint_position=active_robot.get_joint_positions()[:6],
+            asset_id=asset_id,
+            doll_world_pose=attached_doll_pose,
+        )
+        attached_offset = tuple(
+            attached_doll_pose.position[index]
+            - attached_tool_position[index]
+            for index in range(3)
+        )
+        transport_orientation = tuple(attached_tool_quaternion)
+
+        lift_goal = PoseSpec(
+            (
+                attached_tool_position[0],
+                attached_tool_position[1],
+                attached_tool_position[2] + PIPER_LIFT_CLEARANCE_M,
+            ),
+            transport_orientation,
+        )
+        plans["lift"] = worker.plan_pose(
+            active_robot=active_spec,
+            other_robot=other_spec,
+            current_joint_position=active_robot.get_joint_positions()[:6],
+            other_joint_position=other_robot.get_joint_positions()[:6],
+            world_goal=lift_goal,
+            doll_poses=_current_doll_poses(dolls),
+            excluded_doll_ids=(asset_id,),
+        )
+        executions["lift"] = execute_curobo_trajectory(
+            world,
+            active_robot,
+            plans["lift"],
+            render=render,
+        )
+        lifted_doll_pose = _current_doll_poses(dolls)[asset_id]
+        lifted_distance = (
+            lifted_doll_pose.position[2] - attached_doll_pose.position[2]
+        )
+        if lifted_distance < PIPER_LIFT_CLEARANCE_M - 0.02:
+            raise RuntimeError(
+                f"{asset_id}: fixed grasp lifted only {lifted_distance:.6f} m"
+            )
+
+        preplace_object_center = (
+            target_center[0],
+            target_center[1],
+            target_center[2] + PIPER_PREPLACE_CLEARANCE_M,
+        )
+        preplace_goal = PoseSpec(
+            tuple(
+                preplace_object_center[index] - attached_offset[index]
+                for index in range(3)
+            ),
+            transport_orientation,
+        )
+        plans["preplace"] = worker.plan_pose(
+            active_robot=active_spec,
+            other_robot=other_spec,
+            current_joint_position=active_robot.get_joint_positions()[:6],
+            other_joint_position=other_robot.get_joint_positions()[:6],
+            world_goal=preplace_goal,
+            doll_poses=_current_doll_poses(dolls),
+            excluded_doll_ids=(asset_id,),
+        )
+        executions["preplace"] = execute_curobo_trajectory(
+            world,
+            active_robot,
+            plans["preplace"],
+            render=render,
+        )
+
+        place_goal = PoseSpec(
+            tuple(
+                target_center[index] - attached_offset[index]
+                for index in range(3)
+            ),
+            transport_orientation,
+        )
+        plans["place"] = worker.plan_pose(
+            active_robot=active_spec,
+            other_robot=other_spec,
+            current_joint_position=active_robot.get_joint_positions()[:6],
+            other_joint_position=other_robot.get_joint_positions()[:6],
+            world_goal=place_goal,
+            doll_poses=_current_doll_poses(dolls),
+            excluded_doll_ids=(asset_id,),
+        )
+        executions["place"] = execute_curobo_trajectory(
+            world,
+            active_robot,
+            plans["place"],
+            render=render,
+        )
+        constrained_place_pose = _current_doll_poses(dolls)[asset_id]
+        constrained_place_error = float(
+            np.linalg.norm(
+                np.asarray(constrained_place_pose.position, dtype=np.float64)
+                - np.asarray(target_center, dtype=np.float64)
+            )
+        )
+        if constrained_place_error > 0.015:
+            raise RuntimeError(
+                f"{asset_id}: constrained placement error is "
+                f"{constrained_place_error:.6f} m"
+            )
+
+        _command_position(
+            active_robot,
+            (PIPER_OPEN_GRIPPER_POSITION,),
+            (6,),
+        )
+        release_steps = _step_until(
+            world,
+            lambda: float(
+                np.max(
+                    np.abs(
+                        active_robot.get_joint_positions()[6:8]
+                        - PIPER_OPEN_GRIPPER_POSITION
+                    )
+                )
+            )
+            <= PIPER_GRIPPER_TOLERANCE_M,
+            maximum_steps=240,
+            description="left Piper gripper to open for release",
+        )
+        worker.detach(active_robot=active_spec)
+        remove_simulation_grasp_joint(
+            world,
+            active_spec,
+            asset_id,
+        )
+        grasp_joint["removed"] = True
+        for step in range(PICK_RELEASE_SETTLE_STEPS):
+            world.step(
+                render=render and step == PICK_RELEASE_SETTLE_STEPS - 1
+            )
+
+        released_tool_position, released_tool_quaternion = _xform_world_pose(
+            f"{active_spec.prim_path}/{PIPER_TOOL_REL_PATH}",
+            "left_pick_released_tool",
+        )
+        retreat_goal = PoseSpec(
+            (
+                released_tool_position[0],
+                released_tool_position[1],
+                released_tool_position[2] + PIPER_RETREAT_CLEARANCE_M,
+            ),
+            tuple(released_tool_quaternion),
+        )
+        plans["retreat"] = worker.plan_pose(
+            active_robot=active_spec,
+            other_robot=other_spec,
+            current_joint_position=active_robot.get_joint_positions()[:6],
+            other_joint_position=other_robot.get_joint_positions()[:6],
+            world_goal=retreat_goal,
+            doll_poses=_current_doll_poses(dolls),
+            excluded_doll_ids=(asset_id,),
+        )
+        executions["retreat"] = execute_curobo_trajectory(
+            world,
+            active_robot,
+            plans["retreat"],
+            render=render,
+        )
+        plans["home"] = worker.plan_joint(
+            active_robot=active_spec,
+            other_robot=other_spec,
+            current_joint_position=active_robot.get_joint_positions()[:6],
+            other_joint_position=other_robot.get_joint_positions()[:6],
+            goal_joint_position=PIPER_HOME_JOINT_POSITION,
+            doll_poses=_current_doll_poses(dolls),
+        )
+        executions["home"] = execute_curobo_trajectory(
+            world,
+            active_robot,
+            plans["home"],
+            render=render,
+        )
+        worker_diagnostics = list(worker.diagnostic_lines)
+
+    settled_report = settle_and_validate_dolls(world, dolls)
+    final_doll_state = settled_report["stable_states"][asset_id]
+    final_position_error = float(
+        np.linalg.norm(
+            np.asarray(final_doll_state["position_m"], dtype=np.float64)
+            - np.asarray(target_center, dtype=np.float64)
+        )
+    )
+    if final_position_error > MATRYOSHKA_POSITION_TOLERANCE:
+        raise RuntimeError(
+            f"{asset_id}: released placement error {final_position_error:.6f} m"
+        )
+    final_robots = validate_robots_at_home(
+        robots,
+        label="pick_place_final",
+    )
+    return {
+        "asset_id": asset_id,
+        "active_robot": active_spec.name,
+        "planner_seed": planner_seed,
+        "initial_doll_pose": asdict(initial_doll_pose),
+        "target_center_m": list(target_center),
+        "grasp": {
+            "finger_center_m": list(finger_center),
+            "center_error_m": grasp_center_error,
+            "closed_finger_separation_m": closed_separation,
+            "fixed_joint": grasp_joint,
+            "curobo_attachment": attachment,
+        },
+        "transport": {
+            "lifted_distance_m": lifted_distance,
+            "attached_tool_to_object_world_offset_m": list(attached_offset),
+        },
+        "release": {
+            "gripper_open_steps": release_steps,
+            "constrained_place_error_m": constrained_place_error,
+            "final_place_error_m": final_position_error,
+            "final_doll_state": final_doll_state,
+        },
+        "plans": plans,
+        "executions": executions,
+        "initial_robots": initial_robots,
+        "final_robots": final_robots,
+        "settled_dolls": settled_report,
+        "worker_diagnostic_tail": worker_diagnostics[-20:],
+    }
 
 
 def _finger_separation(spec: RobotSpec, label: str) -> float:
@@ -2484,6 +4371,9 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "robots",
             "cameras",
             "dolls",
+            "motion",
+            "pick",
+            "planner-worker",
             "demo",
             "collect",
             "replay",
@@ -2494,6 +4384,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--episodes", type=int, default=1)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--planner-seed", type=int, default=1)
     parser.add_argument("--episode", type=Path)
     parser.add_argument(
         "--output-dir", type=Path, default=REPOSITORY_ROOT / "dual_piper_output"
@@ -2504,7 +4395,17 @@ def build_argument_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_argument_parser().parse_args(argv)
-    if args.mode in {"audit", "scene", "robots", "cameras", "dolls"}:
+    if args.mode == "planner-worker":
+        return run_curobo_planner_worker(args.seed)
+    if args.mode in {
+        "audit",
+        "scene",
+        "robots",
+        "cameras",
+        "dolls",
+        "motion",
+        "pick",
+    }:
         # SimulationApp.close() shuts down the Python process in Isaac Sim 5.1,
         # so all useful output must be emitted and flushed before that call.
         validate_static_assets()
@@ -2540,6 +4441,59 @@ def main(argv: Sequence[str] | None = None) -> int:
                 world, args.output_dir / "robots" / preview_name
             )
             marker = "ROBOT_SMOKE_OK"
+        elif args.mode == "motion":
+            world = create_scene()
+            robots = create_robots(world)
+            report = {
+                "scene": validate_scene(world),
+                "motion": run_curobo_motion_smoke(
+                    world,
+                    robots,
+                    seed=args.planner_seed,
+                    render=not args.headless,
+                ),
+            }
+            preview_name = (
+                "motion_headless.png"
+                if args.headless
+                else "motion_headed.png"
+            )
+            report["preview"] = capture_scene_preview(
+                world, args.output_dir / "motion" / preview_name
+            )
+            marker = "CUROBO_MOTION_SMOKE_OK"
+        elif args.mode == "pick":
+            seeds = set_episode_random_seeds(args.seed)
+            layout = sample_initial_doll_layout(args.seed)
+            world = create_scene()
+            robots = create_robots(world)
+            dolls = create_dolls(world, layout)
+            initial_dolls = settle_and_validate_dolls(world, dolls)
+            report = {
+                "seeds": {
+                    **seeds,
+                    "curobo_motion_planner": args.planner_seed,
+                },
+                "sampled_layout": [
+                    asdict(placement) for placement in layout
+                ],
+                "initial_dolls": initial_dolls,
+                "scene": validate_scene(world),
+                "pick_place": run_curobo_pick_place_smoke(
+                    world,
+                    robots,
+                    dolls,
+                    planner_seed=args.planner_seed,
+                    render=not args.headless,
+                ),
+            }
+            preview_name = (
+                "pick_headless.png" if args.headless else "pick_headed.png"
+            )
+            report["preview"] = capture_scene_preview(
+                world, args.output_dir / "pick" / preview_name
+            )
+            marker = "CUROBO_PICK_PLACE_SMOKE_OK"
         elif args.mode == "cameras":
             world = create_scene()
             robots = create_robots(world)
