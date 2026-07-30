@@ -4986,6 +4986,36 @@ def validate_sorted_doll_states(
     }
 
 
+def validate_task_success(
+    world: Any,
+    robots: dict[str, Any],
+    dolls: dict[str, Any],
+    *,
+    label: str,
+    render: bool = False,
+    episode_recorder: Any | None = None,
+) -> dict[str, Any]:
+    """Apply the shared original-execution and replay acceptance criteria."""
+
+    final_settled = settle_and_validate_dolls(
+        world,
+        dolls,
+        render=render,
+        episode_recorder=episode_recorder,
+    )
+    return {
+        "final_settled_dolls": final_settled,
+        "final_validation": validate_sorted_doll_states(
+            final_settled["stable_states"]
+        ),
+        "final_robots": validate_robots_at_home(
+            robots,
+            label=label,
+        ),
+        "success": True,
+    }
+
+
 def run_full_curobo_sort(
     world: Any,
     robots: dict[str, Any],
@@ -5062,18 +5092,13 @@ def run_full_curobo_sort(
         episode_recorder,
         "final_settle",
     )
-    final_settled = settle_and_validate_dolls(
+    final_result = validate_task_success(
         world,
+        robots,
         dolls,
+        label="full_sort_final",
         render=render,
         episode_recorder=episode_recorder,
-    )
-    final_validation = validate_sorted_doll_states(
-        final_settled["stable_states"]
-    )
-    final_robots = validate_robots_at_home(
-        robots,
-        label="full_sort_final",
     )
     return {
         "planner": "cuRobo MotionPlanner",
@@ -5082,10 +5107,7 @@ def run_full_curobo_sort(
         "assignments": assignments,
         "participating_robots": sorted(set(assignments.values())),
         "operations": operations,
-        "final_settled_dolls": final_settled,
-        "final_validation": final_validation,
-        "final_robots": final_robots,
-        "success": True,
+        **final_result,
     }
 
 
@@ -6599,6 +6621,699 @@ def run_hdf5_collection_worker(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def _episode_layout_from_metadata(
+    metadata: dict[str, Any],
+) -> tuple[DollPlacement, ...]:
+    objects_by_id = {
+        str(item["asset_id"]): item for item in metadata["objects"]
+    }
+    if set(objects_by_id) != set(EPISODE_OBJECT_IDS):
+        raise ValueError(
+            "Recorded object IDs differ from this task: "
+            f"{sorted(objects_by_id)}"
+        )
+    placements: list[DollPlacement] = []
+    for asset_id in EPISODE_OBJECT_IDS:
+        item = objects_by_id[asset_id]
+        placements.append(
+            DollPlacement(
+                asset_id=asset_id,
+                pose=_pose_spec_from_mapping(item["sampled_pose"]),
+                yaw_rad=float(item["sampled_yaw_rad"]),
+            )
+        )
+    validate_initial_doll_layout(placements)
+    return tuple(placements)
+
+
+def validate_episode_replay_compatibility(
+    metadata: dict[str, Any],
+) -> dict[str, Any]:
+    """Reject replay if the current scene/control contract has changed."""
+
+    timing = metadata["timing"]
+    expected_timing = {
+        "physics_frequency_hz": PHYSICS_FREQUENCY_HZ,
+        "control_frequency_hz": CONTROL_FREQUENCY_HZ,
+        "render_frequency_hz": RENDER_FREQUENCY_HZ,
+        "camera_frequency_hz": CAMERA_FREQUENCY_HZ,
+        "physics_steps_per_control": (
+            PHYSICS_FREQUENCY_HZ // CONTROL_FREQUENCY_HZ
+        ),
+    }
+    for key, expected in expected_timing.items():
+        if int(timing[key]) != expected:
+            raise ValueError(
+                f"Recorded {key}={timing[key]} differs from {expected}"
+            )
+    expected_assets = {
+        "piper_usd": str(PIPER_USD.resolve()),
+        "piper_urdf": str(PIPER_URDF.resolve()),
+        "room_usd": str(ROOM_USD.resolve()),
+        "camera_stand_usd": str(CAMERA_STAND_USD.resolve()),
+        "hdr_texture": str(HDR_TEXTURE.resolve()),
+        "table_mdl": str(TABLE_MDL.resolve()),
+        "ground_mdl": str(GROUND_MDL.resolve()),
+    }
+    for key, expected in expected_assets.items():
+        if metadata["assets"].get(key) != expected:
+            raise ValueError(f"Recorded asset {key} differs from {expected}")
+    robot_names = tuple(robot["name"] for robot in metadata["robots"])
+    camera_names = tuple(camera["name"] for camera in metadata["cameras"])
+    object_ids = tuple(item["asset_id"] for item in metadata["objects"])
+    if robot_names != EPISODE_ROBOT_NAMES:
+        raise ValueError(f"Recorded robot order changed: {robot_names}")
+    if camera_names != EPISODE_CAMERA_NAMES:
+        raise ValueError(f"Recorded camera order changed: {camera_names}")
+    if object_ids != EPISODE_OBJECT_IDS:
+        raise ValueError(f"Recorded object order changed: {object_ids}")
+    for camera in metadata["cameras"]:
+        if tuple(camera["resolution_wh"]) != CAMERA_RESOLUTION:
+            raise ValueError(
+                f"{camera['name']}: recorded resolution changed"
+            )
+    return {
+        "timing": expected_timing,
+        "assets": expected_assets,
+        "robot_names": list(robot_names),
+        "camera_names": list(camera_names),
+        "object_ids": list(object_ids),
+    }
+
+
+def restore_episode_initial_state(
+    episode: Any,
+    robots: dict[str, Any],
+    dolls: dict[str, Any],
+) -> dict[str, Any]:
+    """Restore exact recorded joint/object pose and velocity arrays."""
+
+    import numpy as np
+
+    robot_position = np.asarray(
+        episode["initial/robots/joint_position"][:],
+        dtype=np.float32,
+    )
+    robot_velocity = np.asarray(
+        episode["initial/robots/joint_velocity"][:],
+        dtype=np.float32,
+    )
+    robot_action = np.asarray(
+        episode["initial/robots/joint_action"][:],
+        dtype=np.float32,
+    )
+    for index, robot_name in enumerate(EPISODE_ROBOT_NAMES):
+        robot = robots[robot_name]
+        robot.set_joint_positions(robot_position[index])
+        robot.set_joint_velocities(robot_velocity[index])
+        _command_position(
+            robot,
+            robot_action[index],
+            range(len(PIPER_COMMAND_JOINT_NAMES)),
+        )
+
+    object_pose = np.asarray(
+        episode["initial/objects/pose"][:],
+        dtype=np.float32,
+    )
+    object_linear_velocity = np.asarray(
+        episode["initial/objects/linear_velocity"][:],
+        dtype=np.float32,
+    )
+    object_angular_velocity = np.asarray(
+        episode["initial/objects/angular_velocity"][:],
+        dtype=np.float32,
+    )
+    for index, asset_id in enumerate(EPISODE_OBJECT_IDS):
+        doll = dolls[asset_id]
+        doll.set_world_pose(
+            position=object_pose[index, :3],
+            orientation=object_pose[index, 3:],
+        )
+        doll.set_linear_velocity(object_linear_velocity[index])
+        doll.set_angular_velocity(object_angular_velocity[index])
+
+    maximum_robot_position_error = 0.0
+    maximum_robot_velocity_error = 0.0
+    for index, robot_name in enumerate(EPISODE_ROBOT_NAMES):
+        robot = robots[robot_name]
+        maximum_robot_position_error = max(
+            maximum_robot_position_error,
+            float(
+                np.max(
+                    np.abs(
+                        np.asarray(
+                            robot.get_joint_positions(),
+                            dtype=np.float64,
+                        )
+                        - robot_position[index]
+                    )
+                )
+            ),
+        )
+        maximum_robot_velocity_error = max(
+            maximum_robot_velocity_error,
+            float(
+                np.max(
+                    np.abs(
+                        np.asarray(
+                            robot.get_joint_velocities(),
+                            dtype=np.float64,
+                        )
+                        - robot_velocity[index]
+                    )
+                )
+            ),
+        )
+    maximum_object_position_error = 0.0
+    maximum_object_orientation_error = 0.0
+    for index, asset_id in enumerate(EPISODE_OBJECT_IDS):
+        position, quaternion = dolls[asset_id].get_world_pose()
+        maximum_object_position_error = max(
+            maximum_object_position_error,
+            float(
+                np.max(
+                    np.abs(
+                        np.asarray(position, dtype=np.float64)
+                        - object_pose[index, :3]
+                    )
+                )
+            ),
+        )
+        maximum_object_orientation_error = max(
+            maximum_object_orientation_error,
+            quaternion_angular_error(
+                quaternion,
+                object_pose[index, 3:],
+            ),
+        )
+    if maximum_robot_position_error > 1.0e-6:
+        raise RuntimeError(
+            "Robot initial-state restore error "
+            f"{maximum_robot_position_error:.9f} rad/m"
+        )
+    if maximum_robot_velocity_error > 1.0e-6:
+        raise RuntimeError(
+            "Robot velocity restore error "
+            f"{maximum_robot_velocity_error:.9f}"
+        )
+    if maximum_object_position_error > 1.0e-6:
+        raise RuntimeError(
+            "Object initial-state restore error "
+            f"{maximum_object_position_error:.9f} m"
+        )
+    if maximum_object_orientation_error > 1.0e-6:
+        raise RuntimeError(
+            "Object orientation restore error "
+            f"{maximum_object_orientation_error:.9f} rad"
+        )
+    return {
+        "maximum_robot_position_error": maximum_robot_position_error,
+        "maximum_robot_velocity_error": maximum_robot_velocity_error,
+        "maximum_object_position_error_m": maximum_object_position_error,
+        "maximum_object_orientation_error_rad": (
+            maximum_object_orientation_error
+        ),
+    }
+
+
+def update_episode_replay_result(
+    path: Path,
+    *,
+    success: bool,
+    summary: dict[str, Any] | None = None,
+    failure_reason: str = "",
+) -> None:
+    """Atomically update logical replay/acceptance flags inside one HDF5."""
+
+    import h5py
+
+    if success and failure_reason:
+        raise ValueError("A successful replay cannot have a failure reason")
+    with h5py.File(path.resolve(), "r+") as episode:
+        expert_success = bool(
+            episode.attrs.get("expert_success", False)
+        )
+        replay_success = bool(success)
+        accepted = expert_success and replay_success
+        episode.attrs["replay_success"] = replay_success
+        episode.attrs["accepted"] = accepted
+        episode.attrs["failure_reason"] = failure_reason
+        episode.attrs["writer_state"] = (
+            "accepted" if accepted else "replay_failed"
+        )
+        episode["results/replay_summary_json"][()] = json.dumps(
+            {} if summary is None else summary,
+            sort_keys=True,
+        )
+        episode.flush()
+
+
+def run_hdf5_replay_worker(args: argparse.Namespace) -> dict[str, Any]:
+    """Rebuild a clean scene and replay HDF5 actions without cuRobo."""
+
+    import h5py
+    import numpy as np
+
+    if args.episode is None:
+        raise ValueError("replay-worker requires --episode")
+    episode_path = args.episode.resolve()
+    schema_before = validate_episode_hdf5(episode_path)
+    if not schema_before["expert_success"]:
+        raise ValueError("Cannot replay an episode whose expert run failed")
+
+    try:
+        with h5py.File(episode_path, "r") as episode:
+            metadata = json.loads(
+                _decode_hdf5_text(episode["metadata/json"][()])
+            )
+            compatibility = validate_episode_replay_compatibility(metadata)
+            seed = int(metadata["seeds"]["episode"])
+            set_episode_random_seeds(seed)
+            layout = _episode_layout_from_metadata(metadata)
+
+            world = create_scene()
+            robots = create_robots(world)
+            dolls = create_dolls(world, layout)
+            cameras = create_cameras(world)
+            camera_validation = validate_and_capture_cameras(world, cameras)
+            restore_report = restore_episode_initial_state(
+                episode,
+                robots,
+                dolls,
+            )
+
+            joint_actions = episode["frames/robots/joint_action"]
+            event_codes = episode["frames/control/grasp_event_code"]
+            event_object_indices = episode[
+                "frames/control/grasp_event_object_index"
+            ]
+            event_relative_poses = episode[
+                "frames/control/grasp_event_relative_pose"
+            ]
+            phases = episode["frames/task/phase"]
+            frame_count = int(episode.attrs["frame_count"])
+            active_attachments: dict[str, str | None] = {
+                name: None for name in EPISODE_ROBOT_NAMES
+            }
+            physics_steps_per_control = (
+                PHYSICS_FREQUENCY_HZ // CONTROL_FREQUENCY_HZ
+            )
+            for frame_index in range(frame_count):
+                codes = np.asarray(
+                    event_codes[frame_index],
+                    dtype=np.int8,
+                )
+                object_indices = np.asarray(
+                    event_object_indices[frame_index],
+                    dtype=np.int8,
+                )
+                relative_poses = np.asarray(
+                    event_relative_poses[frame_index],
+                    dtype=np.float64,
+                )
+                for robot_index, code_value in enumerate(codes):
+                    code = int(code_value)
+                    if code == GRASP_EVENT_NONE:
+                        continue
+                    robot_name = EPISODE_ROBOT_NAMES[robot_index]
+                    object_index = int(object_indices[robot_index])
+                    if not 0 <= object_index < len(EPISODE_OBJECT_IDS):
+                        raise RuntimeError(
+                            f"Frame {frame_index}: invalid event object index "
+                            f"{object_index}"
+                        )
+                    asset_id = EPISODE_OBJECT_IDS[object_index]
+                    spec = _robot_spec_by_name(robot_name)
+                    if code == GRASP_EVENT_ATTACH:
+                        if active_attachments[robot_name] is not None:
+                            raise RuntimeError(
+                                f"Frame {frame_index}: {robot_name} already "
+                                "has an attachment"
+                            )
+                        values = relative_poses[robot_index]
+                        if not np.all(np.isfinite(values)):
+                            raise RuntimeError(
+                                f"Frame {frame_index}: attach pose is invalid"
+                            )
+                        create_simulation_grasp_joint(
+                            world,
+                            spec,
+                            asset_id,
+                            dolls[asset_id],
+                            relative_pose=PoseSpec(
+                                tuple(float(value) for value in values[:3]),
+                                tuple(float(value) for value in values[3:]),
+                            ),
+                            step_after_change=False,
+                        )
+                        active_attachments[robot_name] = asset_id
+                    elif code == GRASP_EVENT_DETACH:
+                        if active_attachments[robot_name] != asset_id:
+                            raise RuntimeError(
+                                f"Frame {frame_index}: detach {robot_name}/"
+                                f"{asset_id} does not match "
+                                f"{active_attachments[robot_name]}"
+                            )
+                        remove_simulation_grasp_joint(
+                            world,
+                            spec,
+                            asset_id,
+                            step_after_change=False,
+                        )
+                        active_attachments[robot_name] = None
+                    else:
+                        raise RuntimeError(
+                            f"Frame {frame_index}: unknown event code {code}"
+                        )
+
+                actions = np.asarray(
+                    joint_actions[frame_index],
+                    dtype=np.float32,
+                )
+                for robot_index, robot_name in enumerate(
+                    EPISODE_ROBOT_NAMES
+                ):
+                    _command_position(
+                        robots[robot_name],
+                        actions[robot_index],
+                        range(len(PIPER_COMMAND_JOINT_NAMES)),
+                    )
+                for substep in range(physics_steps_per_control):
+                    world.step(
+                        render=(
+                            not args.headless
+                            and substep == physics_steps_per_control - 1
+                        )
+                    )
+                if (
+                    (frame_index + 1) % 500 == 0
+                    or frame_index + 1 == frame_count
+                ):
+                    phase = _decode_hdf5_text(phases[frame_index])
+                    print(
+                        "HDF5_REPLAY_PROGRESS "
+                        f"{frame_index + 1}/{frame_count} phase={phase}",
+                        flush=True,
+                    )
+
+            if any(active_attachments.values()):
+                raise RuntimeError(
+                    f"Replay ended with attachments: {active_attachments}"
+                )
+            final_result = validate_task_success(
+                world,
+                robots,
+                dolls,
+                label="hdf5_replay_final",
+                render=not args.headless,
+            )
+            replay_summary = {
+                "success": True,
+                "planner_invocations": 0,
+                "frame_count": frame_count,
+                "initial_restore": restore_report,
+                "final_validation": final_result["final_validation"],
+                "final_robots": final_result["final_robots"],
+            }
+    except Exception as error:
+        update_episode_replay_result(
+            episode_path,
+            success=False,
+            failure_reason=f"{type(error).__name__}: {error}",
+        )
+        raise
+
+    update_episode_replay_result(
+        episode_path,
+        success=True,
+        summary=replay_summary,
+    )
+    schema_after = validate_episode_hdf5(
+        episode_path,
+        require_accepted=True,
+    )
+    return {
+        "success": True,
+        "episode_path": str(episode_path),
+        "compatibility": compatibility,
+        "camera_validation": camera_validation,
+        "replay": replay_summary,
+        "schema": schema_after,
+    }
+
+
+def _run_episode_worker_process(
+    args: argparse.Namespace,
+    *,
+    mode: str,
+    episode_path: Path,
+    seed: int,
+    log_path: Path,
+) -> dict[str, Any]:
+    """Run one Isaac worker in a clean process and stream concise progress."""
+
+    command = [
+        sys.executable,
+        str(Path(__file__).resolve()),
+        "--mode",
+        mode,
+        "--episode",
+        str(episode_path.resolve()),
+        "--seed",
+        str(seed),
+        "--planner-seed",
+        str(args.planner_seed),
+        "--output-dir",
+        str(args.output_dir.resolve()),
+    ]
+    if args.headless:
+        command.append("--headless")
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    process = subprocess.Popen(
+        command,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+    )
+    if process.stdout is None:
+        process.terminate()
+        raise RuntimeError(f"{mode}: worker stdout is unavailable")
+    start_time = time.monotonic()
+    tail: list[str] = []
+    selector = selectors.DefaultSelector()
+    selector.register(process.stdout, selectors.EVENT_READ)
+    progress_prefixes = (
+        "CUROBO_SORT_PROGRESS",
+        "HDF5_REPLAY_PROGRESS",
+        "HDF5_EXPERT_RECORDING_OK",
+        "HDF5_ACTION_REPLAY_OK",
+    )
+    timed_out = False
+    with log_path.open("w", encoding="utf-8") as log_file:
+        try:
+            while True:
+                if time.monotonic() - start_time > EPISODE_MAX_RUNTIME_S:
+                    timed_out = True
+                    process.terminate()
+                    break
+                events = selector.select(1.0)
+                if events:
+                    line = process.stdout.readline()
+                    if line:
+                        log_file.write(line)
+                        log_file.flush()
+                        stripped = line.rstrip()
+                        tail.append(stripped)
+                        del tail[:-80]
+                        if stripped.startswith(progress_prefixes):
+                            print(stripped, flush=True)
+                    elif process.poll() is not None:
+                        break
+                elif process.poll() is not None:
+                    remainder = process.stdout.read()
+                    if remainder:
+                        log_file.write(remainder)
+                        for line in remainder.splitlines():
+                            tail.append(line)
+                            del tail[:-80]
+                    break
+        finally:
+            selector.close()
+    if timed_out:
+        try:
+            process.wait(timeout=5.0)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5.0)
+        raise TimeoutError(
+            f"{mode} exceeded {EPISODE_MAX_RUNTIME_S:.1f} s; "
+            f"log={log_path}"
+        )
+    return_code = process.wait()
+    if return_code != 0:
+        raise RuntimeError(
+            f"{mode} failed with exit code {return_code}; "
+            f"log={log_path}; tail={tail[-20:]}"
+        )
+    return {
+        "mode": mode,
+        "return_code": return_code,
+        "duration_s": time.monotonic() - start_time,
+        "log_path": str(log_path.resolve()),
+    }
+
+
+def _accepted_episode_path(candidate_path: Path) -> Path:
+    suffix = ".partial.h5"
+    if candidate_path.name.endswith(suffix):
+        return candidate_path.with_name(
+            candidate_path.name.removesuffix(suffix) + ".h5"
+        )
+    return candidate_path
+
+
+def run_public_replay(args: argparse.Namespace) -> dict[str, Any]:
+    if args.episode is None:
+        raise ValueError("--mode replay requires --episode")
+    episode_path = args.episode.resolve()
+    log_path = (
+        args.output_dir
+        / "diagnostics"
+        / f"replay_{episode_path.stem}.log"
+    )
+    worker = _run_episode_worker_process(
+        args,
+        mode="replay-worker",
+        episode_path=episode_path,
+        seed=args.seed,
+        log_path=log_path,
+    )
+    accepted_path = _accepted_episode_path(episode_path)
+    if accepted_path != episode_path:
+        if accepted_path.exists():
+            raise FileExistsError(
+                f"Accepted episode path already exists: {accepted_path}"
+            )
+        episode_path.replace(accepted_path)
+    schema = validate_episode_hdf5(
+        accepted_path,
+        require_accepted=True,
+    )
+    return {
+        "success": True,
+        "worker": worker,
+        "episode_path": str(accepted_path),
+        "schema": schema,
+    }
+
+
+def run_public_collection(args: argparse.Namespace) -> dict[str, Any]:
+    """Collect exactly N accepted episodes, not merely N attempts."""
+
+    requested = 1 if args.mode == "demo" else int(args.episodes)
+    if requested <= 0:
+        raise ValueError("--episodes must be positive")
+    if args.max_attempts < requested:
+        raise ValueError("--max-attempts must be at least --episodes")
+    episode_directory = args.output_dir.resolve() / "episodes"
+    diagnostic_directory = args.output_dir.resolve() / "diagnostics"
+    episode_directory.mkdir(parents=True, exist_ok=True)
+    diagnostic_directory.mkdir(parents=True, exist_ok=True)
+    accepted: list[dict[str, Any]] = []
+    failures: list[dict[str, Any]] = []
+    for attempt_index in range(args.max_attempts):
+        if len(accepted) >= requested:
+            break
+        attempt_number = attempt_index + 1
+        attempt_seed = int(args.seed) + attempt_index
+        timestamp = datetime.datetime.now(
+            datetime.timezone.utc
+        ).strftime("%Y%m%dT%H%M%SZ")
+        stem = (
+            f"episode_{attempt_seed}_{timestamp}_"
+            f"p{os.getpid()}_a{attempt_number:02d}"
+        )
+        candidate_path = episode_directory / f"{stem}.partial.h5"
+        collect_log = diagnostic_directory / f"{stem}_collect.log"
+        replay_log = diagnostic_directory / f"{stem}_replay.log"
+        print(
+            "HDF5_COLLECTION_ATTEMPT "
+            f"{attempt_number}/{args.max_attempts} seed={attempt_seed}",
+            flush=True,
+        )
+        try:
+            collect_worker = _run_episode_worker_process(
+                args,
+                mode="collect-worker",
+                episode_path=candidate_path,
+                seed=attempt_seed,
+                log_path=collect_log,
+            )
+            replay_worker = _run_episode_worker_process(
+                args,
+                mode="replay-worker",
+                episode_path=candidate_path,
+                seed=attempt_seed,
+                log_path=replay_log,
+            )
+            accepted_path = _accepted_episode_path(candidate_path)
+            if accepted_path.exists():
+                raise FileExistsError(
+                    f"Accepted episode path exists: {accepted_path}"
+                )
+            candidate_path.replace(accepted_path)
+            schema = validate_episode_hdf5(
+                accepted_path,
+                require_accepted=True,
+            )
+        except Exception as error:
+            failures.append(
+                {
+                    "attempt": attempt_number,
+                    "seed": attempt_seed,
+                    "error": f"{type(error).__name__}: {error}",
+                    "candidate_path": str(candidate_path),
+                    "collect_log": str(collect_log),
+                    "replay_log": str(replay_log),
+                }
+            )
+            print(
+                "HDF5_COLLECTION_REJECTED "
+                f"attempt={attempt_number} seed={attempt_seed} "
+                f"error={type(error).__name__}: {error}",
+                flush=True,
+            )
+            continue
+        accepted.append(
+            {
+                "path": str(accepted_path),
+                "seed": attempt_seed,
+                "schema": schema,
+                "collect_worker": collect_worker,
+                "replay_worker": replay_worker,
+            }
+        )
+        print(
+            "HDF5_COLLECTION_ACCEPTED "
+            f"{len(accepted)}/{requested} path={accepted_path}",
+            flush=True,
+        )
+    if len(accepted) != requested:
+        raise RuntimeError(
+            f"Collected {len(accepted)}/{requested} accepted episodes after "
+            f"{args.max_attempts} attempts; failures={failures}"
+        )
+    return {
+        "success": True,
+        "requested_accepted_episodes": requested,
+        "attempt_count": len(accepted) + len(failures),
+        "accepted": accepted,
+        "failures": failures,
+    }
+
+
 def build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -6614,6 +7329,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "sort",
             "planner-worker",
             "collect-worker",
+            "replay-worker",
             "demo",
             "collect",
             "replay",
@@ -6637,6 +7353,28 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = build_argument_parser().parse_args(argv)
     if args.mode == "planner-worker":
         return run_curobo_planner_worker(args.seed)
+    if args.mode == "validate":
+        if args.episode is None:
+            raise ValueError("--mode validate requires --episode")
+        report = validate_episode_hdf5(args.episode)
+        print("HDF5_EPISODE_VALID")
+        print(json.dumps(report, indent=2, sort_keys=True))
+        return 0
+    if args.mode == "replay":
+        report = run_public_replay(args)
+        print("HDF5_ACTION_REPLAY_ACCEPTED")
+        print(json.dumps(report, indent=2, sort_keys=True))
+        return 0
+    if args.mode in {"demo", "collect"}:
+        report = run_public_collection(args)
+        marker = (
+            "DUAL_PIPER_DEMO_ACCEPTED"
+            if args.mode == "demo"
+            else "HDF5_COLLECTION_OK"
+        )
+        print(marker)
+        print(json.dumps(report, indent=2, sort_keys=True))
+        return 0
     if args.mode in {
         "audit",
         "scene",
@@ -6647,6 +7385,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "pick",
         "sort",
         "collect-worker",
+        "replay-worker",
     }:
         # SimulationApp.close() shuts down the Python process in Isaac Sim 5.1,
         # so all useful output must be emitted and flushed before that call.
@@ -6771,6 +7510,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         elif args.mode == "collect-worker":
             report = run_hdf5_collection_worker(args)
             marker = "HDF5_EXPERT_RECORDING_OK"
+        elif args.mode == "replay-worker":
+            report = run_hdf5_replay_worker(args)
+            marker = "HDF5_ACTION_REPLAY_OK"
         elif args.mode == "cameras":
             world = create_scene()
             robots = create_robots(world)
@@ -6825,11 +7567,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         sys.stdout.flush()
         simulation_app.close()
         return 0  # Kept for type checkers; close() terminates this process.
-    print(
-        f"Mode {args.mode!r} is not implemented at the asset-audit milestone.",
-        file=sys.stderr,
-    )
-    return 2
+    raise RuntimeError(f"Unhandled mode {args.mode!r}")
 
 
 if __name__ == "__main__":

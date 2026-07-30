@@ -369,6 +369,35 @@ class StaticAssetAndConstantTests(unittest.TestCase):
                     episode["frames/objects/world_pose"].shape,
                     (1, 5, 7),
                 )
+            compatibility = subject.validate_episode_replay_compatibility(
+                metadata
+            )
+            self.assertEqual(
+                compatibility["object_ids"],
+                list(subject.EPISODE_OBJECT_IDS),
+            )
+            subject.update_episode_replay_result(
+                episode_path,
+                success=True,
+                summary={"success": True, "planner_invocations": 0},
+            )
+            accepted = subject.validate_episode_hdf5(
+                episode_path,
+                require_accepted=True,
+            )
+            self.assertTrue(accepted["accepted"])
+            subject.update_episode_replay_result(
+                episode_path,
+                success=False,
+                failure_reason="intentional rejection test",
+            )
+            rejected = subject.validate_episode_hdf5(episode_path)
+            self.assertFalse(rejected["accepted"])
+            self.assertFalse(rejected["replay_success"])
+            self.assertEqual(
+                rejected["failure_reason"],
+                "intentional rejection test",
+            )
 
 
 class IsaacUsdAssetIntegrationTest(unittest.TestCase):
