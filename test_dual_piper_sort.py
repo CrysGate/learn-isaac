@@ -4,7 +4,9 @@
 from __future__ import annotations
 
 import argparse
+import json
 import math
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -399,6 +401,149 @@ class StaticAssetAndConstantTests(unittest.TestCase):
                 "intentional rejection test",
             )
 
+    def test_task_uses_only_the_two_allowed_python_files(self) -> None:
+        task_python_files = sorted(
+            path.name
+            for path in subject.REPOSITORY_ROOT.glob("dual_piper*.py")
+        )
+        self.assertEqual(
+            task_python_files,
+            ["dual_piper_sort.py"],
+        )
+        self.assertTrue(
+            (subject.REPOSITORY_ROOT / "test_dual_piper_sort.py").is_file()
+        )
+
+
+class PublicDemoReplayIntegrationTest(unittest.TestCase):
+    result: dict | None = None
+
+    def test_public_demo_rebuilds_and_replays_accepted_episode(self) -> None:
+        import h5py
+
+        self.assertIsNotNone(self.__class__.result)
+        result = self.__class__.result
+        assert result is not None
+        self.assertIn("DUAL_PIPER_DEMO_ACCEPTED", result["stdout"])
+        schema = result["schema"]
+        self.assertTrue(schema["expert_success"])
+        self.assertTrue(schema["replay_success"])
+        self.assertTrue(schema["accepted"])
+        self.assertGreater(schema["frame_count"], 0)
+        with h5py.File(result["episode_path"], "r") as episode:
+            replay = json.loads(
+                episode["results/replay_summary_json"][()].decode()
+            )
+        self.assertEqual(replay["planner_invocations"], 0)
+        self.assertTrue(replay["success"])
+        self.assertLessEqual(
+            replay["final_validation"]["maximum_target_error_m"],
+            subject.MATRYOSHKA_POSITION_TOLERANCE,
+        )
+        for robot in replay["final_robots"].values():
+            self.assertLessEqual(
+                robot["maximum_home_error_rad"],
+                subject.PIPER_HOME_TOLERANCE_RAD,
+            )
+
+
+def _find_accepted_episode(
+    output_dir: Path,
+    explicit_episode: Path | None,
+) -> Path | None:
+    candidates = (
+        [explicit_episode.resolve()]
+        if explicit_episode is not None
+        else sorted(
+            (output_dir / "episodes").glob("*.h5"),
+            key=lambda path: path.stat().st_mtime,
+            reverse=True,
+        )
+    )
+    for candidate in candidates:
+        try:
+            subject.validate_episode_hdf5(
+                candidate,
+                require_accepted=True,
+            )
+        except (OSError, ValueError):
+            if explicit_episode is not None:
+                raise
+            continue
+        return candidate
+    return None
+
+
+def _prepare_public_demo_replay(
+    *,
+    headless: bool,
+    episode: Path | None,
+    output_dir: Path,
+) -> dict:
+    output_dir = output_dir.resolve()
+    accepted_episode = _find_accepted_episode(output_dir, episode)
+    common = [
+        sys.executable,
+        str(subject.REPOSITORY_ROOT / "dual_piper_sort.py"),
+        "--output-dir",
+        str(output_dir),
+        "--seed",
+        "20260730",
+        "--planner-seed",
+        "1",
+    ]
+    if headless:
+        common.append("--headless")
+    timeout_s = 2.0 * subject.EPISODE_MAX_RUNTIME_S + 120.0
+    if accepted_episode is None:
+        collection = subprocess.run(
+            [*common, "--mode", "demo"],
+            cwd=subject.REPOSITORY_ROOT,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            timeout=timeout_s,
+            check=False,
+        )
+        if collection.returncode != 0:
+            raise RuntimeError(
+                "Public demo collection failed with "
+                f"{collection.returncode}: {collection.stdout[-8000:]}"
+            )
+        accepted_episode = _find_accepted_episode(output_dir, None)
+        if accepted_episode is None:
+            raise RuntimeError(
+                "Public demo returned success without an accepted HDF5"
+            )
+    replay = subprocess.run(
+        [
+            *common,
+            "--mode",
+            "demo",
+            "--episode",
+            str(accepted_episode),
+        ],
+        cwd=subject.REPOSITORY_ROOT,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        timeout=timeout_s,
+        check=False,
+    )
+    if replay.returncode != 0:
+        raise RuntimeError(
+            "Public demo replay failed with "
+            f"{replay.returncode}: {replay.stdout[-8000:]}"
+        )
+    return {
+        "episode_path": str(accepted_episode),
+        "stdout": replay.stdout,
+        "schema": subject.validate_episode_hdf5(
+            accepted_episode,
+            require_accepted=True,
+        ),
+    }
+
 
 class IsaacUsdAssetIntegrationTest(unittest.TestCase):
     @classmethod
@@ -517,6 +662,12 @@ def build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=("fast", "integration"), default="fast")
     parser.add_argument("--headless", action="store_true")
+    parser.add_argument("--episode", type=Path)
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=subject.REPOSITORY_ROOT / "dual_piper_output",
+    )
     return parser
 
 
@@ -528,6 +679,13 @@ def main() -> int:
             StaticAssetAndConstantTests
         )
     else:
+        PublicDemoReplayIntegrationTest.result = (
+            _prepare_public_demo_replay(
+                headless=args.headless,
+                episode=args.episode,
+                output_dir=args.output_dir,
+            )
+        )
         # Isaac-supplied pxr bindings are available only after the application
         # starts.  Keep it alive until all assertions and runner output finish.
         from isaacsim import SimulationApp
@@ -537,6 +695,9 @@ def main() -> int:
             (
                 unittest.defaultTestLoader.loadTestsFromTestCase(
                     StaticAssetAndConstantTests
+                ),
+                unittest.defaultTestLoader.loadTestsFromTestCase(
+                    PublicDemoReplayIntegrationTest
                 ),
                 unittest.defaultTestLoader.loadTestsFromTestCase(
                     IsaacUsdAssetIntegrationTest

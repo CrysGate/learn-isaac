@@ -7365,6 +7365,11 @@ def main(argv: Sequence[str] | None = None) -> int:
         print("HDF5_ACTION_REPLAY_ACCEPTED")
         print(json.dumps(report, indent=2, sort_keys=True))
         return 0
+    if args.mode == "demo" and args.episode is not None:
+        report = run_public_replay(args)
+        print("DUAL_PIPER_DEMO_ACCEPTED")
+        print(json.dumps(report, indent=2, sort_keys=True))
+        return 0
     if args.mode in {"demo", "collect"}:
         report = run_public_collection(args)
         marker = (

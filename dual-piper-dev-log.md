@@ -131,3 +131,14 @@
 - 问题与处理：若只按事件时刻的实时物体 pose 重新计算 FixedJoint 相对变换，微小轨迹漂移会被引入后续搬运；因此把原执行的 link6-to-object 相对 pose 作为显式 action 数据记录并回放，不在重放中修正物体 world pose。Isaac `SimulationApp.close()` 会终止当前 Python 进程，因此公开 `collect/demo/replay` 采用同一主文件的独立 worker 子进程，既保证专家和回放为干净进程，也避免新增第三个任务 Python 文件。
 - 参考资料：HDF5 内 `/frames/robots/joint_action`、`/frames/control/grasp_event_*`、`/initial/*` 和 `/results/*`；当前任务第 14–15 节重放与 CLI 约束。
 - Commit message：`feat: accept episodes after direct action replay`
+
+## 2026-07-31 01:59 — 完成公开 demo/replay 的 headed 与 headless 集成验收
+
+- 目标：让唯一测试入口实际覆盖公开 demo/replay、accepted HDF5、场景、双臂、三相机和五刚体，并分别完成 headless 与 headed 最终集成验证。
+- 完成内容：给 `demo --episode PATH` 增加“重验既有专家 episode”路径；未提供 episode 的默认 demo 仍会采集一条原始专家数据并立即回放。扩展 `test_dual_piper_sort.py --mode integration`：在启动本测试进程的 Isaac Sim 前，先查找或生成 accepted HDF5，再通过公开 `--mode demo --episode` 启动独立干净 replay worker；读取 replay summary 验证 `planner_invocations=0`、目标误差和双臂归位。随后继续运行既有真实 Isaac USD、场景、D435 RGB-D、套娃刚体和 Piper 控制测试。新增任务 Python 文件上限检查和 `--episode/--output-dir` 测试参数，未新增第三个任务 Python 文件。
+- 修改文件：`dual_piper_sort.py`、`test_dual_piper_sort.py`、`dual-piper-dev-log.md`。
+- 运行命令：`git status --short`；`uv run python -m py_compile dual_piper_sort.py test_dual_piper_sort.py`；`uv run python test_dual_piper_sort.py --mode fast`；`uv run python test_dual_piper_sort.py --mode integration --headless --episode dual_piper_output/episodes/episode_20260730_recording_v1.h5`；`uv run python test_dual_piper_sort.py --mode integration --episode dual_piper_output/episodes/episode_20260730_recording_v1.h5`；`uv run python dual_piper_sort.py --mode validate --episode dual_piper_output/episodes/episode_20260730_recording_v1.h5`；最终 HDF5 metadata/result 与任务 Python 文件只读审计；`git diff --check`。
+- 验证结果：fast 14/14 通过；headless integration 20/20、headed integration 20/20 均通过并以退出码 0 完成。两种 integration 的公开 demo 都完成 4044/4044 帧磁盘动作回放并输出 `HDF5_ACTION_REPLAY_OK`，随后各自的真实 Isaac 集成断言全部通过。最终 HDF5 validate 输出 `HDF5_EPISODE_VALID`，读回 schema `1.0.0`、4044 帧、`expert_success/replay_success/accepted=true`；版本元数据实际为 Python `3.11.15`、Isaac Sim `5.1.0.0`、Isaac Lab `0.54.4`、cuRobo `0.0.post1.dev1`、h5py `3.16.0`。仓库根任务文件只有 `dual_piper_sort.py` 与 `test_dual_piper_sort.py`，用户已有未跟踪 `Assets/`、`basic/piper.py`、`learn.md`、`usd/` 均未修改或纳入提交。
+- 问题与处理：headed 逐帧渲染回放比 headless 明显更慢，约在 3 分钟内完成，仍远低于 1800 s worker 上限。由于 `SimulationApp.close()` 会终止测试进程，公开 demo/replay 必须在测试进程启动自己的 SimulationApp 之前先以子进程完成；测试用实际 HDF5 和真实物理运行，没有 mock 或重新规划。
+- 参考资料：`dual_piper_output/diagnostics/test_integration_headless_final.log`；`dual_piper_output/diagnostics/test_integration_headed_final.log`；`dual_piper_output/diagnostics/replay_episode_20260730_recording_v1.log`。
+- Commit message：`test: verify headed and headless replay integration`
