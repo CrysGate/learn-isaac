@@ -1,5 +1,4 @@
 # 双 Piper 三相机套娃排序仿真与专家数据采集
-
 你是负责在当前仓库中直接工作的机器人仿真工程师。请在
 `/home/ogyco/learn-isaac` 中设计、实现、运行并验证一套双 Piper
 机械臂、三台 Intel RealSense D435 RGB-D 相机的仿真与 cuRobo
@@ -38,18 +37,20 @@ cuRobo 生成无碰撞专家轨迹，把套娃从小到大排列成一条经过�
 - 禁止修改 `pyproject.toml` 和 `uv.lock`。
 - 必须以仓库实际安装版本的 API 为准。
 
-### 2.2 单 Python 文件
+### 2.2 最多两个 Python 文件
 
-所有实现只能放在一个 Python 文件中：
+实现和测试代码最多只能放在以下两个 Python 文件中：
 
-`/home/ogyco/learn-isaac/dual_piper_sort.py`
+- 主实现：`/home/ogyco/learn-isaac/dual_piper_sort.py`
+- 测试代码：`/home/ogyco/learn-isaac/test_dual_piper_sort.py`
 
-禁止为了实现任务再创建其他 `.py`、YAML、JSON、配置模块、测试模块、
-包目录或生成后的机器人配置文件。cuRobo 所需的 Piper 配置、碰撞球、
-关节映射、场景参数和相机参数均放在这个 Python 文件中，或者直接读取
-已经存在的资产/URDF。
+禁止创建第三个 `.py` 文件，也禁止新增 YAML、JSON、配置模块、更多测试
+模块、包目录或生成后的机器人配置文件。已有但与本任务无关的 Python 文件
+不得修改。cuRobo 所需的 Piper 配置、碰撞球、关节映射、场景参数和相机
+参数均放在主实现文件中，或者直接读取已经存在的资产/URDF。测试文件只能
+导入和验证主实现，不能复制一份实现逻辑。
 
-以下文件不违反“单 Python 文件”约束：
+以下文件不计入“两 Python 文件”上限：
 
 - 本 `goal.md`。
 - 过程日志 `dual-piper-dev-log.md`。
@@ -108,7 +109,8 @@ ManagerBased 环境。
 7. 跑通两个机械臂顺序协作和完整五物体排序。
 8. 加入同步数据记录并生成一个原始成功 episode。
 9. 加入从磁盘恢复场景和动作重放验证。
-10. 完成 headed 与 headless 集成验收。
+10. 在唯一测试文件中补齐快速检查和集成检查。
+11. 完成 headed 与 headless 集成验收。
 
 如果实际依赖关系要求调整小任务边界，可以调整，但仍须保持“小步验证、
 写日志、立即 commit”的节奏。
@@ -376,7 +378,7 @@ episode 元数据必须保存采样前 seed、五个物体的资产 ID、初始 
 必须真正调用 cuRobo 进行六个机械臂关节的运动规划，不能用直线插值、
 硬编码关节序列或 Isaac IK 冒充 cuRobo 专家轨迹。
 
-在唯一 Python 文件中完成或构造：
+在主实现 Python 文件中完成或构造：
 
 - Piper URDF 和 USD 关节名称映射。
 - base link、末端执行器/抓取中心和 home configuration。
@@ -501,7 +503,7 @@ accepted = true
 重放失败必须保存明确原因，不能为了提高成功率而在重放期间重新规划、
 偷偷修正物体 pose 或放宽成功阈值。
 
-## 15. 唯一 Python 文件的命令行
+## 15. 主程序与测试文件
 
 在 `dual_piper_sort.py` 内使用简单 `argparse`，至少提供：
 
@@ -520,9 +522,27 @@ uv run python dual_piper_sort.py --mode validate --episode /path/to/episode.h5
 - `collect` 的 `N` 表示最终得到的 accepted episode 数，不是尝试次数。
 - 设置整个 episode 和单次规划的最大时间/步数，避免无限运行。
 - headed 与 headless 使用同一套任务逻辑。
-- `scene`、`cameras`、`validate` 同时充当嵌入在单文件内的 smoke/自动化检查，
-  不再创建独立测试文件。
+- `scene`、`cameras`、`validate` 是主程序可复用的 smoke/验证入口。
 - 失败时返回非零退出码，并输出可以定位阶段、机械臂、物体和原因的错误。
+
+`test_dual_piper_sort.py` 是唯一允许的测试代码文件。它应导入主实现中的
+纯函数和验证入口，至少覆盖：
+
+- 固定桌子/双臂参数和四元数约定。
+- 五个套娃的尺寸顺序、目标点中心和安全间距。
+- 固定 seed 的初始布局可复现性与无重叠检查。
+- HDF5 schema、时间维度同步和必需元数据。
+- 成功判据、归位判据和 rejected episode 判定。
+- `scene`、`cameras`、`demo/replay` 的 headless 集成检查。
+
+测试不得复制实现逻辑来获得虚假的通过结果，也不能用 mock 替代最终物理
+集成验收。快速测试和耗时集成测试可以在同一文件中分组，但不能再拆出其他
+测试文件。使用当前环境已有的测试能力，不得为测试安装新依赖。至少提供：
+
+```bash
+uv run python test_dual_piper_sort.py --mode fast
+uv run python test_dual_piper_sort.py --mode integration --headless
+```
 
 建议只使用以下级别的简单组织：
 
@@ -565,7 +585,8 @@ main()
 
 完成任务前必须提供当前运行产生的权威证据，证明：
 
-- 只新增了一个实现 Python 文件 `dual_piper_sort.py`。
+- 本任务最多只有两个 Python 文件：主实现 `dual_piper_sort.py` 和测试
+  `test_dual_piper_sort.py`，不存在第三个任务 Python 文件。
 - 指定房间、HDR、桌面/地面材质、相机支架、双 Piper 和五个套娃均实际加载。
 - 桌子和双臂使用本文固定位置、尺寸和姿态。
 - 两个机械臂都至少搬运一个物体。
@@ -583,7 +604,7 @@ main()
 
 最终回复必须简洁列出：
 
-- 唯一实现文件的路径。
+- 主实现文件和测试文件的路径。
 - 运行命令。
 - 成功 episode 路径和 schema version。
 - 三路 RGB/深度的 shape、dtype、频率和深度单位。
