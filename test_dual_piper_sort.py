@@ -182,6 +182,54 @@ class StaticAssetAndConstantTests(unittest.TestCase):
         )
         self.assertEqual(subject.CONTROL_FREQUENCY_HZ, subject.CAMERA_FREQUENCY_HZ)
 
+    def test_curobo_config_uses_six_arm_joints_and_attachment_slots(self) -> None:
+        config = subject.build_curobo_robot_config()["robot_cfg"]["kinematics"]
+        self.assertEqual(
+            config["cspace"]["joint_names"],
+            list(subject.PIPER_ARM_JOINT_NAMES),
+        )
+        self.assertEqual(
+            config["lock_joints"],
+            {"gripper_joint": subject.PIPER_OPEN_GRIPPER_POSITION},
+        )
+        self.assertEqual(
+            config["extra_collision_spheres"][
+                subject.CUROBO_ATTACHED_OBJECT_LINK
+            ],
+            subject.CUROBO_ATTACHED_OBJECT_SPHERES,
+        )
+        self.assertIn(
+            subject.CUROBO_ATTACHED_OBJECT_LINK,
+            config["collision_link_names"],
+        )
+
+    def test_dual_arm_assignment_and_sorted_state_contract(self) -> None:
+        layout = subject.sample_initial_doll_layout(20260730)
+        poses = {placement.asset_id: placement.pose for placement in layout}
+        assignments = subject.assign_dolls_to_robots(poses)
+        self.assertEqual(set(assignments.values()), {"left", "right"})
+        self.assertEqual(assignments["00000"], "right")
+        self.assertEqual(assignments["00001"], "left")
+
+        states = {}
+        for placement in subject.compute_doll_target_layout():
+            states[placement.asset_id] = {
+                "position_m": list(placement.pose.position),
+                "quaternion_wxyz": [1.0, 0.0, 0.0, 0.0],
+                "linear_velocity_m_s": [0.0, 0.0, 0.0],
+                "angular_velocity_rad_s": [0.0, 0.0, 0.0],
+                "linear_speed_m_s": 0.0,
+                "angular_speed_rad_s": 0.0,
+                "upright_tilt_degrees": 0.0,
+                "estimated_bottom_z_m": subject.TABLE_TOP_Z,
+            }
+        report = subject.validate_sorted_doll_states(states)
+        self.assertEqual(report["maximum_target_error_m"], 0.0)
+        self.assertEqual(
+            report["order_small_to_large"],
+            list(subject.MATRYOSHKA_SORT_ORDER),
+        )
+
 
 class IsaacUsdAssetIntegrationTest(unittest.TestCase):
     @classmethod

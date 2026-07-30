@@ -174,6 +174,10 @@ MATRYOSHKA_ANGULAR_SPEED_TOLERANCE: Final = 0.10
 MATRYOSHKA_PRIM_ROOT: Final = "/World/Objects"
 MATRYOSHKA_PHYSICS_MATERIAL_PATH: Final = "/World/Looks/MatryoshkaPhysics"
 MATRYOSHKA_PHYSICS_RESTITUTION: Final = 0.05
+MATRYOSHKA_LINEAR_DAMPING: Final = 0.10
+MATRYOSHKA_ANGULAR_DAMPING: Final = 0.10
+MATRYOSHKA_SLEEP_THRESHOLD: Final = 0.005
+MATRYOSHKA_STABILIZATION_THRESHOLD: Final = 0.001
 # This central area remains inside the overhead view and leaves generous room
 # for grasp approach, the table edges, and the rear robot bases.
 # Keep complete doll geometry inside the fixed overhead D435 frustum, including
@@ -192,7 +196,7 @@ MATRYOSHKA_STABLE_CONSECUTIVE_STEPS: Final = 30
 # open in its kinematic model (the URDF mimic parser follows joint8
 # automatically) and is commanded explicitly in simulation.
 CUROBO_DEVICE: Final = "cuda:0"
-CUROBO_NUM_IK_SEEDS: Final = 16
+CUROBO_NUM_IK_SEEDS: Final = 64
 CUROBO_NUM_TRAJOPT_SEEDS: Final = 4
 CUROBO_MAX_PLAN_ATTEMPTS: Final = 5
 CUROBO_POSITION_TOLERANCE_M: Final = 0.008
@@ -210,6 +214,7 @@ GRASP_JOINT_ROOT: Final = "/World/GraspJoints"
 PICK_SMOKE_ASSET_ID: Final = "00001"
 PICK_GRIPPER_CLOSE_STEPS: Final = 120
 PICK_RELEASE_SETTLE_STEPS: Final = 60
+PICK_RELEASE_FINGER_MARGIN_M: Final = 0.006
 
 # In this top-down tool pose, gripper_center +X points down from the wrist to
 # the grasp point.  Tool +Y lies along world +X, making the fingers close
@@ -226,6 +231,7 @@ PIPER_PREGRASP_CLEARANCE_M: Final = 0.110
 PIPER_LIFT_CLEARANCE_M: Final = 0.130
 PIPER_PREPLACE_CLEARANCE_M: Final = 0.120
 PIPER_RETREAT_CLEARANCE_M: Final = 0.130
+PIPER_TRANSPORT_UPRIGHT_TOLERANCE_DEGREES: Final = 9.0
 
 
 @dataclass(frozen=True)
@@ -3004,19 +3010,23 @@ def run_curobo_pick_place_smoke(
     *,
     planner_seed: int,
     render: bool,
+    asset_id: str = PICK_SMOKE_ASSET_ID,
+    active_robot_name: str = "left",
 ) -> dict[str, Any]:
     """Pick, transport, place, and return home with one actual Piper."""
 
     import numpy as np
 
-    asset_id = PICK_SMOKE_ASSET_ID
-    active_spec = LEFT_PIPER
-    other_spec = RIGHT_PIPER
+    active_spec = _robot_spec_by_name(active_robot_name)
+    other_spec = next(
+        spec for spec in ROBOT_SPECS if spec.name != active_spec.name
+    )
     active_robot = robots[active_spec.name]
     other_robot = robots[other_spec.name]
     doll = dolls[asset_id]
     specs_by_id = {spec.asset_id: spec for spec in get_doll_specs()}
     doll_spec = specs_by_id[asset_id]
+    grasp_contact_height = min(0.035, 0.35 * doll_spec.height)
     target_by_id = {
         placement.asset_id: placement
         for placement in compute_doll_target_layout()
@@ -3035,6 +3045,25 @@ def run_curobo_pick_place_smoke(
     attachment: dict[str, Any] | None = None
 
     with CuroboPlannerWorker(planner_seed) as worker:
+        target_orientation_probe_goal = (
+            target_center[0],
+            target_center[1],
+            target_center[2]
+            + PIPER_PREPLACE_CLEARANCE_M
+            + PIPER_FINGER_CENTER_BELOW_TOOL_M,
+        )
+        plans["target_orientation_probe"] = worker.plan_position(
+            active_robot=active_spec,
+            other_robot=other_spec,
+            current_joint_position=active_robot.get_joint_positions()[:6],
+            other_joint_position=other_robot.get_joint_positions()[:6],
+            world_goal_position=target_orientation_probe_goal,
+            doll_poses=_current_doll_poses(dolls),
+        )
+        target_orientation = _pose_spec_from_mapping(
+            plans["target_orientation_probe"]["selected_world_tool_pose"]
+        ).quaternion
+
         pregrasp_goal = (
             initial_doll_pose.position[0],
             initial_doll_pose.position[1],
@@ -3047,6 +3076,7 @@ def run_curobo_pick_place_smoke(
             other_joint_position=other_robot.get_joint_positions()[:6],
             world_goal_position=pregrasp_goal,
             doll_poses=_current_doll_poses(dolls),
+            preferred_world_orientation=target_orientation,
         )
         executions["pregrasp"] = execute_curobo_trajectory(
             world,
@@ -3062,9 +3092,10 @@ def run_curobo_pick_place_smoke(
             initial_doll_pose.position[0],
             initial_doll_pose.position[1],
             initial_doll_pose.position[2]
-            + PIPER_FINGER_CENTER_BELOW_TOOL_M,
+            + PIPER_FINGER_CENTER_BELOW_TOOL_M
+            + grasp_contact_height,
         )
-        plans["grasp"] = worker.plan_position(
+        plans["grasp_seed"] = worker.plan_position(
             active_robot=active_spec,
             other_robot=other_spec,
             current_joint_position=active_robot.get_joint_positions()[:6],
@@ -3073,6 +3104,36 @@ def run_curobo_pick_place_smoke(
             doll_poses=_current_doll_poses(dolls),
             excluded_doll_ids=(asset_id,),
             preferred_world_orientation=pregrasp_pose.quaternion,
+        )
+        grasp_seed_pose = _pose_spec_from_mapping(
+            plans["grasp_seed"]["selected_world_tool_pose"]
+        )
+        predicted_finger_offset = _quaternion_rotate_vector(
+            grasp_seed_pose.quaternion,
+            (PIPER_FINGER_CENTER_BELOW_TOOL_M, 0.0, 0.0),
+        )
+        initial_contact_offset = _quaternion_rotate_vector(
+            initial_doll_pose.quaternion,
+            (0.0, 0.0, grasp_contact_height),
+        )
+        initial_contact_point = tuple(
+            initial_doll_pose.position[index]
+            + initial_contact_offset[index]
+            for index in range(3)
+        )
+        refined_grasp_goal = tuple(
+            initial_contact_point[index] - predicted_finger_offset[index]
+            for index in range(3)
+        )
+        plans["grasp"] = worker.plan_position(
+            active_robot=active_spec,
+            other_robot=other_spec,
+            current_joint_position=active_robot.get_joint_positions()[:6],
+            other_joint_position=other_robot.get_joint_positions()[:6],
+            world_goal_position=refined_grasp_goal,
+            doll_poses=_current_doll_poses(dolls),
+            excluded_doll_ids=(asset_id,),
+            preferred_world_orientation=grasp_seed_pose.quaternion,
         )
         executions["grasp"] = execute_curobo_trajectory(
             world,
@@ -3091,7 +3152,7 @@ def run_curobo_pick_place_smoke(
 
         tool_position, tool_quaternion = _xform_world_pose(
             f"{active_spec.prim_path}/{PIPER_TOOL_REL_PATH}",
-            "left_pick_grasp_tool",
+            f"{active_spec.name}_{asset_id}_pick_grasp_tool",
         )
         closed_doll_poses = _current_doll_poses(dolls)
         closed_doll_pose = closed_doll_poses[asset_id]
@@ -3103,10 +3164,19 @@ def run_curobo_pick_place_smoke(
             tool_position[index] + finger_center_offset[index]
             for index in range(3)
         )
+        closed_contact_offset = _quaternion_rotate_vector(
+            closed_doll_pose.quaternion,
+            (0.0, 0.0, grasp_contact_height),
+        )
+        closed_contact_point = tuple(
+            closed_doll_pose.position[index]
+            + closed_contact_offset[index]
+            for index in range(3)
+        )
         grasp_center_error = float(
             np.linalg.norm(
                 np.asarray(finger_center, dtype=np.float64)
-                - np.asarray(closed_doll_pose.position, dtype=np.float64)
+                - np.asarray(closed_contact_point, dtype=np.float64)
             )
         )
         closed_separation = _finger_separation(
@@ -3132,7 +3202,7 @@ def run_curobo_pick_place_smoke(
         )
         attached_tool_position, attached_tool_quaternion = _xform_world_pose(
             f"{active_spec.prim_path}/{PIPER_TOOL_REL_PATH}",
-            "left_pick_attached_tool",
+            f"{active_spec.name}_{asset_id}_pick_attached_tool",
         )
         attached_doll_pose = _current_doll_poses(dolls)[asset_id]
         attachment = worker.attach(
@@ -3156,15 +3226,40 @@ def run_curobo_pick_place_smoke(
             ),
             transport_orientation,
         )
-        plans["lift"] = worker.plan_pose(
-            active_robot=active_spec,
-            other_robot=other_spec,
-            current_joint_position=active_robot.get_joint_positions()[:6],
-            other_joint_position=other_robot.get_joint_positions()[:6],
-            world_goal=lift_goal,
-            doll_poses=_current_doll_poses(dolls),
-            excluded_doll_ids=(asset_id,),
-        )
+        lift_mode = "exact_pose"
+        try:
+            plans["lift"] = worker.plan_pose(
+                active_robot=active_spec,
+                other_robot=other_spec,
+                current_joint_position=active_robot.get_joint_positions()[:6],
+                other_joint_position=other_robot.get_joint_positions()[:6],
+                world_goal=lift_goal,
+                doll_poses=_current_doll_poses(dolls),
+                excluded_doll_ids=(asset_id,),
+            )
+        except RuntimeError as exact_error:
+            lift_mode = "position_with_bounded_orientation"
+            plans["lift_exact_failure"] = {"error": str(exact_error)}
+            plans["lift"] = worker.plan_position(
+                active_robot=active_spec,
+                other_robot=other_spec,
+                current_joint_position=active_robot.get_joint_positions()[:6],
+                other_joint_position=other_robot.get_joint_positions()[:6],
+                world_goal_position=lift_goal.position,
+                doll_poses=_current_doll_poses(dolls),
+                excluded_doll_ids=(asset_id,),
+                preferred_world_orientation=transport_orientation,
+            )
+            orientation_error = plans["lift"][
+                "preferred_orientation_error_rad"
+            ]
+            if orientation_error is None or math.degrees(
+                orientation_error
+            ) > PIPER_TRANSPORT_UPRIGHT_TOLERANCE_DEGREES:
+                raise RuntimeError(
+                    f"{asset_id}: lift orientation changed by "
+                    f"{orientation_error} rad"
+                )
         executions["lift"] = execute_curobo_trajectory(
             world,
             active_robot,
@@ -3172,6 +3267,10 @@ def run_curobo_pick_place_smoke(
             render=render,
         )
         lifted_doll_pose = _current_doll_poses(dolls)[asset_id]
+        lifted_tool_position, lifted_tool_quaternion = _xform_world_pose(
+            f"{active_spec.prim_path}/{PIPER_TOOL_REL_PATH}",
+            f"{active_spec.name}_{asset_id}_lifted_tool",
+        )
         lifted_distance = (
             lifted_doll_pose.position[2] - attached_doll_pose.position[2]
         )
@@ -3179,6 +3278,19 @@ def run_curobo_pick_place_smoke(
             raise RuntimeError(
                 f"{asset_id}: fixed grasp lifted only {lifted_distance:.6f} m"
             )
+        lifted_tilt = _doll_state_report(dolls)[asset_id][
+            "upright_tilt_degrees"
+        ]
+        if lifted_tilt > PIPER_TRANSPORT_UPRIGHT_TOLERANCE_DEGREES:
+            raise RuntimeError(
+                f"{asset_id}: lifted doll tilt is "
+                f"{lifted_tilt:.6f} degrees"
+            )
+        attached_offset = tuple(
+            lifted_doll_pose.position[index] - lifted_tool_position[index]
+            for index in range(3)
+        )
+        transport_orientation = tuple(lifted_tool_quaternion)
 
         preplace_object_center = (
             target_center[0],
@@ -3192,15 +3304,42 @@ def run_curobo_pick_place_smoke(
             ),
             transport_orientation,
         )
-        plans["preplace"] = worker.plan_pose(
-            active_robot=active_spec,
-            other_robot=other_spec,
-            current_joint_position=active_robot.get_joint_positions()[:6],
-            other_joint_position=other_robot.get_joint_positions()[:6],
-            world_goal=preplace_goal,
-            doll_poses=_current_doll_poses(dolls),
-            excluded_doll_ids=(asset_id,),
-        )
+        preplace_mode = "exact_pose"
+        try:
+            plans["preplace"] = worker.plan_pose(
+                active_robot=active_spec,
+                other_robot=other_spec,
+                current_joint_position=active_robot.get_joint_positions()[:6],
+                other_joint_position=other_robot.get_joint_positions()[:6],
+                world_goal=preplace_goal,
+                doll_poses=_current_doll_poses(dolls),
+                excluded_doll_ids=(asset_id,),
+            )
+        except RuntimeError as exact_error:
+            preplace_mode = "position_with_bounded_orientation"
+            plans["preplace_exact_failure"] = {
+                "error": str(exact_error),
+            }
+            plans["preplace"] = worker.plan_position(
+                active_robot=active_spec,
+                other_robot=other_spec,
+                current_joint_position=active_robot.get_joint_positions()[:6],
+                other_joint_position=other_robot.get_joint_positions()[:6],
+                world_goal_position=preplace_goal.position,
+                doll_poses=_current_doll_poses(dolls),
+                excluded_doll_ids=(asset_id,),
+                preferred_world_orientation=transport_orientation,
+            )
+            orientation_error = plans["preplace"][
+                "preferred_orientation_error_rad"
+            ]
+            if orientation_error is None or math.degrees(
+                orientation_error
+            ) > PIPER_TRANSPORT_UPRIGHT_TOLERANCE_DEGREES:
+                raise RuntimeError(
+                    f"{asset_id}: target transport orientation changed by "
+                    f"{orientation_error} rad"
+                )
         executions["preplace"] = execute_curobo_trajectory(
             world,
             active_robot,
@@ -3208,6 +3347,82 @@ def run_curobo_pick_place_smoke(
             render=render,
         )
 
+        preplace_tool_position, preplace_tool_quaternion = _xform_world_pose(
+            f"{active_spec.prim_path}/{PIPER_TOOL_REL_PATH}",
+            f"{active_spec.name}_{asset_id}_preplace_tool",
+        )
+        preplace_doll_pose = _current_doll_poses(dolls)[asset_id]
+        preplace_center_error = float(
+            np.linalg.norm(
+                np.asarray(preplace_doll_pose.position, dtype=np.float64)
+                - np.asarray(preplace_object_center, dtype=np.float64)
+            )
+        )
+        if preplace_center_error > 0.005:
+            correction_offset = tuple(
+                preplace_doll_pose.position[index]
+                - preplace_tool_position[index]
+                for index in range(3)
+            )
+            correction_goal = PoseSpec(
+                tuple(
+                    preplace_object_center[index]
+                    - correction_offset[index]
+                    for index in range(3)
+                ),
+                tuple(preplace_tool_quaternion),
+            )
+            plans["preplace_correction"] = worker.plan_pose(
+                active_robot=active_spec,
+                other_robot=other_spec,
+                current_joint_position=active_robot.get_joint_positions()[:6],
+                other_joint_position=other_robot.get_joint_positions()[:6],
+                world_goal=correction_goal,
+                doll_poses=_current_doll_poses(dolls),
+                excluded_doll_ids=(asset_id,),
+            )
+            executions["preplace_correction"] = execute_curobo_trajectory(
+                world,
+                active_robot,
+                plans["preplace_correction"],
+                render=render,
+            )
+            preplace_tool_position, preplace_tool_quaternion = (
+                _xform_world_pose(
+                    f"{active_spec.prim_path}/{PIPER_TOOL_REL_PATH}",
+                    f"{active_spec.name}_{asset_id}_corrected_preplace_tool",
+                )
+            )
+            preplace_doll_pose = _current_doll_poses(dolls)[asset_id]
+            preplace_center_error = float(
+                np.linalg.norm(
+                    np.asarray(
+                        preplace_doll_pose.position,
+                        dtype=np.float64,
+                    )
+                    - np.asarray(
+                        preplace_object_center,
+                        dtype=np.float64,
+                    )
+                )
+            )
+        preplace_tilt = _doll_state_report(dolls)[asset_id][
+            "upright_tilt_degrees"
+        ]
+        if (
+            preplace_tilt
+            > PIPER_TRANSPORT_UPRIGHT_TOLERANCE_DEGREES
+        ):
+            raise RuntimeError(
+                f"{asset_id}: transported doll tilt is "
+                f"{preplace_tilt:.6f} degrees"
+            )
+        attached_offset = tuple(
+            preplace_doll_pose.position[index]
+            - preplace_tool_position[index]
+            for index in range(3)
+        )
+        transport_orientation = tuple(preplace_tool_quaternion)
         place_goal = PoseSpec(
             tuple(
                 target_center[index] - attached_offset[index]
@@ -3215,15 +3430,42 @@ def run_curobo_pick_place_smoke(
             ),
             transport_orientation,
         )
-        plans["place"] = worker.plan_pose(
-            active_robot=active_spec,
-            other_robot=other_spec,
-            current_joint_position=active_robot.get_joint_positions()[:6],
-            other_joint_position=other_robot.get_joint_positions()[:6],
-            world_goal=place_goal,
-            doll_poses=_current_doll_poses(dolls),
-            excluded_doll_ids=(asset_id,),
-        )
+        place_mode = "exact_pose"
+        try:
+            plans["place"] = worker.plan_pose(
+                active_robot=active_spec,
+                other_robot=other_spec,
+                current_joint_position=active_robot.get_joint_positions()[:6],
+                other_joint_position=other_robot.get_joint_positions()[:6],
+                world_goal=place_goal,
+                doll_poses=_current_doll_poses(dolls),
+                excluded_doll_ids=(asset_id,),
+            )
+        except RuntimeError as exact_error:
+            place_mode = "position_with_bounded_orientation"
+            plans["place_exact_failure"] = {
+                "error": str(exact_error),
+            }
+            plans["place"] = worker.plan_position(
+                active_robot=active_spec,
+                other_robot=other_spec,
+                current_joint_position=active_robot.get_joint_positions()[:6],
+                other_joint_position=other_robot.get_joint_positions()[:6],
+                world_goal_position=place_goal.position,
+                doll_poses=_current_doll_poses(dolls),
+                excluded_doll_ids=(asset_id,),
+                preferred_world_orientation=transport_orientation,
+            )
+            orientation_error = plans["place"][
+                "preferred_orientation_error_rad"
+            ]
+            if orientation_error is None or math.degrees(
+                orientation_error
+            ) > PIPER_TRANSPORT_UPRIGHT_TOLERANCE_DEGREES:
+                raise RuntimeError(
+                    f"{asset_id}: place orientation changed by "
+                    f"{orientation_error} rad"
+                )
         executions["place"] = execute_curobo_trajectory(
             world,
             active_robot,
@@ -3237,30 +3479,47 @@ def run_curobo_pick_place_smoke(
                 - np.asarray(target_center, dtype=np.float64)
             )
         )
+        constrained_place_tilt = _doll_state_report(dolls)[asset_id][
+            "upright_tilt_degrees"
+        ]
+        if (
+            constrained_place_tilt
+            > PIPER_TRANSPORT_UPRIGHT_TOLERANCE_DEGREES
+        ):
+            raise RuntimeError(
+                f"{asset_id}: constrained place tilt is "
+                f"{constrained_place_tilt:.6f} degrees"
+            )
         if constrained_place_error > 0.015:
             raise RuntimeError(
                 f"{asset_id}: constrained placement error is "
                 f"{constrained_place_error:.6f} m"
             )
 
+        release_gripper_position = min(
+            PIPER_OPEN_GRIPPER_POSITION,
+            doll_spec.footprint_radius + PICK_RELEASE_FINGER_MARGIN_M,
+        )
         _command_position(
             active_robot,
-            (PIPER_OPEN_GRIPPER_POSITION,),
+            (release_gripper_position,),
             (6,),
         )
-        release_steps = _step_until(
+        table_release_steps = _step_until(
             world,
             lambda: float(
                 np.max(
                     np.abs(
                         active_robot.get_joint_positions()[6:8]
-                        - PIPER_OPEN_GRIPPER_POSITION
+                        - release_gripper_position
                     )
                 )
             )
             <= PIPER_GRIPPER_TOLERANCE_M,
             maximum_steps=240,
-            description="left Piper gripper to open for release",
+            description=(
+                f"{active_spec.name} Piper gripper to clear the placed doll"
+            ),
         )
         worker.detach(active_robot=active_spec)
         remove_simulation_grasp_joint(
@@ -3276,7 +3535,7 @@ def run_curobo_pick_place_smoke(
 
         released_tool_position, released_tool_quaternion = _xform_world_pose(
             f"{active_spec.prim_path}/{PIPER_TOOL_REL_PATH}",
-            "left_pick_released_tool",
+            f"{active_spec.name}_{asset_id}_pick_released_tool",
         )
         retreat_goal = PoseSpec(
             (
@@ -3300,6 +3559,27 @@ def run_curobo_pick_place_smoke(
             active_robot,
             plans["retreat"],
             render=render,
+        )
+        _command_position(
+            active_robot,
+            (PIPER_OPEN_GRIPPER_POSITION,),
+            (6,),
+        )
+        full_open_steps = _step_until(
+            world,
+            lambda: float(
+                np.max(
+                    np.abs(
+                        active_robot.get_joint_positions()[6:8]
+                        - PIPER_OPEN_GRIPPER_POSITION
+                    )
+                )
+            )
+            <= PIPER_GRIPPER_TOLERANCE_M,
+            maximum_steps=240,
+            description=(
+                f"{active_spec.name} Piper gripper to open after retreat"
+            ),
         )
         plans["home"] = worker.plan_joint(
             active_robot=active_spec,
@@ -3341,6 +3621,8 @@ def run_curobo_pick_place_smoke(
         "target_center_m": list(target_center),
         "grasp": {
             "finger_center_m": list(finger_center),
+            "contact_point_m": list(closed_contact_point),
+            "contact_height_above_center_m": grasp_contact_height,
             "center_error_m": grasp_center_error,
             "closed_finger_separation_m": closed_separation,
             "fixed_joint": grasp_joint,
@@ -3348,11 +3630,22 @@ def run_curobo_pick_place_smoke(
         },
         "transport": {
             "lifted_distance_m": lifted_distance,
+            "lift_mode": lift_mode,
+            "lifted_upright_tilt_degrees": lifted_tilt,
             "attached_tool_to_object_world_offset_m": list(attached_offset),
+            "preplace_mode": preplace_mode,
+            "preplace_center_error_m": preplace_center_error,
+            "preplace_upright_tilt_degrees": preplace_tilt,
         },
         "release": {
-            "gripper_open_steps": release_steps,
+            "table_release_gripper_position_m": release_gripper_position,
+            "table_release_steps": table_release_steps,
+            "full_open_after_retreat_steps": full_open_steps,
+            "place_mode": place_mode,
             "constrained_place_error_m": constrained_place_error,
+            "constrained_place_upright_tilt_degrees": (
+                constrained_place_tilt
+            ),
             "final_place_error_m": final_position_error,
             "final_doll_state": final_doll_state,
         },
@@ -3362,6 +3655,176 @@ def run_curobo_pick_place_smoke(
         "final_robots": final_robots,
         "settled_dolls": settled_report,
         "worker_diagnostic_tail": worker_diagnostics[-20:],
+    }
+
+
+def assign_dolls_to_robots(
+    doll_poses: dict[str, PoseSpec],
+) -> dict[str, str]:
+    """Assign by table side while guaranteeing participation by both arms."""
+
+    expected = {spec.asset_id for spec in get_doll_specs()}
+    if set(doll_poses) != expected:
+        raise ValueError(
+            f"Cannot assign changed doll IDs: {sorted(doll_poses)}"
+        )
+    assignments = {
+        asset_id: ("left" if pose.position[0] <= 0.0 else "right")
+        for asset_id, pose in doll_poses.items()
+    }
+    used = set(assignments.values())
+    if used == {"left"}:
+        asset_id = max(
+            doll_poses,
+            key=lambda candidate: doll_poses[candidate].position[0],
+        )
+        assignments[asset_id] = "right"
+    elif used == {"right"}:
+        asset_id = min(
+            doll_poses,
+            key=lambda candidate: doll_poses[candidate].position[0],
+        )
+        assignments[asset_id] = "left"
+    return assignments
+
+
+def validate_sorted_doll_states(
+    states: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    """Require the five released dolls at their size-aware central targets."""
+
+    _validate_stable_doll_states(states)
+    targets = {
+        placement.asset_id: placement
+        for placement in compute_doll_target_layout()
+    }
+    errors: dict[str, float] = {}
+    for asset_id, target in targets.items():
+        error = math.sqrt(
+            sum(
+                (
+                    float(states[asset_id]["position_m"][index])
+                    - target.pose.position[index]
+                )
+                ** 2
+                for index in range(3)
+            )
+        )
+        errors[asset_id] = error
+        if error > MATRYOSHKA_POSITION_TOLERANCE:
+            raise ValueError(
+                f"{asset_id}: final target error {error:.6f} m exceeds "
+                f"{MATRYOSHKA_POSITION_TOLERANCE:.6f} m"
+            )
+    final_y = [
+        float(states[asset_id]["position_m"][1])
+        for asset_id in MATRYOSHKA_SORT_ORDER
+    ]
+    if any(
+        second <= first for first, second in zip(final_y, final_y[1:])
+    ):
+        raise ValueError("Final doll centres are not ordered small-to-large")
+    return {
+        "target_error_m": errors,
+        "maximum_target_error_m": max(errors.values()),
+        "order_small_to_large": list(MATRYOSHKA_SORT_ORDER),
+        "center_line_x_m": [
+            float(states[asset_id]["position_m"][0])
+            for asset_id in MATRYOSHKA_SORT_ORDER
+        ],
+        "ordered_y_m": final_y,
+    }
+
+
+def run_full_curobo_sort(
+    world: Any,
+    robots: dict[str, Any],
+    dolls: dict[str, Any],
+    *,
+    planner_seed: int,
+    render: bool,
+) -> dict[str, Any]:
+    """Sequentially sort all five dolls with both Piper arms."""
+
+    initial_poses = _current_doll_poses(dolls)
+    assignments = assign_dolls_to_robots(initial_poses)
+    if set(assignments.values()) != {"left", "right"}:
+        raise RuntimeError("Full sort must assign work to both Piper arms")
+
+    # Clear objects initially adjacent to future target slots before filling
+    # those slots.  This leaves physical finger clearance that is not captured
+    # fully by the conservative planning spheres.
+    pick_order = ("00004", "00003", "00002", "00000", "00001")
+    operations: list[dict[str, Any]] = []
+    placed_asset_ids: list[str] = []
+    for operation_index, asset_id in enumerate(pick_order, start=1):
+        print(
+            "CUROBO_SORT_PROGRESS "
+            f"{operation_index}/{len(pick_order)} "
+            f"asset={asset_id} robot={assignments[asset_id]} start",
+            flush=True,
+        )
+        operation = run_curobo_pick_place_smoke(
+            world,
+            robots,
+            dolls,
+            planner_seed=planner_seed,
+            render=render,
+            asset_id=asset_id,
+            active_robot_name=assignments[asset_id],
+        )
+        operations.append(operation)
+        placed_asset_ids.append(asset_id)
+        current_poses = _current_doll_poses(dolls)
+        target_poses = {
+            placement.asset_id: placement.pose
+            for placement in compute_doll_target_layout()
+        }
+        placed_errors = {
+            placed_id: math.sqrt(
+                sum(
+                    (
+                        current_poses[placed_id].position[index]
+                        - target_poses[placed_id].position[index]
+                    )
+                    ** 2
+                    for index in range(3)
+                )
+            )
+            for placed_id in placed_asset_ids
+        }
+        print(
+            "CUROBO_SORT_PROGRESS "
+            f"{operation_index}/{len(pick_order)} "
+            f"asset={asset_id} robot={assignments[asset_id]} complete "
+            "final_error_m="
+            f"{operation['release']['final_place_error_m']:.6f} "
+            "tilt_deg="
+            f"{operation['release']['final_doll_state']['upright_tilt_degrees']:.6f} "
+            "placed_errors_m="
+            f"{json.dumps(placed_errors, sort_keys=True)}",
+            flush=True,
+        )
+
+    final_settled = settle_and_validate_dolls(world, dolls)
+    final_validation = validate_sorted_doll_states(
+        final_settled["stable_states"]
+    )
+    final_robots = validate_robots_at_home(
+        robots,
+        label="full_sort_final",
+    )
+    return {
+        "planner": "cuRobo MotionPlanner",
+        "planner_seed_per_operation": planner_seed,
+        "pick_order": list(pick_order),
+        "assignments": assignments,
+        "participating_robots": sorted(set(assignments.values())),
+        "operations": operations,
+        "final_settled_dolls": final_settled,
+        "final_validation": final_validation,
+        "final_robots": final_robots,
+        "success": True,
     }
 
 
@@ -3676,7 +4139,12 @@ def create_dolls(
     from isaacsim.core.prims import (  # type: ignore[import-not-found]
         SingleRigidPrim,
     )
-    from pxr import Usd, UsdPhysics, UsdShade  # type: ignore[import-not-found]
+    from pxr import (  # type: ignore[import-not-found]
+        PhysxSchema,
+        Usd,
+        UsdPhysics,
+        UsdShade,
+    )
 
     validate_initial_doll_layout(placements)
     stage = world.stage
@@ -3723,6 +4191,22 @@ def create_dolls(
     world.reset()
     zero = np.zeros(3, dtype=np.float32)
     for asset_id, doll in dolls.items():
+        prim = stage.GetPrimAtPath(_doll_prim_path(asset_id))
+        physx_body = PhysxSchema.PhysxRigidBodyAPI(prim)
+        if not physx_body:
+            physx_body = PhysxSchema.PhysxRigidBodyAPI.Apply(prim)
+        physx_body.CreateLinearDampingAttr().Set(
+            MATRYOSHKA_LINEAR_DAMPING
+        )
+        physx_body.CreateAngularDampingAttr().Set(
+            MATRYOSHKA_ANGULAR_DAMPING
+        )
+        physx_body.CreateSleepThresholdAttr().Set(
+            MATRYOSHKA_SLEEP_THRESHOLD
+        )
+        physx_body.CreateStabilizationThresholdAttr().Set(
+            MATRYOSHKA_STABILIZATION_THRESHOLD
+        )
         doll.set_mass(specs_by_id[asset_id].mass)
         doll.set_linear_velocity(zero)
         doll.set_angular_velocity(zero)
@@ -3815,7 +4299,12 @@ def validate_doll_physics(
 ) -> dict[str, Any]:
     """Validate composed rigid bodies, convex collisions, mass, and material."""
 
-    from pxr import Usd, UsdPhysics, UsdShade  # type: ignore[import-not-found]
+    from pxr import (  # type: ignore[import-not-found]
+        PhysxSchema,
+        Usd,
+        UsdPhysics,
+        UsdShade,
+    )
 
     specs_by_id = {spec.asset_id: spec for spec in get_doll_specs()}
     material_prim = world.stage.GetPrimAtPath(MATRYOSHKA_PHYSICS_MATERIAL_PATH)
@@ -3833,6 +4322,39 @@ def validate_doll_physics(
         prim = world.stage.GetPrimAtPath(prim_path)
         if not prim or not prim.HasAPI(UsdPhysics.RigidBodyAPI):
             raise ValueError(f"{asset_id}: root is not a rigid body")
+        physx_body = PhysxSchema.PhysxRigidBodyAPI(prim)
+        if not physx_body:
+            raise ValueError(f"{asset_id}: PhysX rigid-body API is missing")
+        physx_values = {
+            "linear_damping": float(
+                physx_body.GetLinearDampingAttr().Get()
+            ),
+            "angular_damping": float(
+                physx_body.GetAngularDampingAttr().Get()
+            ),
+            "sleep_threshold": float(
+                physx_body.GetSleepThresholdAttr().Get()
+            ),
+            "stabilization_threshold": float(
+                physx_body.GetStabilizationThresholdAttr().Get()
+            ),
+        }
+        expected_physx_values = {
+            "linear_damping": MATRYOSHKA_LINEAR_DAMPING,
+            "angular_damping": MATRYOSHKA_ANGULAR_DAMPING,
+            "sleep_threshold": MATRYOSHKA_SLEEP_THRESHOLD,
+            "stabilization_threshold": MATRYOSHKA_STABILIZATION_THRESHOLD,
+        }
+        for property_name, expected in expected_physx_values.items():
+            if not math.isclose(
+                physx_values[property_name],
+                expected,
+                abs_tol=1.0e-7,
+            ):
+                raise ValueError(
+                    f"{asset_id}: {property_name} "
+                    f"{physx_values[property_name]} differs from {expected}"
+                )
         mass = float(doll.get_mass())
         if not math.isclose(mass, spec.mass, abs_tol=1.0e-7):
             raise ValueError(f"{asset_id}: expected mass {spec.mass}, found {mass}")
@@ -3863,6 +4385,7 @@ def validate_doll_physics(
             ),
             "dynamic_friction": friction,
             "restitution": float(material_api.GetRestitutionAttr().Get()),
+            **physx_values,
             "collision_prim_paths": [
                 str(collision_prim.GetPath()) for collision_prim in collision_prims
             ],
@@ -3880,14 +4403,16 @@ def settle_and_validate_dolls(
     initial_states = _doll_state_report(dolls)
     consecutive = 0
     final_states: dict[str, dict[str, Any]] | None = None
+    last_validation_error = "no physics steps executed"
     settle_steps = 0
     for settle_steps in range(1, MATRYOSHKA_SETTLE_MAX_STEPS + 1):
         world.step(render=False)
         states = _doll_state_report(dolls)
         try:
             _validate_stable_doll_states(states)
-        except ValueError:
+        except ValueError as error:
             consecutive = 0
+            last_validation_error = str(error)
         else:
             consecutive += 1
             if consecutive >= MATRYOSHKA_STABLE_CONSECUTIVE_STEPS:
@@ -3896,7 +4421,9 @@ def settle_and_validate_dolls(
     if final_states is None:
         raise RuntimeError(
             "Dolls did not satisfy the stable pose/velocity limits after "
-            f"{MATRYOSHKA_SETTLE_MAX_STEPS} physics steps"
+            f"{MATRYOSHKA_SETTLE_MAX_STEPS} physics steps; "
+            f"last_validation_error={last_validation_error}; "
+            f"last_states={states}"
         )
     geometry = _validate_stable_doll_states(final_states)
     return {
@@ -4373,6 +4900,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "dolls",
             "motion",
             "pick",
+            "sort",
             "planner-worker",
             "demo",
             "collect",
@@ -4405,6 +4933,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "dolls",
         "motion",
         "pick",
+        "sort",
     }:
         # SimulationApp.close() shuts down the Python process in Isaac Sim 5.1,
         # so all useful output must be emitted and flushed before that call.
@@ -4494,6 +5023,38 @@ def main(argv: Sequence[str] | None = None) -> int:
                 world, args.output_dir / "pick" / preview_name
             )
             marker = "CUROBO_PICK_PLACE_SMOKE_OK"
+        elif args.mode == "sort":
+            seeds = set_episode_random_seeds(args.seed)
+            layout = sample_initial_doll_layout(args.seed)
+            world = create_scene()
+            robots = create_robots(world)
+            dolls = create_dolls(world, layout)
+            initial_dolls = settle_and_validate_dolls(world, dolls)
+            report = {
+                "seeds": {
+                    **seeds,
+                    "curobo_motion_planner": args.planner_seed,
+                },
+                "sampled_layout": [
+                    asdict(placement) for placement in layout
+                ],
+                "initial_dolls": initial_dolls,
+                "scene": validate_scene(world),
+                "sort": run_full_curobo_sort(
+                    world,
+                    robots,
+                    dolls,
+                    planner_seed=args.planner_seed,
+                    render=not args.headless,
+                ),
+            }
+            preview_name = (
+                "sort_headless.png" if args.headless else "sort_headed.png"
+            )
+            report["preview"] = capture_scene_preview(
+                world, args.output_dir / "sort" / preview_name
+            )
+            marker = "CUROBO_FULL_SORT_OK"
         elif args.mode == "cameras":
             world = create_scene()
             robots = create_robots(world)
