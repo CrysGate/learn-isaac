@@ -167,6 +167,20 @@ MATRYOSHKA_POSITION_TOLERANCE: Final = 0.02
 MATRYOSHKA_UPRIGHT_TOLERANCE_DEGREES: Final = 10.0
 MATRYOSHKA_LINEAR_SPEED_TOLERANCE: Final = 0.01
 MATRYOSHKA_ANGULAR_SPEED_TOLERANCE: Final = 0.10
+MATRYOSHKA_PRIM_ROOT: Final = "/World/Objects"
+MATRYOSHKA_PHYSICS_MATERIAL_PATH: Final = "/World/Looks/MatryoshkaPhysics"
+MATRYOSHKA_PHYSICS_RESTITUTION: Final = 0.05
+# This central area remains inside the overhead view and leaves generous room
+# for grasp approach, the table edges, and the rear robot bases.
+MATRYOSHKA_RANDOM_X_RANGE: Final = (-0.40, 0.40)
+MATRYOSHKA_RANDOM_Y_RANGE: Final = (-0.22, 0.28)
+MATRYOSHKA_TABLE_EDGE_CLEARANCE: Final = 0.08
+MATRYOSHKA_ROBOT_BASE_EXCLUSION_RADIUS: Final = 0.16
+MATRYOSHKA_LAYOUT_SAMPLES_PER_OBJECT: Final = 500
+MATRYOSHKA_SPAWN_CLEARANCE: Final = 0.003
+MATRYOSHKA_TABLE_HEIGHT_TOLERANCE: Final = 0.008
+MATRYOSHKA_SETTLE_MAX_STEPS: Final = 1_440
+MATRYOSHKA_STABLE_CONSECUTIVE_STEPS: Final = 30
 
 
 @dataclass(frozen=True)
@@ -199,6 +213,15 @@ class DollSpec:
     mass: float
     friction: float
     uuid: str
+
+
+@dataclass(frozen=True)
+class DollPlacement:
+    """A deterministic upright doll placement."""
+
+    asset_id: str
+    pose: PoseSpec
+    yaw_rad: float
 
 
 @dataclass(frozen=True)
@@ -330,6 +353,257 @@ def get_doll_specs() -> tuple[DollSpec, ...]:
     """Load the five allowed doll specifications from local metadata."""
 
     return _read_doll_specs()
+
+
+def compute_doll_target_layout() -> tuple[DollPlacement, ...]:
+    """Compute the size-aware, Y-axis target line centred on the table."""
+
+    specs_by_id = {spec.asset_id: spec for spec in get_doll_specs()}
+    ordered_specs = [specs_by_id[asset_id] for asset_id in MATRYOSHKA_SORT_ORDER]
+    center_distances = [
+        first.footprint_radius
+        + second.footprint_radius
+        + MATRYOSHKA_TARGET_GAP
+        for first, second in zip(ordered_specs, ordered_specs[1:])
+    ]
+    occupied_length = (
+        ordered_specs[0].footprint_radius
+        + sum(center_distances)
+        + ordered_specs[-1].footprint_radius
+    )
+    table_center_y = TABLE_POSITION[1]
+    current_y = (
+        table_center_y
+        - occupied_length / 2.0
+        + ordered_specs[0].footprint_radius
+    )
+    placements: list[DollPlacement] = []
+    for index, spec in enumerate(ordered_specs):
+        placements.append(
+            DollPlacement(
+                asset_id=spec.asset_id,
+                pose=PoseSpec(
+                    (
+                        0.0,
+                        current_y,
+                        TABLE_TOP_Z + spec.height / 2.0,
+                    ),
+                    IDENTITY_QUATERNION,
+                ),
+                yaw_rad=0.0,
+            )
+        )
+        if index < len(center_distances):
+            current_y += center_distances[index]
+    return tuple(placements)
+
+
+def _planar_distance(first: PoseSpec, second: PoseSpec) -> float:
+    return math.hypot(
+        first.position[0] - second.position[0],
+        first.position[1] - second.position[1],
+    )
+
+
+def validate_initial_doll_layout(
+    placements: Sequence[DollPlacement],
+) -> dict[str, Any]:
+    """Validate IDs, table margins, base exclusion, gaps, and non-sorted state."""
+
+    specs_by_id = {spec.asset_id: spec for spec in get_doll_specs()}
+    placement_by_id = {placement.asset_id: placement for placement in placements}
+    expected_ids = set(specs_by_id)
+    if len(placements) != len(expected_ids) or set(placement_by_id) != expected_ids:
+        raise ValueError(
+            f"Layout must contain each selected doll exactly once: {sorted(expected_ids)}"
+        )
+
+    minimum_table_clearance = math.inf
+    minimum_robot_base_clearance = math.inf
+    for asset_id, placement in placement_by_id.items():
+        spec = specs_by_id[asset_id]
+        x, y, z = placement.pose.position
+        if not (
+            MATRYOSHKA_RANDOM_X_RANGE[0] <= x <= MATRYOSHKA_RANDOM_X_RANGE[1]
+            and MATRYOSHKA_RANDOM_Y_RANGE[0] <= y <= MATRYOSHKA_RANDOM_Y_RANGE[1]
+        ):
+            raise ValueError(f"{asset_id}: sampled centre is outside the random area")
+        expected_z = TABLE_TOP_Z + spec.height / 2.0 + MATRYOSHKA_SPAWN_CLEARANCE
+        if not math.isclose(z, expected_z, abs_tol=1.0e-9):
+            raise ValueError(f"{asset_id}: sampled Z is not the upright spawn height")
+        table_clearance = min(
+            x - spec.footprint_radius - TABLE_X_RANGE[0],
+            TABLE_X_RANGE[1] - x - spec.footprint_radius,
+            y - spec.footprint_radius - TABLE_Y_RANGE[0],
+            TABLE_Y_RANGE[1] - y - spec.footprint_radius,
+        )
+        minimum_table_clearance = min(minimum_table_clearance, table_clearance)
+        if table_clearance < MATRYOSHKA_TABLE_EDGE_CLEARANCE:
+            raise ValueError(
+                f"{asset_id}: table edge clearance {table_clearance:.4f} m"
+            )
+        for robot_spec in ROBOT_SPECS:
+            distance = math.hypot(
+                x - robot_spec.base_pose.position[0],
+                y - robot_spec.base_pose.position[1],
+            )
+            clearance = (
+                distance
+                - spec.footprint_radius
+                - MATRYOSHKA_ROBOT_BASE_EXCLUSION_RADIUS
+            )
+            minimum_robot_base_clearance = min(
+                minimum_robot_base_clearance, clearance
+            )
+            if clearance < 0.0:
+                raise ValueError(f"{asset_id}: intersects a robot base exclusion zone")
+
+    minimum_pair_gap = math.inf
+    placement_items = list(placement_by_id.items())
+    for index, (first_id, first) in enumerate(placement_items):
+        for second_id, second in placement_items[index + 1 :]:
+            gap = (
+                _planar_distance(first.pose, second.pose)
+                - specs_by_id[first_id].footprint_radius
+                - specs_by_id[second_id].footprint_radius
+            )
+            minimum_pair_gap = min(minimum_pair_gap, gap)
+            if gap < MATRYOSHKA_INITIAL_GAP - 1.0e-9:
+                raise ValueError(
+                    f"{first_id}/{second_id}: pair gap {gap:.4f} m is too small"
+                )
+
+    targets = {
+        placement.asset_id: placement for placement in compute_doll_target_layout()
+    }
+    target_errors = {
+        asset_id: _planar_distance(placement.pose, targets[asset_id].pose)
+        for asset_id, placement in placement_by_id.items()
+    }
+    already_sorted = all(
+        error <= MATRYOSHKA_POSITION_TOLERANCE
+        for error in target_errors.values()
+    )
+    if already_sorted:
+        raise ValueError("Initial layout already satisfies the final sorted targets")
+
+    return {
+        "minimum_pair_surface_gap_m": minimum_pair_gap,
+        "minimum_table_edge_clearance_m": minimum_table_clearance,
+        "minimum_robot_base_exclusion_clearance_m": minimum_robot_base_clearance,
+        "already_sorted": already_sorted,
+        "target_xy_errors_m": target_errors,
+    }
+
+
+def sample_initial_doll_layout(
+    seed: int,
+    *,
+    samples_per_object: int = MATRYOSHKA_LAYOUT_SAMPLES_PER_OBJECT,
+) -> tuple[DollPlacement, ...]:
+    """Use finite deterministic rejection sampling for five upright poses."""
+
+    import numpy as np
+
+    if seed < 0:
+        raise ValueError("Episode seed must be non-negative")
+    if samples_per_object <= 0:
+        raise ValueError("samples_per_object must be positive")
+    rng = np.random.default_rng(seed)
+    specs = get_doll_specs()
+    specs_by_id = {spec.asset_id: spec for spec in specs}
+    # Largest-first placement keeps rejection rates low while the return order
+    # remains the stable asset-ID order used everywhere else.
+    sampling_order = sorted(specs, key=lambda spec: spec.footprint_radius, reverse=True)
+    accepted: dict[str, DollPlacement] = {}
+    for spec in sampling_order:
+        for _ in range(samples_per_object):
+            x = float(rng.uniform(*MATRYOSHKA_RANDOM_X_RANGE))
+            y = float(rng.uniform(*MATRYOSHKA_RANDOM_Y_RANGE))
+            yaw = float(rng.uniform(-math.pi, math.pi))
+            candidate = DollPlacement(
+                asset_id=spec.asset_id,
+                pose=PoseSpec(
+                    (
+                        x,
+                        y,
+                        TABLE_TOP_Z
+                        + spec.height / 2.0
+                        + MATRYOSHKA_SPAWN_CLEARANCE,
+                    ),
+                    (
+                        math.cos(yaw / 2.0),
+                        0.0,
+                        0.0,
+                        math.sin(yaw / 2.0),
+                    ),
+                ),
+                yaw_rad=yaw,
+            )
+            table_clearance = min(
+                x - spec.footprint_radius - TABLE_X_RANGE[0],
+                TABLE_X_RANGE[1] - x - spec.footprint_radius,
+                y - spec.footprint_radius - TABLE_Y_RANGE[0],
+                TABLE_Y_RANGE[1] - y - spec.footprint_radius,
+            )
+            if table_clearance < MATRYOSHKA_TABLE_EDGE_CLEARANCE:
+                continue
+            if any(
+                math.hypot(
+                    x - robot.base_pose.position[0],
+                    y - robot.base_pose.position[1],
+                )
+                < MATRYOSHKA_ROBOT_BASE_EXCLUSION_RADIUS
+                + spec.footprint_radius
+                for robot in ROBOT_SPECS
+            ):
+                continue
+            if any(
+                _planar_distance(candidate.pose, previous.pose)
+                < spec.footprint_radius
+                + specs_by_id[previous.asset_id].footprint_radius
+                + MATRYOSHKA_INITIAL_GAP
+                for previous in accepted.values()
+            ):
+                continue
+            accepted[spec.asset_id] = candidate
+            break
+        else:
+            raise RuntimeError(
+                f"Failed to sample {spec.asset_id} after "
+                f"{samples_per_object} finite attempts for seed {seed}"
+            )
+
+    layout = tuple(accepted[spec.asset_id] for spec in specs)
+    validate_initial_doll_layout(layout)
+    return layout
+
+
+def set_episode_random_seeds(seed: int) -> dict[str, Any]:
+    """Seed Python, NumPy, PyTorch, CUDA, and the torch-backed cuRobo path."""
+
+    import random
+
+    import numpy as np
+    import torch
+
+    if seed < 0:
+        raise ValueError("Episode seed must be non-negative")
+    numpy_seed = seed % (2**32)
+    random.seed(seed)
+    np.random.seed(numpy_seed)
+    torch.manual_seed(seed)
+    cuda_seeded = bool(torch.cuda.is_available())
+    if cuda_seeded:
+        torch.cuda.manual_seed_all(seed)
+    return {
+        "episode": seed,
+        "python_random": seed,
+        "numpy": numpy_seed,
+        "torch": seed,
+        "torch_cuda": seed if cuda_seeded else None,
+        "curobo_via_torch": seed,
+    }
 
 
 def _require_mdl_entry(path: Path, entry: str) -> None:
@@ -1432,6 +1706,268 @@ def exercise_and_validate_robots(
     }
 
 
+def _doll_prim_path(asset_id: str) -> str:
+    return f"{MATRYOSHKA_PRIM_ROOT}/Doll_{asset_id}"
+
+
+def _create_doll_physics_material(stage: Any) -> Any:
+    from pxr import UsdPhysics, UsdShade  # type: ignore[import-not-found]
+
+    material = UsdShade.Material.Define(stage, MATRYOSHKA_PHYSICS_MATERIAL_PATH)
+    physics = UsdPhysics.MaterialAPI.Apply(material.GetPrim())
+    friction = get_doll_specs()[0].friction
+    physics.CreateStaticFrictionAttr(friction)
+    physics.CreateDynamicFrictionAttr(friction)
+    physics.CreateRestitutionAttr(MATRYOSHKA_PHYSICS_RESTITUTION)
+    return material
+
+
+def create_dolls(
+    world: Any,
+    placements: Sequence[DollPlacement],
+) -> dict[str, Any]:
+    """Reference the five rigid USDZ assets and apply metadata mass/friction."""
+
+    import numpy as np
+    from isaacsim.core.prims import (  # type: ignore[import-not-found]
+        SingleRigidPrim,
+    )
+    from pxr import Usd, UsdPhysics, UsdShade  # type: ignore[import-not-found]
+
+    validate_initial_doll_layout(placements)
+    stage = world.stage
+    if stage.GetPrimAtPath(MATRYOSHKA_PRIM_ROOT):
+        raise ValueError(f"Doll root already exists: {MATRYOSHKA_PRIM_ROOT}")
+    stage.DefinePrim(MATRYOSHKA_PRIM_ROOT, "Xform")
+    material = _create_doll_physics_material(stage)
+    specs_by_id = {spec.asset_id: spec for spec in get_doll_specs()}
+    dolls: dict[str, Any] = {}
+
+    for placement in placements:
+        spec = specs_by_id[placement.asset_id]
+        prim_path = _doll_prim_path(spec.asset_id)
+        prim = _add_reference(
+            stage,
+            prim_path=prim_path,
+            asset_path=spec.asset_path,
+            pose=placement.pose,
+        )
+        mass_api = UsdPhysics.MassAPI.Apply(prim)
+        mass_api.CreateMassAttr(spec.mass)
+        collision_prims = [
+            descendant
+            for descendant in Usd.PrimRange(prim)
+            if descendant.HasAPI(UsdPhysics.CollisionAPI)
+        ]
+        if not collision_prims:
+            raise ValueError(f"{spec.asset_id}: composed asset has no collision prim")
+        for collision_prim in collision_prims:
+            binding_api = UsdShade.MaterialBindingAPI.Apply(collision_prim)
+            binding_api.Bind(
+                material,
+                bindingStrength=UsdShade.Tokens.strongerThanDescendants,
+                materialPurpose="physics",
+            )
+        dolls[spec.asset_id] = world.scene.add(
+            SingleRigidPrim(
+                prim_path=prim_path,
+                name=f"doll_{spec.asset_id}",
+                reset_xform_properties=False,
+            )
+        )
+
+    world.reset()
+    zero = np.zeros(3, dtype=np.float32)
+    for asset_id, doll in dolls.items():
+        doll.set_mass(specs_by_id[asset_id].mass)
+        doll.set_linear_velocity(zero)
+        doll.set_angular_velocity(zero)
+    return dolls
+
+
+def _doll_state_report(
+    dolls: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    import numpy as np
+
+    specs_by_id = {spec.asset_id: spec for spec in get_doll_specs()}
+    report: dict[str, dict[str, Any]] = {}
+    for asset_id, doll in dolls.items():
+        position, quaternion = doll.get_world_pose()
+        linear_velocity = np.asarray(doll.get_linear_velocity(), dtype=np.float64)
+        angular_velocity = np.asarray(doll.get_angular_velocity(), dtype=np.float64)
+        local_up = _quaternion_rotate_vector(quaternion, (0.0, 0.0, 1.0))
+        upright_cosine = min(1.0, max(-1.0, float(local_up[2])))
+        report[asset_id] = {
+            "position_m": np.asarray(position, dtype=np.float64).tolist(),
+            "quaternion_wxyz": np.asarray(quaternion, dtype=np.float64).tolist(),
+            "linear_velocity_m_s": linear_velocity.tolist(),
+            "angular_velocity_rad_s": angular_velocity.tolist(),
+            "linear_speed_m_s": float(np.linalg.norm(linear_velocity)),
+            "angular_speed_rad_s": float(np.linalg.norm(angular_velocity)),
+            "upright_tilt_degrees": math.degrees(math.acos(upright_cosine)),
+            "estimated_bottom_z_m": float(
+                position[2] - specs_by_id[asset_id].height / 2.0
+            ),
+        }
+    return report
+
+
+def _validate_stable_doll_states(
+    states: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    specs_by_id = {spec.asset_id: spec for spec in get_doll_specs()}
+    expected_ids = set(specs_by_id)
+    if set(states) != expected_ids:
+        raise ValueError(f"Stable-state IDs changed: {sorted(states)}")
+
+    for asset_id, state in states.items():
+        if state["linear_speed_m_s"] > MATRYOSHKA_LINEAR_SPEED_TOLERANCE:
+            raise ValueError(f"{asset_id}: linear speed is above the stable limit")
+        if state["angular_speed_rad_s"] > MATRYOSHKA_ANGULAR_SPEED_TOLERANCE:
+            raise ValueError(f"{asset_id}: angular speed is above the stable limit")
+        if state["upright_tilt_degrees"] > MATRYOSHKA_UPRIGHT_TOLERANCE_DEGREES:
+            raise ValueError(f"{asset_id}: doll is not upright")
+        if (
+            abs(state["estimated_bottom_z_m"] - TABLE_TOP_Z)
+            > MATRYOSHKA_TABLE_HEIGHT_TOLERANCE
+        ):
+            raise ValueError(
+                f"{asset_id}: bottom is not resting on the table, "
+                f"z={state['estimated_bottom_z_m']}"
+            )
+        x, y = state["position_m"][:2]
+        radius = specs_by_id[asset_id].footprint_radius
+        if not (
+            TABLE_X_RANGE[0] + radius <= x <= TABLE_X_RANGE[1] - radius
+            and TABLE_Y_RANGE[0] + radius <= y <= TABLE_Y_RANGE[1] - radius
+        ):
+            raise ValueError(f"{asset_id}: stable doll is outside the tabletop")
+
+    minimum_pair_gap = math.inf
+    state_items = list(states.items())
+    for index, (first_id, first) in enumerate(state_items):
+        for second_id, second in state_items[index + 1 :]:
+            distance = math.hypot(
+                first["position_m"][0] - second["position_m"][0],
+                first["position_m"][1] - second["position_m"][1],
+            )
+            gap = (
+                distance
+                - specs_by_id[first_id].footprint_radius
+                - specs_by_id[second_id].footprint_radius
+            )
+            minimum_pair_gap = min(minimum_pair_gap, gap)
+            if gap < -1.0e-3:
+                raise ValueError(
+                    f"{first_id}/{second_id}: stable collision overlap {gap:.5f} m"
+                )
+    return {"minimum_pair_surface_gap_m": minimum_pair_gap}
+
+
+def validate_doll_physics(
+    world: Any,
+    dolls: dict[str, Any],
+) -> dict[str, Any]:
+    """Validate composed rigid bodies, convex collisions, mass, and material."""
+
+    from pxr import Usd, UsdPhysics, UsdShade  # type: ignore[import-not-found]
+
+    specs_by_id = {spec.asset_id: spec for spec in get_doll_specs()}
+    material_prim = world.stage.GetPrimAtPath(MATRYOSHKA_PHYSICS_MATERIAL_PATH)
+    if not material_prim or not material_prim.HasAPI(UsdPhysics.MaterialAPI):
+        raise ValueError("Matryoshka physics material was not created")
+    material_api = UsdPhysics.MaterialAPI(material_prim)
+    friction = float(material_api.GetDynamicFrictionAttr().Get())
+    if not math.isclose(friction, get_doll_specs()[0].friction, abs_tol=1.0e-7):
+        raise ValueError("Matryoshka dynamic friction differs from metadata")
+
+    report: dict[str, Any] = {}
+    for asset_id, doll in dolls.items():
+        spec = specs_by_id[asset_id]
+        prim_path = _doll_prim_path(asset_id)
+        prim = world.stage.GetPrimAtPath(prim_path)
+        if not prim or not prim.HasAPI(UsdPhysics.RigidBodyAPI):
+            raise ValueError(f"{asset_id}: root is not a rigid body")
+        mass = float(doll.get_mass())
+        if not math.isclose(mass, spec.mass, abs_tol=1.0e-7):
+            raise ValueError(f"{asset_id}: expected mass {spec.mass}, found {mass}")
+        collision_prims = [
+            descendant
+            for descendant in Usd.PrimRange(prim)
+            if descendant.HasAPI(UsdPhysics.CollisionAPI)
+        ]
+        bound_material_paths: list[str] = []
+        for collision_prim in collision_prims:
+            binding = UsdShade.MaterialBindingAPI(
+                collision_prim
+            ).GetDirectBinding("physics")
+            bound_material_paths.append(str(binding.GetMaterialPath()))
+        if not collision_prims or set(bound_material_paths) != {
+            MATRYOSHKA_PHYSICS_MATERIAL_PATH
+        }:
+            raise ValueError(
+                f"{asset_id}: physics material binding failed: "
+                f"{bound_material_paths}"
+            )
+        report[asset_id] = {
+            "prim_path": prim_path,
+            "asset_path": str(spec.asset_path),
+            "mass_kg": mass,
+            "static_friction": float(
+                material_api.GetStaticFrictionAttr().Get()
+            ),
+            "dynamic_friction": friction,
+            "restitution": float(material_api.GetRestitutionAttr().Get()),
+            "collision_prim_paths": [
+                str(collision_prim.GetPath()) for collision_prim in collision_prims
+            ],
+            "physics_material_path": MATRYOSHKA_PHYSICS_MATERIAL_PATH,
+        }
+    return report
+
+
+def settle_and_validate_dolls(
+    world: Any,
+    dolls: dict[str, Any],
+) -> dict[str, Any]:
+    """Advance finite physics steps until all five dolls are stably upright."""
+
+    initial_states = _doll_state_report(dolls)
+    consecutive = 0
+    final_states: dict[str, dict[str, Any]] | None = None
+    settle_steps = 0
+    for settle_steps in range(1, MATRYOSHKA_SETTLE_MAX_STEPS + 1):
+        world.step(render=False)
+        states = _doll_state_report(dolls)
+        try:
+            _validate_stable_doll_states(states)
+        except ValueError:
+            consecutive = 0
+        else:
+            consecutive += 1
+            if consecutive >= MATRYOSHKA_STABLE_CONSECUTIVE_STEPS:
+                final_states = states
+                break
+    if final_states is None:
+        raise RuntimeError(
+            "Dolls did not satisfy the stable pose/velocity limits after "
+            f"{MATRYOSHKA_SETTLE_MAX_STEPS} physics steps"
+        )
+    geometry = _validate_stable_doll_states(final_states)
+    return {
+        "initial_states": initial_states,
+        "stable_states": final_states,
+        "settling": {
+            "physics_steps": settle_steps,
+            "stable_consecutive_steps": consecutive,
+            "duration_s": settle_steps * PHYSICS_DT,
+            **geometry,
+        },
+        "physics": validate_doll_physics(world, dolls),
+    }
+
+
 def camera_intrinsics(spec: CameraSpec) -> list[list[float]]:
     """Return the configured pinhole matrix without importing Isaac Sim."""
 
@@ -1730,6 +2266,41 @@ def validate_and_capture_cameras(
             raise ValueError(
                 f"{name}: target projects outside the image at {target_pixel.tolist()}"
             )
+        workspace_pixels: list[list[float]] | None = None
+        if name == OVERHEAD_CAMERA_NAME:
+            workspace_points = np.asarray(
+                [
+                    (x, y, TABLE_TOP_Z)
+                    for x in MATRYOSHKA_RANDOM_X_RANGE
+                    for y in MATRYOSHKA_RANDOM_Y_RANGE
+                ]
+                + [
+                    placement.pose.position
+                    for placement in compute_doll_target_layout()
+                ],
+                dtype=np.float64,
+            )
+            projected_workspace = np.asarray(
+                camera.get_image_coords_from_world_points(workspace_points),
+                dtype=np.float64,
+            )
+            if not np.all(
+                (projected_workspace[:, 0] >= CAMERA_TARGET_PIXEL_MARGIN)
+                & (
+                    projected_workspace[:, 0]
+                    < width - CAMERA_TARGET_PIXEL_MARGIN
+                )
+                & (projected_workspace[:, 1] >= CAMERA_TARGET_PIXEL_MARGIN)
+                & (
+                    projected_workspace[:, 1]
+                    < height - CAMERA_TARGET_PIXEL_MARGIN
+                )
+            ):
+                raise ValueError(
+                    "Overhead camera does not cover the complete random and "
+                    f"target regions: {projected_workspace.tolist()}"
+                )
+            workspace_pixels = projected_workspace.tolist()
 
         rgb = observations[name]["rgb"]
         depth = observations[name]["depth"]
@@ -1822,6 +2393,7 @@ def validate_and_capture_cameras(
                 "target_pixel_uv": target_pixel.tolist(),
                 "optical_axis_target_cosine": target_alignment,
                 "target_distance_m": target_distance,
+                "random_corners_and_targets_pixels_uv": workspace_pixels,
             },
             "rendering_time_s": observations[name]["rendering_time_s"],
             **preview,
@@ -1838,6 +2410,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "scene",
             "robots",
             "cameras",
+            "dolls",
             "demo",
             "collect",
             "replay",
@@ -1858,7 +2431,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_argument_parser().parse_args(argv)
-    if args.mode in {"audit", "scene", "robots", "cameras"}:
+    if args.mode in {"audit", "scene", "robots", "cameras", "dolls"}:
         # SimulationApp.close() shuts down the Python process in Isaac Sim 5.1,
         # so all useful output must be emitted and flushed before that call.
         validate_static_assets()
@@ -1894,7 +2467,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 world, args.output_dir / "robots" / preview_name
             )
             marker = "ROBOT_SMOKE_OK"
-        else:
+        elif args.mode == "cameras":
             world = create_scene()
             robots = create_robots(world)
             cameras = create_cameras(world)
@@ -1913,6 +2486,36 @@ def main(argv: Sequence[str] | None = None) -> int:
                 ),
             }
             marker = "CAMERA_SMOKE_OK"
+        else:
+            seeds = set_episode_random_seeds(args.seed)
+            layout = sample_initial_doll_layout(args.seed)
+            world = create_scene()
+            robots = create_robots(world)
+            dolls = create_dolls(world, layout)
+            doll_report = settle_and_validate_dolls(world, dolls)
+            cameras = create_cameras(world)
+            preview_directory = args.output_dir / "dolls" / (
+                "headless" if args.headless else "headed"
+            )
+            report = {
+                "seeds": seeds,
+                "sampled_layout": [asdict(placement) for placement in layout],
+                "layout_validation": validate_initial_doll_layout(layout),
+                "scene": validate_scene(world),
+                "robots_at_home": validate_robots_at_home(
+                    robots, label="doll_smoke"
+                ),
+                "dolls": doll_report,
+                "cameras": validate_and_capture_cameras(
+                    world,
+                    cameras,
+                    output_dir=preview_directory,
+                ),
+                "overview": capture_scene_preview(
+                    world, preview_directory / "overview.png"
+                ),
+            }
+            marker = "DOLL_SMOKE_OK"
         print(marker)
         print(json.dumps(report, indent=2, sort_keys=True, default=str))
         sys.stdout.flush()

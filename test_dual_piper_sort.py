@@ -51,6 +51,60 @@ class StaticAssetAndConstantTests(unittest.TestCase):
             ("00004", "00003", "00002", "00001", "00000"),
         )
 
+    def test_doll_targets_are_centred_size_aware_and_safe(self) -> None:
+        specs = {spec.asset_id: spec for spec in subject.get_doll_specs()}
+        targets = subject.compute_doll_target_layout()
+        self.assertEqual(
+            [target.asset_id for target in targets],
+            list(subject.MATRYOSHKA_SORT_ORDER),
+        )
+        self.assertTrue(all(target.pose.position[0] == 0.0 for target in targets))
+        first = targets[0]
+        last = targets[-1]
+        occupied_min_y = (
+            first.pose.position[1] - specs[first.asset_id].footprint_radius
+        )
+        occupied_max_y = (
+            last.pose.position[1] + specs[last.asset_id].footprint_radius
+        )
+        self.assertTrue(
+            math.isclose(
+                (occupied_min_y + occupied_max_y) / 2.0,
+                subject.TABLE_POSITION[1],
+                abs_tol=1.0e-12,
+            )
+        )
+        for first, second in zip(targets, targets[1:]):
+            required_distance = (
+                specs[first.asset_id].footprint_radius
+                + specs[second.asset_id].footprint_radius
+                + subject.MATRYOSHKA_TARGET_GAP
+            )
+            self.assertTrue(
+                math.isclose(
+                    second.pose.position[1] - first.pose.position[1],
+                    required_distance,
+                    abs_tol=1.0e-12,
+                )
+            )
+
+    def test_seeded_doll_layout_is_reproducible_and_non_overlapping(self) -> None:
+        first = subject.sample_initial_doll_layout(20260730)
+        second = subject.sample_initial_doll_layout(20260730)
+        different = subject.sample_initial_doll_layout(20260731)
+        self.assertEqual(first, second)
+        self.assertNotEqual(first, different)
+        report = subject.validate_initial_doll_layout(first)
+        self.assertGreaterEqual(
+            report["minimum_pair_surface_gap_m"],
+            subject.MATRYOSHKA_INITIAL_GAP,
+        )
+        self.assertGreaterEqual(
+            report["minimum_table_edge_clearance_m"],
+            subject.MATRYOSHKA_TABLE_EDGE_CLEARANCE,
+        )
+        self.assertFalse(report["already_sorted"])
+
     def test_piper_sim_and_command_joint_mapping(self) -> None:
         self.assertEqual(
             subject.PIPER_DOF_NAMES,
@@ -119,6 +173,7 @@ class IsaacUsdAssetIntegrationTest(unittest.TestCase):
         cls.world = subject.create_scene()
         cls.robots = None
         cls.cameras = None
+        cls.dolls = None
 
     @classmethod
     def ensure_robots(cls):
@@ -151,6 +206,42 @@ class IsaacUsdAssetIntegrationTest(unittest.TestCase):
                 camera_report["observed_period_s"],
                 1.0 / 30.0,
                 delta=5.0e-3,
+            )
+
+    def test_doll_rigid_bodies_mass_friction_and_stability(self) -> None:
+        self.ensure_robots()
+        layout = subject.sample_initial_doll_layout(20260730)
+        if self.__class__.dolls is None:
+            self.__class__.dolls = subject.create_dolls(self.world, layout)
+        report = subject.settle_and_validate_dolls(
+            self.world, self.__class__.dolls
+        )
+        self.assertEqual(
+            set(report["stable_states"]),
+            {f"{index:05d}" for index in range(5)},
+        )
+        self.assertGreaterEqual(
+            report["settling"]["stable_consecutive_steps"],
+            subject.MATRYOSHKA_STABLE_CONSECUTIVE_STEPS,
+        )
+        for asset_id, physics in report["physics"].items():
+            self.assertAlmostEqual(physics["mass_kg"], 0.05, delta=1.0e-7)
+            self.assertAlmostEqual(
+                physics["dynamic_friction"], 0.45, delta=1.0e-7
+            )
+            self.assertTrue(physics["collision_prim_paths"], asset_id)
+        for state in report["stable_states"].values():
+            self.assertLessEqual(
+                state["linear_speed_m_s"],
+                subject.MATRYOSHKA_LINEAR_SPEED_TOLERANCE,
+            )
+            self.assertLessEqual(
+                state["angular_speed_rad_s"],
+                subject.MATRYOSHKA_ANGULAR_SPEED_TOLERANCE,
+            )
+            self.assertLessEqual(
+                state["upright_tilt_degrees"],
+                subject.MATRYOSHKA_UPRIGHT_TOLERANCE_DEGREES,
             )
 
     def test_robot_home_gripper_and_workspace(self) -> None:

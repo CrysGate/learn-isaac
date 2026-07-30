@@ -65,3 +65,14 @@
 - 问题与处理：第一次集成测试的所有实现侧相机验收已经通过，但测试末尾用 `math.isclose` 默认的近零容差比较 `0.033333335` 与 `1/30`，造成单个假失败；失败退出时未调用 `SimulationApp.close()`，SyntheticData graph 在 Python atexit 又产生 shutdown crash。把测试容差改为与实现一致的 `5 ms` 后 11/11 正常通过并由 `close()` 干净退出。Camera 初始化时会报告默认 aperture 被调整为 4:3 方像素 aperture，这是设置明确 D435 aperture 前的正常中间状态，最终读回值和内参均已严格验证。
 - 参考资料：`Assets/Robots/piper/robot_config.yml`；`Assets/Robots/piper/piper_description/urdf/piper.urdf`；`.venv/lib/python3.11/site-packages/isaacsim/exts/isaacsim.sensors.camera/isaacsim/sensors/camera/camera.py`；`.venv/lib/python3.11/site-packages/isaacsim/exts/isaacsim.core.utils/isaacsim/core/utils/rotations.py`。
 - Commit message：`feat: add three D435 RGB-D cameras`
+
+## 2026-07-30 23:53 — 确定性生成五个套娃并验证刚体落稳
+
+- 目标：只使用 `00000..00004` 五个同 UUID、不同尺寸的 USDZ，以显式 seed 生成直立、无重叠、非已排序的初始布局，并在真实 PhysX 中验证质量、摩擦、碰撞和稳定状态。
+- 完成内容：实现尺寸感知的最终目标点计算，使占用外缘关于 `y=-0.05` 对称且相邻中心距离等于两半径加 `0.025 m`；实现最大每物体 500 次的 largest-first rejection sampling，随机 XY/yaw、不缩放不倾倒，限制中央随机区、桌边余量、机器人基座排除区和 `0.04 m` 初始表面间隙；统一设置 Python、NumPy、PyTorch、CUDA/cuRobo torch seed；引用五个真实 USDZ，在根刚体覆盖 metadata `0.05 kg`，给每个 `/collision/model` 绑定静/动摩擦 `0.45` 的 physics material；实现连续 30 步速度、倾角、桌面高度、边界和物间隙稳定检查；新增 `--mode dolls`，同时保存顶视 RGB-D 和场景总览，并验证顶部相机覆盖随机区四角与全部五个目标点。
+- 修改文件：`dual_piper_sort.py`、`test_dual_piper_sort.py`、`dual-piper-dev-log.md`。
+- 运行命令：`git status --short`；`uv run python test_dual_piper_sort.py --mode fast`；三次 `uv run python test_dual_piper_sort.py --mode integration --headless`；两次 `uv run python dual_piper_sort.py --mode dolls --seed 20260730 --headless`；两次 `uv run python dual_piper_sort.py --mode dolls --seed 20260730`；`uv run python -m py_compile dual_piper_sort.py test_dual_piper_sort.py`；`git diff --check`。
+- 验证结果：fast 9/9、最终集成 14/14 通过；最终 headed/headless 均输出 `DOLL_SMOKE_OK` 且退出码 0；seed `20260730` 两种模式产生相同布局和物理指标；初始最小表面间隙 `0.08538 m`、最小桌边余量 `0.19872 m`、最小基座排除余量 `0.30912 m`，五个目标误差均远大于 `0.02 m`，确认初态非已排序；38 physics steps（`0.3167 s`）后达到连续 30 步稳定，最大倾角约 `0.02852°`、最大线速度约 `0.00204 m/s`、最大角速度约 `0.01339 rad/s`；五个刚体质量均读回约 `0.0500000007 kg`、动摩擦约 `0.449999988`，各有真实 convex collision `/collision/model`；顶置相机中随机区四角投影约落在 `u=98.8..547.0,v=52.7..335.9` 内，五个最终目标也全部在画面内；headed 总览目视确认五个尺寸正确、直立、分散且没有与双臂/桌边/支架相交。
+- 问题与处理：首次物理集成的实现侧 mass 容差和全部稳定检查已通过，但测试用 `math.isclose` 默认精度比较 PhysX float32 `0.050000000745` 与 `0.05` 导致假失败，并在未 close 的失败退出路径再次触发 SyntheticData shutdown crash；将测试改为与实现相同的 `1e-7` 容差后正常通过。最终稳定状态保留轻微非零速度，不用强制写零制造假稳定，实际值均显著低于顶部阈值。
+- 参考资料：五个 `Assets/Object/RoboDojo/Rigid/matryoshka_dolls/00000..00004/metadata.json` 和 `object.usdz`；`.venv/lib/python3.11/site-packages/isaacsim/exts/isaacsim.core.prims/isaacsim/core/prims/impl/single_rigid_prim.py`；`third_parties/IsaacLab/source/isaaclab/isaaclab/sim/spawners/materials/physics_materials.py`；`third_parties/IsaacLab/source/isaaclab/isaaclab/sim/utils/prims.py`。
+- Commit message：`feat: add deterministic matryoshka initialization`
