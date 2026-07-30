@@ -54,7 +54,7 @@ camera.add_motion_vectors_to_frame()
 i = 0
 while simulation_app.is_running():
     world.step(render=True)
-    print(camera.get_current_frame())
+    print(camera.get_current_frame().keys())
     if i == 100:
         points_2d = camera.get_image_coords_from_world_points(
             np.array([
@@ -71,9 +71,6 @@ while simulation_app.is_running():
         imgplot = plt.imshow(camera.get_rgb()[:, :, :3])
         plt.show()
         print("motion vectors: ", camera.get_current_frame()["motion_vectors"])
-    if world.is_playing():
-        if world.current_time_step_index == 0:
-            world.reset()
     i += 1
 
 simulation_app.close()
