@@ -76,3 +76,14 @@
 - 问题与处理：首次物理集成的实现侧 mass 容差和全部稳定检查已通过，但测试用 `math.isclose` 默认精度比较 PhysX float32 `0.050000000745` 与 `0.05` 导致假失败，并在未 close 的失败退出路径再次触发 SyntheticData shutdown crash；将测试改为与实现相同的 `1e-7` 容差后正常通过。最终稳定状态保留轻微非零速度，不用强制写零制造假稳定，实际值均显著低于顶部阈值。
 - 参考资料：五个 `Assets/Object/RoboDojo/Rigid/matryoshka_dolls/00000..00004/metadata.json` 和 `object.usdz`；`.venv/lib/python3.11/site-packages/isaacsim/exts/isaacsim.core.prims/isaacsim/core/prims/impl/single_rigid_prim.py`；`third_parties/IsaacLab/source/isaaclab/isaaclab/sim/spawners/materials/physics_materials.py`；`third_parties/IsaacLab/source/isaaclab/isaaclab/sim/utils/prims.py`。
 - Commit message：`feat: add deterministic matryoshka initialization`
+
+## 2026-07-31 00:09 — 修正顶部支架、顶置相机与双臂收拢位
+
+- 目标：严格采用用户给出的支架和杆顶相机世界位姿，保证支架底座落在桌面上且位于两臂之间，并让两台 Piper 保持资产定义的收拢等待状态。
+- 完成内容：将静态支架根位置固定为 `[0,-0.47,0.765]`、姿态固定为归一化后的 `[0.707,-0.707,0,0]`，按旋转后的八个源包围盒角点验证世界包围盒，并明确拒绝任何后代 `RigidBodyAPI`；将顶置相机固定为 `[0,-0.41,1.308]` 和归一化后的 USD 相机姿态 `[0.9659258,0.2588190,0,0]`，直接读回验证其 USD-frame 世界位姿；将六轴 home 改为仓库 Piper 示例使用的全零收拢态，并在真实 PhysX 中验证关节误差和末端前向范围；在不改固定相机参数的前提下，把随机中心区收窄至 `x=[-0.22,0.22]、y=[-0.22,0.17]`，按最大娃娃的完整三维包围范围验证随机边界及全部目标位均完整入镜。
+- 修改文件：`dual_piper_sort.py`、`test_dual_piper_sort.py`、`dual-piper-dev-log.md`。
+- 运行命令：`git status --short`；headed 零位 monkeypatch 探针；`uv run python test_dual_piper_sort.py --mode fast`；`uv run python dual_piper_sort.py --mode scene --headless`；`uv run python dual_piper_sort.py --mode robots --headless`；三次 `uv run python dual_piper_sort.py --mode cameras --headless`；`uv run python dual_piper_sort.py --mode dolls --seed 20260730 --output-dir dual_piper_output/stand_pose_fix --headless`；`uv run python dual_piper_sort.py --mode dolls --seed 20260730 --output-dir dual_piper_output/stand_pose_fix`；`uv run python test_dual_piper_sort.py --mode integration --headless`；`uv run python -m py_compile dual_piper_sort.py test_dual_piper_sort.py`；`git diff --check`。
+- 验证结果：fast 10/10、集成 15/15 通过；scene、robots、cameras、headed/headless dolls 均输出对应 `*_SMOKE_OK` 且退出码 0；支架世界包围盒约为 `[-0.15,-0.515,0.765]..[0.15,-0.402566,1.378153]`，有 12 个 collision prim、0 个 rigid body，底面精确落在桌面 `z=0.765`；顶置相机实际 USD 位姿约为 `[0,-0.409999996,1.307999969]`、`[0.965925872,0.258818984,0,0]`；两臂最终最大 home 误差约 `0.000080 rad`，末端从底座向桌面前伸约 `0.191426 m`；最大娃娃在随机区与全部目标位的完整边界至少保留约 `10.74 px` 画面余量；headed 总览目视确认支架竖直、底座位于两臂之间、两臂水平收拢，顶视 RGB 中五个娃娃均完整可见。
+- 问题与处理：固定相机后，旧随机中心范围首先让底面角点投影到 `u=-9.84/649.84 px`；升级为完整娃娃边界检查后又发现旧 `y=0.28` 上界会让最大娃娃顶部投影到 `v=-33.36 px`。保留用户指定的相机位姿和 D435 内参，只缩小非固定随机采样区，随后完整三维边界检查通过。已有 MDL float-to-float2 与 Camera 初始 aperture 警告不影响最终读回参数和验收。
+- 参考资料：用户提供的支架与相机精确位姿；`basic/piper.py`；`.venv/lib/python3.11/site-packages/isaacsim/exts/isaacsim.sensors.camera/isaacsim/sensors/camera/camera.py`。
+- Commit message：`fix: place camera stand and retract Piper arms`

@@ -71,11 +71,11 @@ HDR_DOME_ROTATION_DEGREES: Final = 0.0
 HDR_DOME_VISIBLE_IN_PRIMARY_RAYS: Final = True
 
 CAMERA_STAND_PRIM_PATH: Final = "/World/Scene/CameraStand"
-# The source asset is a 0.613 m boom along local -Y.  This initial pose puts
-# its rendered camera housing over the table centre.  It is intentionally a
-# top-level constant and is subject to the required headed visual check.
-CAMERA_STAND_POSITION: Final = (0.0, 0.50, 1.55)
-CAMERA_STAND_ORIENTATION: Final = IDENTITY_QUATERNION
+# The authored boom extends along local -Y.  Rotating it -90 degrees about
+# world X makes that axis vertical; the resulting base lies on the table
+# between the two Piper mounts.
+CAMERA_STAND_POSITION: Final = (0.0, -0.47, TABLE_TOP_Z)
+CAMERA_STAND_ORIENTATION_RAW: Final = (0.707, -0.707, 0.0, 0.0)
 CAMERA_STAND_SOURCE_BBOX_MIN: Final = (-0.1500001, -0.613153, -0.045001)
 CAMERA_STAND_SOURCE_BBOX_MAX: Final = (0.1500001, 0.000001, 0.067434)
 
@@ -98,9 +98,10 @@ PIPER_TOOL_LINK: Final = "gripper_center"
 PIPER_WRIST_LINK: Final = "link6"
 PIPER_CAMERA_MOUNT_REL_PATH: Final = "link6/camera"
 PIPER_TOOL_REL_PATH: Final = "link6/gripper_center"
-# This valid, folded configuration is a candidate home pose.  Its workspace
-# direction and collision clearance are verified in the dual-robot milestone.
-PIPER_HOME_JOINT_POSITION: Final = (0.0, 1.57, -1.57, 0.0, 0.0, 0.0)
+# The asset and repository Piper example define the six-axis zero state as the
+# retracted waiting pose.  Its measured tool position and collision clearance
+# are verified in simulation rather than inferred from the joint values.
+PIPER_HOME_JOINT_POSITION: Final = (0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
 PIPER_OPEN_GRIPPER_POSITION: Final = 0.04
 PIPER_CLOSED_GRIPPER_POSITION: Final = 0.0
 PIPER_HOME_DOF_POSITION: Final = PIPER_HOME_JOINT_POSITION + (
@@ -110,7 +111,7 @@ PIPER_HOME_DOF_POSITION: Final = PIPER_HOME_JOINT_POSITION + (
 PIPER_HOME_TOLERANCE_RAD: Final = 0.02
 PIPER_GRIPPER_TOLERANCE_M: Final = 0.001
 PIPER_OPEN_FINGER_SEPARATION_M: Final = 0.08
-PIPER_WORKSPACE_FORWARD_MINIMUM_M: Final = 0.40
+PIPER_HOME_TOOL_FORWARD_RANGE_M: Final = (0.15, 0.25)
 PIPER_HOME_SETTLE_STEPS: Final = 60
 
 PHYSICS_FREQUENCY_HZ: Final = 120
@@ -150,10 +151,11 @@ OVERHEAD_CAMERA_PRIM_PATH: Final = (
 # The Piper helper is a ROS optical frame.  A local 180 degree X rotation
 # converts its +Z optical direction to the USD camera's -Z viewing direction.
 WRIST_CAMERA_LOCAL_USD_ORIENTATION: Final = (0.0, 1.0, 0.0, 0.0)
-# This lies inside the rendered D455 housing near the centre of its front mask.
-OVERHEAD_CAMERA_POSITION: Final = (0.0225, -0.041, 1.600)
+# Fixed world pose supplied for the sensor at the top of the stand.  This is a
+# USD camera-frame orientation: +Y is image-up and -Z is optical-forward.
+OVERHEAD_CAMERA_POSITION: Final = (0.0, -0.41, 1.308)
+OVERHEAD_CAMERA_USD_ORIENTATION_RAW: Final = (0.9659258, 0.2588190, 0.0, 0.0)
 OVERHEAD_CAMERA_TARGET: Final = (0.0, -0.05, TABLE_TOP_Z)
-OVERHEAD_CAMERA_IMAGE_UP: Final = (0.0, 1.0, 0.0)
 CAMERA_RENDER_WARMUP_STEPS: Final = 24
 CAMERA_TARGET_PIXEL_MARGIN: Final = 2.0
 SCENE_PREVIEW_EYE: Final = (2.1, -2.3, 1.9)
@@ -172,8 +174,10 @@ MATRYOSHKA_PHYSICS_MATERIAL_PATH: Final = "/World/Looks/MatryoshkaPhysics"
 MATRYOSHKA_PHYSICS_RESTITUTION: Final = 0.05
 # This central area remains inside the overhead view and leaves generous room
 # for grasp approach, the table edges, and the rear robot bases.
-MATRYOSHKA_RANDOM_X_RANGE: Final = (-0.40, 0.40)
-MATRYOSHKA_RANDOM_Y_RANGE: Final = (-0.22, 0.28)
+# Keep complete doll geometry inside the fixed overhead D435 frustum, including
+# the largest doll at either sampling boundary.
+MATRYOSHKA_RANDOM_X_RANGE: Final = (-0.22, 0.22)
+MATRYOSHKA_RANDOM_Y_RANGE: Final = (-0.22, 0.17)
 MATRYOSHKA_TABLE_EDGE_CLEARANCE: Final = 0.08
 MATRYOSHKA_ROBOT_BASE_EXCLUSION_RADIUS: Final = 0.16
 MATRYOSHKA_LAYOUT_SAMPLES_PER_OBJECT: Final = 500
@@ -250,6 +254,12 @@ def normalize_quaternion(
     return tuple(float(component) / norm for component in quaternion)  # type: ignore[return-value]
 
 
+CAMERA_STAND_ORIENTATION: Final = normalize_quaternion(
+    CAMERA_STAND_ORIENTATION_RAW
+)
+OVERHEAD_CAMERA_USD_ORIENTATION: Final = normalize_quaternion(
+    OVERHEAD_CAMERA_USD_ORIENTATION_RAW
+)
 PIPER_BASE_ORIENTATION: Final = normalize_quaternion(PIPER_BASE_ORIENTATION_RAW)
 LEFT_PIPER: Final = RobotSpec(
     name="left",
@@ -1206,21 +1216,48 @@ def validate_scene(world: Any) -> dict[str, Any]:
         raise ValueError("DomeLight primary-ray visibility mismatch")
 
     stand_bbox = _world_bbox(stage, CAMERA_STAND_PRIM_PATH)
+    stand_source_corners = [
+        (x, y, z)
+        for x in (
+            CAMERA_STAND_SOURCE_BBOX_MIN[0],
+            CAMERA_STAND_SOURCE_BBOX_MAX[0],
+        )
+        for y in (
+            CAMERA_STAND_SOURCE_BBOX_MIN[1],
+            CAMERA_STAND_SOURCE_BBOX_MAX[1],
+        )
+        for z in (
+            CAMERA_STAND_SOURCE_BBOX_MIN[2],
+            CAMERA_STAND_SOURCE_BBOX_MAX[2],
+        )
+    ]
+    stand_world_corners = [
+        [
+            CAMERA_STAND_POSITION[index] + rotated[index]
+            for index in range(3)
+        ]
+        for rotated in (
+            _quaternion_rotate_vector(CAMERA_STAND_ORIENTATION, corner)
+            for corner in stand_source_corners
+        )
+    ]
+    expected_stand_bbox_min = tuple(
+        min(corner[index] for corner in stand_world_corners)
+        for index in range(3)
+    )
+    expected_stand_bbox_max = tuple(
+        max(corner[index] for corner in stand_world_corners)
+        for index in range(3)
+    )
     _assert_vector_close(
         stand_bbox["min"],
-        tuple(
-            CAMERA_STAND_POSITION[index] + CAMERA_STAND_SOURCE_BBOX_MIN[index]
-            for index in range(3)
-        ),
+        expected_stand_bbox_min,
         label="camera stand bbox min",
         tolerance=2.0e-4,
     )
     _assert_vector_close(
         stand_bbox["max"],
-        tuple(
-            CAMERA_STAND_POSITION[index] + CAMERA_STAND_SOURCE_BBOX_MAX[index]
-            for index in range(3)
-        ),
+        expected_stand_bbox_max,
         label="camera stand bbox max",
         tolerance=2.0e-4,
     )
@@ -1232,6 +1269,19 @@ def validate_scene(world: Any) -> dict[str, Any]:
     ]
     if not stand_collisions:
         raise ValueError("Composed camera stand has no collision geometry")
+    stand_rigid_bodies = [
+        str(prim.GetPath())
+        for prim in stage.Traverse()
+        if (
+            str(prim.GetPath()) == CAMERA_STAND_PRIM_PATH
+            or str(prim.GetPath()).startswith(CAMERA_STAND_PRIM_PATH + "/")
+        )
+        and prim.HasAPI(UsdPhysics.RigidBodyAPI)
+    ]
+    if stand_rigid_bodies:
+        raise ValueError(
+            f"Camera stand must be static, found rigid bodies: {stand_rigid_bodies}"
+        )
 
     for forbidden_path in (
         "/World/defaultGroundPlane",
@@ -1280,6 +1330,8 @@ def validate_scene(world: Any) -> dict[str, Any]:
             ),
             "bbox": stand_bbox,
             "collision_prim_count": len(stand_collisions),
+            "static": True,
+            "rigid_body_prim_count": len(stand_rigid_bodies),
         },
         "dome_light": {
             "prim_path": HDR_DOME_PRIM_PATH,
@@ -1520,10 +1572,15 @@ def validate_robots_at_home(
             f"{spec.name}_{label}_tool",
         )
         forward_distance = tool_position[1] - spec.base_pose.position[1]
-        if forward_distance < PIPER_WORKSPACE_FORWARD_MINIMUM_M:
+        if not (
+            PIPER_HOME_TOOL_FORWARD_RANGE_M[0]
+            <= forward_distance
+            <= PIPER_HOME_TOOL_FORWARD_RANGE_M[1]
+        ):
             raise ValueError(
-                f"{spec.name}: gripper center is only {forward_distance:.4f} m "
-                "in world +Y from its base"
+                f"{spec.name}: retracted gripper-center offset "
+                f"{forward_distance:.4f} m is outside "
+                f"{PIPER_HOME_TOOL_FORWARD_RANGE_M}"
             )
         if not (
             TABLE_X_RANGE[0] <= tool_position[0] <= TABLE_X_RANGE[1]
@@ -1980,36 +2037,6 @@ def camera_intrinsics(spec: CameraSpec) -> list[list[float]]:
     ]
 
 
-def _look_at_world_quaternion(
-    position: Sequence[float],
-    target: Sequence[float],
-    image_up: Sequence[float],
-) -> Any:
-    """Build a wxyz orientation for Isaac's +X-forward world camera axes."""
-
-    import numpy as np
-    from isaacsim.core.utils.numpy.rotations import (  # type: ignore[import-not-found]
-        rot_matrices_to_quats,
-    )
-
-    forward = np.asarray(target, dtype=np.float64) - np.asarray(
-        position, dtype=np.float64
-    )
-    forward_norm = float(np.linalg.norm(forward))
-    if forward_norm <= 1.0e-9:
-        raise ValueError("Camera position and look-at target must differ")
-    forward /= forward_norm
-    up = np.asarray(image_up, dtype=np.float64)
-    up -= float(np.dot(up, forward)) * forward
-    up_norm = float(np.linalg.norm(up))
-    if up_norm <= 1.0e-9:
-        raise ValueError("Camera image-up direction is parallel to its optical axis")
-    up /= up_norm
-    left = np.cross(up, forward)
-    rotation = np.column_stack((forward, left, up))
-    return rot_matrices_to_quats(rotation).astype(np.float32)
-
-
 def _camera_spec_by_name() -> dict[str, CameraSpec]:
     return {spec.name: spec for spec in CAMERA_SPECS}
 
@@ -2064,12 +2091,11 @@ def create_cameras(world: Any) -> dict[str, Any]:
     )
     overhead.set_world_pose(
         position=np.asarray(OVERHEAD_CAMERA_POSITION, dtype=np.float32),
-        orientation=_look_at_world_quaternion(
-            OVERHEAD_CAMERA_POSITION,
-            OVERHEAD_CAMERA_TARGET,
-            OVERHEAD_CAMERA_IMAGE_UP,
+        orientation=np.asarray(
+            OVERHEAD_CAMERA_USD_ORIENTATION,
+            dtype=np.float32,
         ),
-        camera_axes="world",
+        camera_axes="usd",
     )
     cameras[OVERHEAD_CAMERA_NAME] = overhead
 
@@ -2237,6 +2263,28 @@ def validate_and_capture_cameras(
             )
 
         position, quaternion = camera.get_world_pose(camera_axes="world")
+        usd_pose: dict[str, list[float]] | None = None
+        if name == OVERHEAD_CAMERA_NAME:
+            usd_position, usd_quaternion = camera.get_world_pose(camera_axes="usd")
+            _assert_vector_close(
+                usd_position,
+                OVERHEAD_CAMERA_POSITION,
+                label="overhead camera world position",
+                tolerance=2.0e-5,
+            )
+            usd_orientation_error = quaternion_angular_error(
+                usd_quaternion,
+                OVERHEAD_CAMERA_USD_ORIENTATION,
+            )
+            if usd_orientation_error > 2.0e-5:
+                raise ValueError(
+                    "overhead camera USD-frame orientation error "
+                    f"{usd_orientation_error:.8f} rad"
+                )
+            usd_pose = {
+                "position_m": np.asarray(usd_position).tolist(),
+                "quaternion_wxyz": np.asarray(usd_quaternion).tolist(),
+            }
         target = np.asarray(_camera_target(name), dtype=np.float64)
         optical_forward = np.asarray(
             _quaternion_rotate_vector(quaternion, (1.0, 0.0, 0.0)),
@@ -2268,16 +2316,39 @@ def validate_and_capture_cameras(
             )
         workspace_pixels: list[list[float]] | None = None
         if name == OVERHEAD_CAMERA_NAME:
+            doll_specs = get_doll_specs()
+            maximum_radius = max(spec.footprint_radius for spec in doll_specs)
+            maximum_height = max(spec.height for spec in doll_specs)
+            random_envelope_points = [
+                (x, y, z)
+                for x in (
+                    MATRYOSHKA_RANDOM_X_RANGE[0] - maximum_radius,
+                    MATRYOSHKA_RANDOM_X_RANGE[1] + maximum_radius,
+                )
+                for y in (
+                    MATRYOSHKA_RANDOM_Y_RANGE[0] - maximum_radius,
+                    MATRYOSHKA_RANDOM_Y_RANGE[1] + maximum_radius,
+                )
+                for z in (
+                    TABLE_TOP_Z,
+                    TABLE_TOP_Z + maximum_height,
+                )
+            ]
+            specs_by_id = {spec.asset_id: spec for spec in doll_specs}
+            target_envelope_points = [
+                (
+                    placement.pose.position[0] + x_sign * spec.footprint_radius,
+                    placement.pose.position[1] + y_sign * spec.footprint_radius,
+                    TABLE_TOP_Z + z_fraction * spec.height,
+                )
+                for placement in compute_doll_target_layout()
+                for spec in (specs_by_id[placement.asset_id],)
+                for x_sign in (-1.0, 1.0)
+                for y_sign in (-1.0, 1.0)
+                for z_fraction in (0.0, 1.0)
+            ]
             workspace_points = np.asarray(
-                [
-                    (x, y, TABLE_TOP_Z)
-                    for x in MATRYOSHKA_RANDOM_X_RANGE
-                    for y in MATRYOSHKA_RANDOM_Y_RANGE
-                ]
-                + [
-                    placement.pose.position
-                    for placement in compute_doll_target_layout()
-                ],
+                random_envelope_points + target_envelope_points,
                 dtype=np.float64,
             )
             projected_workspace = np.asarray(
@@ -2297,8 +2368,9 @@ def validate_and_capture_cameras(
                 )
             ):
                 raise ValueError(
-                    "Overhead camera does not cover the complete random and "
-                    f"target regions: {projected_workspace.tolist()}"
+                    "Overhead camera does not cover complete doll bounds in "
+                    "the random and target regions: "
+                    f"{projected_workspace.tolist()}"
                 )
             workspace_pixels = projected_workspace.tolist()
 
@@ -2387,13 +2459,14 @@ def validate_and_capture_cameras(
                 "intrinsics": actual_intrinsics.tolist(),
                 "world_position_m": np.asarray(position).tolist(),
                 "world_quaternion_wxyz": np.asarray(quaternion).tolist(),
+                "usd_world_pose": usd_pose,
             },
             "coverage": {
                 "target_world_m": target.tolist(),
                 "target_pixel_uv": target_pixel.tolist(),
                 "optical_axis_target_cosine": target_alignment,
                 "target_distance_m": target_distance,
-                "random_corners_and_targets_pixels_uv": workspace_pixels,
+                "random_and_target_doll_bounds_pixels_uv": workspace_pixels,
             },
             "rendering_time_s": observations[name]["rendering_time_s"],
             **preview,

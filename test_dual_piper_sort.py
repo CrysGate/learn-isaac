@@ -36,6 +36,22 @@ class StaticAssetAndConstantTests(unittest.TestCase):
         self.assertTrue(math.isclose(quaternion[3], expected, abs_tol=1.0e-12))
         self.assertEqual(quaternion[1:3], (0.0, 0.0))
 
+    def test_fixed_stand_overhead_camera_and_retracted_home(self) -> None:
+        self.assertEqual(subject.CAMERA_STAND_POSITION, (0.0, -0.47, 0.765))
+        self.assertEqual(
+            subject.CAMERA_STAND_ORIENTATION,
+            subject.normalize_quaternion((0.707, -0.707, 0.0, 0.0)),
+        )
+        self.assertEqual(subject.OVERHEAD_CAMERA_POSITION, (0.0, -0.41, 1.308))
+        self.assertEqual(
+            subject.OVERHEAD_CAMERA_USD_ORIENTATION,
+            subject.normalize_quaternion((0.9659258, 0.2588190, 0.0, 0.0)),
+        )
+        self.assertEqual(
+            subject.PIPER_HOME_JOINT_POSITION,
+            (0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+        )
+
     def test_selected_doll_metadata(self) -> None:
         dolls = subject.get_doll_specs()
         self.assertEqual([doll.asset_id for doll in dolls], [f"{i:05d}" for i in range(5)])
@@ -255,9 +271,13 @@ class IsaacUsdAssetIntegrationTest(unittest.TestCase):
                 final["maximum_home_error_rad"],
                 subject.PIPER_HOME_TOLERANCE_RAD,
             )
-            self.assertGreater(
+            self.assertGreaterEqual(
                 final["tool_forward_from_base_m"],
-                subject.PIPER_WORKSPACE_FORWARD_MINIMUM_M,
+                subject.PIPER_HOME_TOOL_FORWARD_RANGE_M[0],
+            )
+            self.assertLessEqual(
+                final["tool_forward_from_base_m"],
+                subject.PIPER_HOME_TOOL_FORWARD_RANGE_M[1],
             )
         self.assertLess(
             max(report["gripper_cycle"]["closed_finger_separation_m"].values()),
