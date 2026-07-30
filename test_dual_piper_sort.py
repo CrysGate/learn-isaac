@@ -6,7 +6,9 @@ from __future__ import annotations
 import argparse
 import math
 import sys
+import tempfile
 import unittest
+from pathlib import Path
 
 import dual_piper_sort as subject
 
@@ -229,6 +231,144 @@ class StaticAssetAndConstantTests(unittest.TestCase):
             report["order_small_to_large"],
             list(subject.MATRYOSHKA_SORT_ORDER),
         )
+
+    def test_hdf5_schema_synchronizes_state_actions_and_three_rgbd_streams(
+        self,
+    ) -> None:
+        import h5py
+        import numpy as np
+
+        layout = subject.sample_initial_doll_layout(20260730)
+        metadata = subject.build_episode_metadata(
+            episode_id="fast-schema-test",
+            seed=20260730,
+            planner_seed=1,
+            sampled_layout=layout,
+        )
+        robot_position = np.asarray(
+            [subject.PIPER_HOME_DOF_POSITION] * 2,
+            dtype=np.float32,
+        )
+        robot_action = np.concatenate(
+            (robot_position[:, :6], robot_position[:, 6:7]),
+            axis=1,
+        )
+        initial_object_pose = np.asarray(
+            [
+                [*placement.pose.position, *placement.pose.quaternion]
+                for placement in layout
+            ],
+            dtype=np.float32,
+        )
+        target_object_pose = np.asarray(
+            [
+                [*placement.pose.position, *placement.pose.quaternion]
+                for placement in subject.compute_doll_target_layout()
+            ],
+            dtype=np.float32,
+        )
+        initial_state = {
+            "robots": {
+                "joint_position": robot_position,
+                "joint_velocity": np.zeros((2, 8), dtype=np.float32),
+                "joint_action": robot_action,
+            },
+            "objects": {
+                "pose": initial_object_pose,
+                "linear_velocity": np.zeros((5, 3), dtype=np.float32),
+                "angular_velocity": np.zeros((5, 3), dtype=np.float32),
+            },
+            "targets": {"object_pose": target_object_pose},
+        }
+        cameras = {
+            camera_name: {
+                "rgb": np.zeros((480, 640, 3), dtype=np.uint8),
+                "depth": np.ones((480, 640), dtype=np.float32),
+                "rendering_time_s": subject.CONTROL_DT,
+                "world_pose": np.asarray(
+                    [0.0, 0.0, 1.0, 1.0, 0.0, 0.0, 0.0],
+                    dtype=np.float32,
+                ),
+                "world_to_camera": np.eye(4, dtype=np.float32),
+            }
+            for camera_name in subject.EPISODE_CAMERA_NAMES
+        }
+        frame = {
+            "simulation_time_s": subject.CONTROL_DT,
+            "world_time_s": 1.0,
+            "robots": {
+                "joint_position": robot_position,
+                "joint_velocity": np.zeros((2, 8), dtype=np.float32),
+                "joint_action": robot_action,
+                "end_effector_world_pose": np.zeros(
+                    (2, 7), dtype=np.float32
+                ),
+            },
+            "objects": {
+                "world_pose": initial_object_pose,
+                "linear_velocity": np.zeros((5, 3), dtype=np.float32),
+                "angular_velocity": np.zeros((5, 3), dtype=np.float32),
+            },
+            "task": {
+                "phase": "initial_hold",
+                "operator": "",
+                "object_id": "",
+            },
+            "control": {
+                "grasp_event_code": np.zeros(2, dtype=np.int8),
+                "grasp_event_object_index": np.full(
+                    2, -1, dtype=np.int8
+                ),
+                "grasp_event_relative_pose": np.full(
+                    (2, 7), np.nan, dtype=np.float32
+                ),
+            },
+            "cameras": cameras,
+        }
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            episode_path = Path(temporary_directory) / "episode.partial.h5"
+            writer = subject.Hdf5EpisodeWriter(
+                episode_path,
+                metadata=metadata,
+                initial_state=initial_state,
+            )
+            try:
+                writer.append_frame(frame)
+                writer.finish_expert(success=True, summary={"success": True})
+            finally:
+                writer.close()
+            report = subject.validate_episode_hdf5(episode_path)
+            self.assertEqual(report["schema_version"], "1.0.0")
+            self.assertEqual(report["frame_count"], 1)
+            self.assertTrue(report["expert_success"])
+            self.assertFalse(report["replay_success"])
+            self.assertFalse(report["accepted"])
+            with self.assertRaisesRegex(
+                ValueError, "has not passed replay acceptance"
+            ):
+                subject.validate_episode_hdf5(
+                    episode_path,
+                    require_accepted=True,
+                )
+            with h5py.File(episode_path, "r") as episode:
+                for camera_name in subject.EPISODE_CAMERA_NAMES:
+                    base = f"frames/cameras/{camera_name}"
+                    self.assertEqual(
+                        episode[f"{base}/rgb"].shape,
+                        (1, 480, 640, 3),
+                    )
+                    self.assertEqual(
+                        episode[f"{base}/depth"].shape,
+                        (1, 480, 640),
+                    )
+                self.assertEqual(
+                    episode["frames/robots/joint_action"].shape,
+                    (1, 2, 7),
+                )
+                self.assertEqual(
+                    episode["frames/objects/world_pose"].shape,
+                    (1, 5, 7),
+                )
 
 
 class IsaacUsdAssetIntegrationTest(unittest.TestCase):

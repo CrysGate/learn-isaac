@@ -16,12 +16,17 @@ World convention:
 from __future__ import annotations
 
 import argparse
+import datetime
+import importlib.metadata
 import json
 import math
+import os
+import platform
 import re
 import selectors
 import subprocess
 import sys
+import time
 import xml.etree.ElementTree as ET
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -215,6 +220,27 @@ PICK_SMOKE_ASSET_ID: Final = "00001"
 PICK_GRIPPER_CLOSE_STEPS: Final = 120
 PICK_RELEASE_SETTLE_STEPS: Final = 60
 PICK_RELEASE_FINGER_MARGIN_M: Final = 0.006
+
+EPISODE_SCHEMA_VERSION: Final = "1.0.0"
+EPISODE_HDF5_COMPRESSION: Final = "gzip"
+EPISODE_HDF5_COMPRESSION_LEVEL: Final = 1
+EPISODE_DATASET_ALLOCATION_BLOCK: Final = 32
+EPISODE_MAX_RUNTIME_S: Final = 1_800.0
+EPISODE_OBJECT_IDS: Final = MATRYOSHKA_SORT_ORDER
+EPISODE_ROBOT_NAMES: Final = ("left", "right")
+EPISODE_CAMERA_NAMES: Final = (
+    LEFT_WRIST_CAMERA_NAME,
+    RIGHT_WRIST_CAMERA_NAME,
+    OVERHEAD_CAMERA_NAME,
+)
+GRASP_EVENT_NONE: Final = 0
+GRASP_EVENT_ATTACH: Final = 1
+GRASP_EVENT_DETACH: Final = 2
+GRASP_EVENT_NAMES: Final = {
+    GRASP_EVENT_NONE: "none",
+    GRASP_EVENT_ATTACH: "attach_fixed_joint",
+    GRASP_EVENT_DETACH: "detach_fixed_joint",
+}
 
 # In this top-down tool pose, gripper_center +X points down from the wrist to
 # the grasp point.  Tool +Y lies along world +X, making the fingers close
@@ -432,6 +458,974 @@ CAMERA_PRIM_PATHS: Final = {
     RIGHT_WRIST_CAMERA_NAME: RIGHT_WRIST_CAMERA_PRIM_PATH,
     OVERHEAD_CAMERA_NAME: OVERHEAD_CAMERA_PRIM_PATH,
 }
+
+
+def _package_version(*distribution_names: str) -> str:
+    for distribution_name in distribution_names:
+        try:
+            return importlib.metadata.version(distribution_name)
+        except importlib.metadata.PackageNotFoundError:
+            continue
+    return "unknown"
+
+
+def runtime_versions() -> dict[str, str]:
+    """Return version strings without importing Isaac Sim or cuRobo."""
+
+    return {
+        "python": platform.python_version(),
+        "isaac_sim": _package_version("isaacsim"),
+        "isaac_lab": _package_version("isaaclab"),
+        "curobo": _package_version("nvidia-curobo", "curobo"),
+        "torch": _package_version("torch"),
+        "warp": _package_version("warp-lang"),
+        "h5py": _package_version("h5py"),
+    }
+
+
+def pose_matrix(pose: PoseSpec) -> list[list[float]]:
+    """Return a camera/object-to-world homogeneous matrix for a wxyz pose."""
+
+    w, x, y, z = normalize_quaternion(pose.quaternion)
+    rotation = (
+        (
+            1.0 - 2.0 * (y * y + z * z),
+            2.0 * (x * y - z * w),
+            2.0 * (x * z + y * w),
+        ),
+        (
+            2.0 * (x * y + z * w),
+            1.0 - 2.0 * (x * x + z * z),
+            2.0 * (y * z - x * w),
+        ),
+        (
+            2.0 * (x * z - y * w),
+            2.0 * (y * z + x * w),
+            1.0 - 2.0 * (x * x + y * y),
+        ),
+    )
+    return [
+        [*rotation[0], pose.position[0]],
+        [*rotation[1], pose.position[1]],
+        [*rotation[2], pose.position[2]],
+        [0.0, 0.0, 0.0, 1.0],
+    ]
+
+
+def world_to_local_matrix(pose: PoseSpec) -> list[list[float]]:
+    """Return the inverse homogeneous transform for ``pose``."""
+
+    matrix = pose_matrix(pose)
+    rotation_transpose = [
+        [matrix[column][row] for column in range(3)]
+        for row in range(3)
+    ]
+    translation = [
+        -sum(
+            rotation_transpose[row][column] * pose.position[column]
+            for column in range(3)
+        )
+        for row in range(3)
+    ]
+    return [
+        [*rotation_transpose[0], translation[0]],
+        [*rotation_transpose[1], translation[1]],
+        [*rotation_transpose[2], translation[2]],
+        [0.0, 0.0, 0.0, 1.0],
+    ]
+
+
+def build_episode_metadata(
+    *,
+    episode_id: str,
+    seed: int,
+    planner_seed: int,
+    sampled_layout: Sequence[DollPlacement],
+    initial_doll_report: dict[str, Any] | None = None,
+    camera_report: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build the complete static, calibration, and task metadata document."""
+
+    specs_by_id = {spec.asset_id: spec for spec in get_doll_specs()}
+    targets = {
+        placement.asset_id: placement
+        for placement in compute_doll_target_layout()
+    }
+    sampled_by_id = {
+        placement.asset_id: placement for placement in sampled_layout
+    }
+    assignments = assign_dolls_to_robots(
+        {
+            asset_id: sampled_by_id[asset_id].pose
+            for asset_id in EPISODE_OBJECT_IDS
+        }
+    )
+    return {
+        "episode": {
+            "id": episode_id,
+            "created_at_utc": datetime.datetime.now(
+                datetime.timezone.utc
+            ).isoformat(),
+            "schema_version": EPISODE_SCHEMA_VERSION,
+        },
+        "versions": runtime_versions(),
+        "seeds": {
+            "episode": int(seed),
+            "numpy": int(seed),
+            "torch": int(seed),
+            "simulation": int(seed),
+            "curobo_motion_planner": int(planner_seed),
+        },
+        "assets": {
+            "repository_root": str(REPOSITORY_ROOT.resolve()),
+            "piper_usd": str(PIPER_USD.resolve()),
+            "piper_urdf": str(PIPER_URDF.resolve()),
+            "room_usd": str(ROOM_USD.resolve()),
+            "camera_stand_usd": str(CAMERA_STAND_USD.resolve()),
+            "hdr_texture": str(HDR_TEXTURE.resolve()),
+            "table_mdl": str(TABLE_MDL.resolve()),
+            "ground_mdl": str(GROUND_MDL.resolve()),
+            "matryoshka_usdz": {
+                asset_id: str(specs_by_id[asset_id].asset_path.resolve())
+                for asset_id in EPISODE_OBJECT_IDS
+            },
+        },
+        "coordinates": {
+            "world_units": "m",
+            "world_up_axis": WORLD_UP_AXIS,
+            "quaternion_order": QUATERNION_ORDER,
+            "pose_layout": "[x,y,z,qw,qx,qy,qz]",
+            "velocity_units": {
+                "linear": "m/s",
+                "angular": "rad/s",
+            },
+        },
+        "timing": {
+            "physics_frequency_hz": PHYSICS_FREQUENCY_HZ,
+            "control_frequency_hz": CONTROL_FREQUENCY_HZ,
+            "render_frequency_hz": RENDER_FREQUENCY_HZ,
+            "camera_frequency_hz": CAMERA_FREQUENCY_HZ,
+            "physics_dt_s": PHYSICS_DT,
+            "control_dt_s": CONTROL_DT,
+            "render_dt_s": RENDER_DT,
+            "physics_steps_per_control": (
+                PHYSICS_FREQUENCY_HZ // CONTROL_FREQUENCY_HZ
+            ),
+        },
+        "scene": {
+            "ground": {
+                "prim_path": GROUND_PRIM_PATH,
+                "position_m": list(GROUND_POSITION),
+                "quaternion_wxyz": list(GROUND_ORIENTATION),
+                "size_m": list(GROUND_SIZE),
+                "material_path": str(GROUND_MDL.resolve()),
+                "material_entry": GROUND_MATERIAL_ENTRY,
+            },
+            "table": {
+                "prim_path": TABLE_PRIM_PATH,
+                "position_m": list(TABLE_POSITION),
+                "quaternion_wxyz": list(TABLE_ORIENTATION),
+                "size_m": list(TABLE_SIZE),
+                "top_z_m": TABLE_TOP_Z,
+                "material_path": str(TABLE_MDL.resolve()),
+                "material_entry": TABLE_MATERIAL_ENTRY,
+            },
+            "camera_stand": {
+                "prim_path": CAMERA_STAND_PRIM_PATH,
+                "position_m": list(CAMERA_STAND_POSITION),
+                "quaternion_wxyz": list(CAMERA_STAND_ORIENTATION),
+                "scale": [1.0, 1.0, 1.0],
+                "static_geometry": True,
+            },
+            "room": {
+                "prim_path": ROOM_PRIM_PATH,
+                "asset_path": str(ROOM_USD.resolve()),
+                "residual_light_disabled": ROOM_RESIDUAL_LIGHT_REL_PATH,
+            },
+            "dome_light": {
+                "prim_path": HDR_DOME_PRIM_PATH,
+                "texture_path": str(HDR_TEXTURE.resolve()),
+                "intensity": HDR_DOME_INTENSITY,
+                "rotation_degrees": HDR_DOME_ROTATION_DEGREES,
+                "visible_in_primary_rays": HDR_DOME_VISIBLE_IN_PRIMARY_RAYS,
+            },
+        },
+        "robots": [
+            {
+                "name": spec.name,
+                "prim_path": spec.prim_path,
+                "base_pose": asdict(spec.base_pose),
+                "home_arm_joint_position_rad": list(
+                    PIPER_HOME_JOINT_POSITION
+                ),
+                "open_gripper_position_m": PIPER_OPEN_GRIPPER_POSITION,
+                "simulation_dof_order": list(PIPER_DOF_NAMES),
+                "arm_action_joint_order": list(PIPER_ARM_JOINT_NAMES),
+                "gripper_action_joint": "gripper_joint",
+                "mimic_joint": "joint8",
+                "tool_frame": PIPER_TOOL_LINK,
+            }
+            for spec in ROBOT_SPECS
+        ],
+        "objects": [
+            {
+                "asset_id": asset_id,
+                "uuid": specs_by_id[asset_id].uuid,
+                "height_m": specs_by_id[asset_id].height,
+                "size_m": list(specs_by_id[asset_id].size),
+                "footprint_radius_m": specs_by_id[
+                    asset_id
+                ].footprint_radius,
+                "mass_kg": specs_by_id[asset_id].mass,
+                "friction": specs_by_id[asset_id].friction,
+                "sampled_pose": asdict(sampled_by_id[asset_id].pose),
+                "sampled_yaw_rad": sampled_by_id[asset_id].yaw_rad,
+                "target_pose": asdict(targets[asset_id].pose),
+            }
+            for asset_id in EPISODE_OBJECT_IDS
+        ],
+        "initial_doll_validation": (
+            {} if initial_doll_report is None else initial_doll_report
+        ),
+        "cameras": [
+            {
+                "name": spec.name,
+                "prim_path": CAMERA_PRIM_PATHS[spec.name],
+                "resolution_wh": list(spec.resolution),
+                "frequency_hz": spec.frequency_hz,
+                "rgb_dtype": CAMERA_RGB_DTYPE,
+                "rgb_channel_order": CAMERA_RGB_CHANNEL_ORDER,
+                "depth_dtype": CAMERA_DEPTH_DTYPE,
+                "depth_definition": spec.depth_definition,
+                "depth_unit": CAMERA_DEPTH_UNIT,
+                "invalid_depth": CAMERA_INVALID_DEPTH,
+                "focal_length_mm": spec.focal_length_mm,
+                "horizontal_aperture_mm": spec.horizontal_aperture_mm,
+                "clipping_range_m": list(spec.clipping_range),
+                "intrinsics": camera_intrinsics(spec),
+                "pose_axes": "USD camera frame",
+                "configured_pose": (
+                    {
+                        "position_m": list(OVERHEAD_CAMERA_POSITION),
+                        "quaternion_wxyz": list(
+                            OVERHEAD_CAMERA_USD_ORIENTATION
+                        ),
+                    }
+                    if spec.name == OVERHEAD_CAMERA_NAME
+                    else {
+                        "parent_prim_path": str(
+                            Path(CAMERA_PRIM_PATHS[spec.name]).parent
+                        ),
+                        "local_position_m": [0.0, 0.0, 0.0],
+                        "local_quaternion_wxyz": list(
+                            WRIST_CAMERA_LOCAL_USD_ORIENTATION
+                        ),
+                    }
+                ),
+                "initial_validation": (
+                    {}
+                    if camera_report is None
+                    else camera_report.get(spec.name, {})
+                ),
+            }
+            for spec in CAMERA_SPECS
+        ],
+        "task": {
+            "sort_order_small_to_large": list(MATRYOSHKA_SORT_ORDER),
+            "target_axis": "world_y",
+            "target_line_x_m": 0.0,
+            "target_line_center_y_m": TABLE_POSITION[1],
+            "target_gap_m": MATRYOSHKA_TARGET_GAP,
+            "position_tolerance_m": MATRYOSHKA_POSITION_TOLERANCE,
+            "upright_tolerance_degrees": (
+                MATRYOSHKA_UPRIGHT_TOLERANCE_DEGREES
+            ),
+            "robot_home_tolerance_rad": PIPER_HOME_TOLERANCE_RAD,
+            "assignments": assignments,
+        },
+        "action_semantics": {
+            "joint_action": (
+                "position targets actually sent to the Isaac articulation "
+                "controller at 30 Hz"
+            ),
+            "joint_action_order": list(PIPER_COMMAND_JOINT_NAMES),
+            "grasp_event_codes": {
+                str(code): name for code, name in GRASP_EVENT_NAMES.items()
+            },
+            "fixed_joint_relative_pose": (
+                "body0/link6-to-object transform recorded with attach event"
+            ),
+            "replay_policy": (
+                "apply recorded joint/gripper targets and recorded fixed-joint "
+                "events only; never invoke cuRobo"
+            ),
+        },
+    }
+
+
+def _decode_hdf5_text(value: Any) -> str:
+    if isinstance(value, bytes):
+        return value.decode("utf-8")
+    return str(value)
+
+
+class Hdf5EpisodeWriter:
+    """Append synchronized control frames to one bounded-memory HDF5 file."""
+
+    def __init__(
+        self,
+        path: Path,
+        *,
+        metadata: dict[str, Any],
+        initial_state: dict[str, dict[str, Any]],
+    ) -> None:
+        import h5py
+        import numpy as np
+
+        self.path = path.resolve()
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._file = h5py.File(self.path, "w", libver="latest")
+        self._datasets: dict[str, Any] = {}
+        self.frame_count = 0
+        self._capacity = 0
+        self._closed = False
+
+        root = self._file
+        root.attrs["schema_version"] = EPISODE_SCHEMA_VERSION
+        root.attrs["episode_id"] = metadata["episode"]["id"]
+        root.attrs["created_at_utc"] = metadata["episode"][
+            "created_at_utc"
+        ]
+        root.attrs["accepted"] = False
+        root.attrs["expert_success"] = False
+        root.attrs["replay_success"] = False
+        root.attrs["failure_reason"] = ""
+        root.attrs["frame_count"] = 0
+        root.attrs["writer_state"] = "recording"
+
+        text_dtype = h5py.string_dtype(encoding="utf-8")
+        metadata_group = root.require_group("metadata")
+        metadata_group.create_dataset(
+            "json",
+            data=json.dumps(metadata, sort_keys=True),
+            dtype=text_dtype,
+        )
+        lookups = root.require_group("lookups")
+        lookups.create_dataset(
+            "robot_names",
+            data=np.asarray(EPISODE_ROBOT_NAMES, dtype="S8"),
+        )
+        lookups.create_dataset(
+            "object_ids",
+            data=np.asarray(EPISODE_OBJECT_IDS, dtype="S5"),
+        )
+        lookups.create_dataset(
+            "camera_names",
+            data=np.asarray(EPISODE_CAMERA_NAMES, dtype="S32"),
+        )
+        lookups.create_dataset(
+            "simulation_dof_names",
+            data=np.asarray(PIPER_DOF_NAMES, dtype="S32"),
+        )
+        lookups.create_dataset(
+            "command_joint_names",
+            data=np.asarray(PIPER_COMMAND_JOINT_NAMES, dtype="S32"),
+        )
+
+        initial = root.require_group("initial")
+        initial_robots = initial.require_group("robots")
+        initial_objects = initial.require_group("objects")
+        targets = root.require_group("targets")
+        initial_robots.create_dataset(
+            "joint_position",
+            data=np.asarray(
+                initial_state["robots"]["joint_position"],
+                dtype=np.float32,
+            ),
+        )
+        initial_robots.create_dataset(
+            "joint_velocity",
+            data=np.asarray(
+                initial_state["robots"]["joint_velocity"],
+                dtype=np.float32,
+            ),
+        )
+        initial_robots.create_dataset(
+            "joint_action",
+            data=np.asarray(
+                initial_state["robots"]["joint_action"],
+                dtype=np.float32,
+            ),
+        )
+        initial_objects.create_dataset(
+            "pose",
+            data=np.asarray(initial_state["objects"]["pose"], dtype=np.float32),
+        )
+        initial_objects.create_dataset(
+            "linear_velocity",
+            data=np.asarray(
+                initial_state["objects"]["linear_velocity"],
+                dtype=np.float32,
+            ),
+        )
+        initial_objects.create_dataset(
+            "angular_velocity",
+            data=np.asarray(
+                initial_state["objects"]["angular_velocity"],
+                dtype=np.float32,
+            ),
+        )
+        targets.create_dataset(
+            "object_pose",
+            data=np.asarray(
+                initial_state["targets"]["object_pose"],
+                dtype=np.float32,
+            ),
+        )
+        expected_initial_shapes = {
+            "initial/robots/joint_position": (
+                len(EPISODE_ROBOT_NAMES),
+                len(PIPER_DOF_NAMES),
+            ),
+            "initial/robots/joint_velocity": (
+                len(EPISODE_ROBOT_NAMES),
+                len(PIPER_DOF_NAMES),
+            ),
+            "initial/robots/joint_action": (
+                len(EPISODE_ROBOT_NAMES),
+                len(PIPER_COMMAND_JOINT_NAMES),
+            ),
+            "initial/objects/pose": (len(EPISODE_OBJECT_IDS), 7),
+            "initial/objects/linear_velocity": (
+                len(EPISODE_OBJECT_IDS),
+                3,
+            ),
+            "initial/objects/angular_velocity": (
+                len(EPISODE_OBJECT_IDS),
+                3,
+            ),
+            "targets/object_pose": (len(EPISODE_OBJECT_IDS), 7),
+        }
+        for dataset_path, expected_shape in expected_initial_shapes.items():
+            actual_shape = tuple(root[dataset_path].shape)
+            if actual_shape != expected_shape:
+                root.close()
+                self._closed = True
+                raise ValueError(
+                    f"{dataset_path}: expected {expected_shape}, "
+                    f"found {actual_shape}"
+                )
+
+        results = root.require_group("results")
+        results.create_dataset("expert_summary_json", data="{}", dtype=text_dtype)
+        results.create_dataset("replay_summary_json", data="{}", dtype=text_dtype)
+
+        self._create_frame_dataset("frames/frame_index", (), np.int64)
+        self._create_frame_dataset("frames/simulation_time_s", (), np.float64)
+        self._create_frame_dataset("frames/world_time_s", (), np.float64)
+        self._create_frame_dataset(
+            "frames/robots/joint_position",
+            (len(EPISODE_ROBOT_NAMES), len(PIPER_DOF_NAMES)),
+            np.float32,
+        )
+        self._create_frame_dataset(
+            "frames/robots/joint_velocity",
+            (len(EPISODE_ROBOT_NAMES), len(PIPER_DOF_NAMES)),
+            np.float32,
+        )
+        self._create_frame_dataset(
+            "frames/robots/joint_action",
+            (len(EPISODE_ROBOT_NAMES), len(PIPER_COMMAND_JOINT_NAMES)),
+            np.float32,
+        )
+        self._create_frame_dataset(
+            "frames/robots/arm_joint_action",
+            (len(EPISODE_ROBOT_NAMES), len(PIPER_ARM_JOINT_NAMES)),
+            np.float32,
+        )
+        self._create_frame_dataset(
+            "frames/robots/gripper_position",
+            (len(EPISODE_ROBOT_NAMES), len(PIPER_GRIPPER_JOINT_NAMES)),
+            np.float32,
+        )
+        self._create_frame_dataset(
+            "frames/robots/gripper_action",
+            (len(EPISODE_ROBOT_NAMES),),
+            np.float32,
+        )
+        self._create_frame_dataset(
+            "frames/robots/end_effector_world_pose",
+            (len(EPISODE_ROBOT_NAMES), 7),
+            np.float32,
+        )
+        self._create_frame_dataset(
+            "frames/objects/world_pose",
+            (len(EPISODE_OBJECT_IDS), 7),
+            np.float32,
+        )
+        self._create_frame_dataset(
+            "frames/objects/linear_velocity",
+            (len(EPISODE_OBJECT_IDS), 3),
+            np.float32,
+        )
+        self._create_frame_dataset(
+            "frames/objects/angular_velocity",
+            (len(EPISODE_OBJECT_IDS), 3),
+            np.float32,
+        )
+        self._create_frame_dataset("frames/task/phase", (), "S48")
+        self._create_frame_dataset("frames/task/operator", (), "S8")
+        self._create_frame_dataset("frames/task/object_id", (), "S5")
+        self._create_frame_dataset(
+            "frames/control/grasp_event_code",
+            (len(EPISODE_ROBOT_NAMES),),
+            np.int8,
+        )
+        self._create_frame_dataset(
+            "frames/control/grasp_event_object_index",
+            (len(EPISODE_ROBOT_NAMES),),
+            np.int8,
+        )
+        self._create_frame_dataset(
+            "frames/control/grasp_event_relative_pose",
+            (len(EPISODE_ROBOT_NAMES), 7),
+            np.float32,
+        )
+        width, height = CAMERA_RESOLUTION
+        for camera_name in EPISODE_CAMERA_NAMES:
+            base = f"frames/cameras/{camera_name}"
+            self._create_frame_dataset(
+                f"{base}/rgb",
+                (height, width, 3),
+                np.uint8,
+                image=True,
+            )
+            self._create_frame_dataset(
+                f"{base}/depth",
+                (height, width),
+                np.float32,
+                image=True,
+            )
+            self._create_frame_dataset(
+                f"{base}/rendering_time_s",
+                (),
+                np.float64,
+            )
+            self._create_frame_dataset(
+                f"{base}/world_pose",
+                (7,),
+                np.float32,
+            )
+            self._create_frame_dataset(
+                f"{base}/world_to_camera",
+                (4, 4),
+                np.float32,
+            )
+        root.flush()
+
+    def _create_frame_dataset(
+        self,
+        path: str,
+        tail_shape: tuple[int, ...],
+        dtype: Any,
+        *,
+        image: bool = False,
+    ) -> None:
+        group_path, dataset_name = path.rsplit("/", 1)
+        group = self._file.require_group(group_path)
+        chunk_frames = 1 if image else EPISODE_DATASET_ALLOCATION_BLOCK
+        chunks = (chunk_frames, *tail_shape)
+        self._datasets[path] = group.create_dataset(
+            dataset_name,
+            shape=(0, *tail_shape),
+            maxshape=(None, *tail_shape),
+            chunks=chunks,
+            dtype=dtype,
+            compression=EPISODE_HDF5_COMPRESSION,
+            compression_opts=EPISODE_HDF5_COMPRESSION_LEVEL,
+            shuffle=True,
+        )
+
+    def _ensure_capacity(self) -> None:
+        if self.frame_count < self._capacity:
+            return
+        self._capacity += EPISODE_DATASET_ALLOCATION_BLOCK
+        for dataset in self._datasets.values():
+            dataset.resize((self._capacity, *dataset.shape[1:]))
+
+    def append_frame(self, frame: dict[str, Any]) -> None:
+        """Append one already synchronized state/action/RGB-D sample."""
+
+        import numpy as np
+
+        if self._closed:
+            raise RuntimeError("Cannot append to a closed episode")
+        self._ensure_capacity()
+        index = self.frame_count
+        robots = frame["robots"]
+        objects = frame["objects"]
+        task = frame["task"]
+        control = frame["control"]
+        values: dict[str, Any] = {
+            "frames/frame_index": index,
+            "frames/simulation_time_s": float(frame["simulation_time_s"]),
+            "frames/world_time_s": float(frame["world_time_s"]),
+            "frames/robots/joint_position": robots["joint_position"],
+            "frames/robots/joint_velocity": robots["joint_velocity"],
+            "frames/robots/joint_action": robots["joint_action"],
+            "frames/robots/arm_joint_action": np.asarray(
+                robots["joint_action"]
+            )[:, : len(PIPER_ARM_JOINT_NAMES)],
+            "frames/robots/gripper_position": np.asarray(
+                robots["joint_position"]
+            )[:, 6:8],
+            "frames/robots/gripper_action": np.asarray(
+                robots["joint_action"]
+            )[:, 6],
+            "frames/robots/end_effector_world_pose": robots[
+                "end_effector_world_pose"
+            ],
+            "frames/objects/world_pose": objects["world_pose"],
+            "frames/objects/linear_velocity": objects["linear_velocity"],
+            "frames/objects/angular_velocity": objects["angular_velocity"],
+            "frames/task/phase": str(task["phase"]).encode("utf-8"),
+            "frames/task/operator": str(task["operator"]).encode("utf-8"),
+            "frames/task/object_id": str(task["object_id"]).encode("utf-8"),
+            "frames/control/grasp_event_code": control[
+                "grasp_event_code"
+            ],
+            "frames/control/grasp_event_object_index": control[
+                "grasp_event_object_index"
+            ],
+            "frames/control/grasp_event_relative_pose": control[
+                "grasp_event_relative_pose"
+            ],
+        }
+        for camera_name in EPISODE_CAMERA_NAMES:
+            camera = frame["cameras"][camera_name]
+            rgb = np.asarray(camera["rgb"])
+            depth = np.asarray(camera["depth"])
+            expected_rgb_shape = (
+                CAMERA_RESOLUTION[1],
+                CAMERA_RESOLUTION[0],
+                3,
+            )
+            expected_depth_shape = (
+                CAMERA_RESOLUTION[1],
+                CAMERA_RESOLUTION[0],
+            )
+            if rgb.shape != expected_rgb_shape or rgb.dtype != np.uint8:
+                raise ValueError(
+                    f"{camera_name}: invalid frame RGB {rgb.shape}/{rgb.dtype}"
+                )
+            if depth.shape != expected_depth_shape or depth.dtype != np.float32:
+                raise ValueError(
+                    f"{camera_name}: invalid frame depth "
+                    f"{depth.shape}/{depth.dtype}"
+                )
+            base = f"frames/cameras/{camera_name}"
+            values[f"{base}/rgb"] = rgb
+            values[f"{base}/depth"] = depth
+            values[f"{base}/rendering_time_s"] = float(
+                camera["rendering_time_s"]
+            )
+            values[f"{base}/world_pose"] = camera["world_pose"]
+            values[f"{base}/world_to_camera"] = camera["world_to_camera"]
+        if set(values) != set(self._datasets):
+            missing = sorted(set(self._datasets) - set(values))
+            extra = sorted(set(values) - set(self._datasets))
+            raise ValueError(
+                f"Episode frame fields changed: missing={missing}, extra={extra}"
+            )
+        for path, value in values.items():
+            self._datasets[path][index] = value
+        self.frame_count += 1
+        if self.frame_count % EPISODE_DATASET_ALLOCATION_BLOCK == 0:
+            self._file.attrs["frame_count"] = self.frame_count
+            self._file.flush()
+
+    def finish_expert(
+        self,
+        *,
+        success: bool,
+        summary: dict[str, Any] | None = None,
+        failure_reason: str = "",
+    ) -> None:
+        if self._closed:
+            raise RuntimeError("Episode writer is already closed")
+        if success and failure_reason:
+            raise ValueError("A successful expert episode cannot have a failure")
+        self._file.attrs["expert_success"] = bool(success)
+        self._file.attrs["replay_success"] = False
+        self._file.attrs["accepted"] = False
+        self._file.attrs["failure_reason"] = failure_reason
+        self._file.attrs["writer_state"] = (
+            "expert_complete" if success else "expert_failed"
+        )
+        self._file["results/expert_summary_json"][()] = json.dumps(
+            {} if summary is None else summary,
+            sort_keys=True,
+        )
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        for dataset in self._datasets.values():
+            dataset.resize((self.frame_count, *dataset.shape[1:]))
+        self._file.attrs["frame_count"] = self.frame_count
+        self._file.flush()
+        self._file.close()
+        self._closed = True
+
+
+def validate_episode_hdf5(
+    path: Path,
+    *,
+    require_accepted: bool = False,
+) -> dict[str, Any]:
+    """Validate schema, dtypes, shapes, synchronization, and acceptance flags."""
+
+    import h5py
+    import numpy as np
+
+    required_metadata_keys = {
+        "episode",
+        "versions",
+        "seeds",
+        "assets",
+        "coordinates",
+        "timing",
+        "scene",
+        "robots",
+        "objects",
+        "cameras",
+        "task",
+        "action_semantics",
+    }
+    required_datasets = {
+        "metadata/json",
+        "lookups/robot_names",
+        "lookups/object_ids",
+        "lookups/camera_names",
+        "initial/robots/joint_position",
+        "initial/robots/joint_velocity",
+        "initial/robots/joint_action",
+        "initial/objects/pose",
+        "initial/objects/linear_velocity",
+        "initial/objects/angular_velocity",
+        "targets/object_pose",
+        "frames/frame_index",
+        "frames/simulation_time_s",
+        "frames/world_time_s",
+        "frames/robots/joint_position",
+        "frames/robots/joint_velocity",
+        "frames/robots/joint_action",
+        "frames/robots/arm_joint_action",
+        "frames/robots/gripper_position",
+        "frames/robots/gripper_action",
+        "frames/robots/end_effector_world_pose",
+        "frames/objects/world_pose",
+        "frames/objects/linear_velocity",
+        "frames/objects/angular_velocity",
+        "frames/task/phase",
+        "frames/task/operator",
+        "frames/task/object_id",
+        "frames/control/grasp_event_code",
+        "frames/control/grasp_event_object_index",
+        "frames/control/grasp_event_relative_pose",
+        "results/expert_summary_json",
+        "results/replay_summary_json",
+    }
+    for camera_name in EPISODE_CAMERA_NAMES:
+        for field in (
+            "rgb",
+            "depth",
+            "rendering_time_s",
+            "world_pose",
+            "world_to_camera",
+        ):
+            required_datasets.add(
+                f"frames/cameras/{camera_name}/{field}"
+            )
+
+    resolved = path.resolve()
+    if not resolved.is_file():
+        raise FileNotFoundError(f"Episode does not exist: {resolved}")
+    with h5py.File(resolved, "r") as episode:
+        if _decode_hdf5_text(
+            episode.attrs.get("schema_version", "")
+        ) != EPISODE_SCHEMA_VERSION:
+            raise ValueError("Episode schema_version is missing or unsupported")
+        missing = sorted(
+            dataset_path
+            for dataset_path in required_datasets
+            if dataset_path not in episode
+        )
+        if missing:
+            raise ValueError(f"Episode is missing datasets: {missing}")
+        metadata = json.loads(
+            _decode_hdf5_text(episode["metadata/json"][()])
+        )
+        if not required_metadata_keys.issubset(metadata):
+            raise ValueError(
+                "Episode metadata is incomplete: "
+                f"{sorted(required_metadata_keys - set(metadata))}"
+            )
+        frame_count = int(episode.attrs.get("frame_count", -1))
+        if frame_count <= 0:
+            raise ValueError(f"Episode has invalid frame_count={frame_count}")
+        frame_paths = [
+            dataset_path
+            for dataset_path in required_datasets
+            if dataset_path.startswith("frames/")
+        ]
+        unsynchronized = {
+            dataset_path: int(episode[dataset_path].shape[0])
+            for dataset_path in frame_paths
+            if episode[dataset_path].shape[0] != frame_count
+        }
+        if unsynchronized:
+            raise ValueError(
+                f"Episode frame dimensions are not synchronized: {unsynchronized}"
+            )
+        expected_indices = np.arange(frame_count, dtype=np.int64)
+        if not np.array_equal(
+            episode["frames/frame_index"][:], expected_indices
+        ):
+            raise ValueError("Episode frame_index is not contiguous from zero")
+        timestamps = np.asarray(
+            episode["frames/simulation_time_s"][:],
+            dtype=np.float64,
+        )
+        if frame_count > 1 and not np.allclose(
+            np.diff(timestamps),
+            CONTROL_DT,
+            atol=1.0e-9,
+            rtol=0.0,
+        ):
+            raise ValueError("Episode simulation timestamps are not 30 Hz")
+        expected_shapes = {
+            "initial/robots/joint_position": (
+                len(EPISODE_ROBOT_NAMES),
+                len(PIPER_DOF_NAMES),
+            ),
+            "initial/robots/joint_velocity": (
+                len(EPISODE_ROBOT_NAMES),
+                len(PIPER_DOF_NAMES),
+            ),
+            "initial/robots/joint_action": (
+                len(EPISODE_ROBOT_NAMES),
+                len(PIPER_COMMAND_JOINT_NAMES),
+            ),
+            "initial/objects/pose": (len(EPISODE_OBJECT_IDS), 7),
+            "initial/objects/linear_velocity": (
+                len(EPISODE_OBJECT_IDS),
+                3,
+            ),
+            "initial/objects/angular_velocity": (
+                len(EPISODE_OBJECT_IDS),
+                3,
+            ),
+            "targets/object_pose": (len(EPISODE_OBJECT_IDS), 7),
+            "frames/robots/joint_position": (
+                frame_count,
+                len(EPISODE_ROBOT_NAMES),
+                len(PIPER_DOF_NAMES),
+            ),
+            "frames/robots/joint_action": (
+                frame_count,
+                len(EPISODE_ROBOT_NAMES),
+                len(PIPER_COMMAND_JOINT_NAMES),
+            ),
+            "frames/objects/world_pose": (
+                frame_count,
+                len(EPISODE_OBJECT_IDS),
+                7,
+            ),
+        }
+        for dataset_path, expected_shape in expected_shapes.items():
+            if tuple(episode[dataset_path].shape) != expected_shape:
+                raise ValueError(
+                    f"{dataset_path}: expected {expected_shape}, found "
+                    f"{episode[dataset_path].shape}"
+                )
+        camera_report: dict[str, Any] = {}
+        for camera_name in EPISODE_CAMERA_NAMES:
+            base = f"frames/cameras/{camera_name}"
+            rgb = episode[f"{base}/rgb"]
+            depth = episode[f"{base}/depth"]
+            expected_rgb = (
+                frame_count,
+                CAMERA_RESOLUTION[1],
+                CAMERA_RESOLUTION[0],
+                3,
+            )
+            expected_depth = (
+                frame_count,
+                CAMERA_RESOLUTION[1],
+                CAMERA_RESOLUTION[0],
+            )
+            if tuple(rgb.shape) != expected_rgb or rgb.dtype != np.uint8:
+                raise ValueError(
+                    f"{camera_name}: invalid RGB schema "
+                    f"{rgb.shape}/{rgb.dtype}"
+                )
+            if tuple(depth.shape) != expected_depth or depth.dtype != np.float32:
+                raise ValueError(
+                    f"{camera_name}: invalid depth schema "
+                    f"{depth.shape}/{depth.dtype}"
+                )
+            camera_report[camera_name] = {
+                "rgb_shape": list(rgb.shape),
+                "rgb_dtype": str(rgb.dtype),
+                "depth_shape": list(depth.shape),
+                "depth_dtype": str(depth.dtype),
+                "frequency_hz": CAMERA_FREQUENCY_HZ,
+                "depth_unit": CAMERA_DEPTH_UNIT,
+            }
+        event_codes = np.asarray(
+            episode["frames/control/grasp_event_code"][:],
+            dtype=np.int8,
+        )
+        if not set(np.unique(event_codes).tolist()).issubset(
+            set(GRASP_EVENT_NAMES)
+        ):
+            raise ValueError("Episode contains an unknown grasp event code")
+        expert_success = bool(episode.attrs.get("expert_success", False))
+        replay_success = bool(episode.attrs.get("replay_success", False))
+        accepted = bool(episode.attrs.get("accepted", False))
+        failure_reason = _decode_hdf5_text(
+            episode.attrs.get("failure_reason", "")
+        )
+        if accepted and not (expert_success and replay_success):
+            raise ValueError(
+                "accepted=true requires expert_success and replay_success"
+            )
+        if accepted and failure_reason:
+            raise ValueError("An accepted episode cannot have a failure reason")
+        if require_accepted and not accepted:
+            raise ValueError("Episode has not passed replay acceptance")
+        return {
+            "path": str(resolved),
+            "schema_version": EPISODE_SCHEMA_VERSION,
+            "episode_id": _decode_hdf5_text(
+                episode.attrs["episode_id"]
+            ),
+            "frame_count": frame_count,
+            "duration_s": float(timestamps[-1]),
+            "expert_success": expert_success,
+            "replay_success": replay_success,
+            "accepted": accepted,
+            "failure_reason": failure_reason,
+            "writer_state": _decode_hdf5_text(
+                episode.attrs.get("writer_state", "")
+            ),
+            "camera_streams": camera_report,
+            "event_counts": {
+                name: int(np.count_nonzero(event_codes == code))
+                for code, name in GRASP_EVENT_NAMES.items()
+            },
+        }
 
 _EXPECTED_DOLL_HEIGHTS: Final = (0.13, 0.11, 0.09, 0.07, 0.05)
 _EXPECTED_USD_DEFAULT_PRIMS: Final = {
@@ -2746,6 +3740,73 @@ def _command_position(
     )
 
 
+def _set_recording_context(
+    episode_recorder: Any | None,
+    phase: str,
+    *,
+    operator: str = "",
+    object_id: str = "",
+) -> None:
+    if episode_recorder is not None:
+        episode_recorder.set_task_context(
+            phase,
+            operator=operator,
+            object_id=object_id,
+        )
+
+
+def _advance_control_frame(
+    world: Any,
+    *,
+    render: bool,
+    episode_recorder: Any | None = None,
+) -> None:
+    physics_steps_per_control = (
+        PHYSICS_FREQUENCY_HZ // CONTROL_FREQUENCY_HZ
+    )
+    for substep in range(physics_steps_per_control):
+        world.step(
+            render=(
+                (render or episode_recorder is not None)
+                and substep == physics_steps_per_control - 1
+            )
+        )
+    if episode_recorder is not None:
+        episode_recorder.capture_frame()
+
+
+def _step_control_until(
+    world: Any,
+    predicate: Any,
+    *,
+    maximum_steps: int,
+    description: str,
+    render: bool,
+    episode_recorder: Any | None,
+) -> int:
+    physics_steps_per_control = (
+        PHYSICS_FREQUENCY_HZ // CONTROL_FREQUENCY_HZ
+    )
+    if maximum_steps % physics_steps_per_control:
+        raise ValueError(
+            "A recorded control wait must contain whole 30 Hz control frames"
+        )
+    for control_frame in range(
+        1, maximum_steps // physics_steps_per_control + 1
+    ):
+        _advance_control_frame(
+            world,
+            render=render,
+            episode_recorder=episode_recorder,
+        )
+        if predicate():
+            return control_frame * physics_steps_per_control
+    raise RuntimeError(
+        f"Timed out after {maximum_steps} physics steps while waiting for "
+        f"{description}"
+    )
+
+
 def execute_curobo_trajectory(
     world: Any,
     robot: Any,
@@ -2753,6 +3814,7 @@ def execute_curobo_trajectory(
     *,
     render: bool = False,
     frame_callback: Any | None = None,
+    episode_recorder: Any | None = None,
 ) -> dict[str, Any]:
     """Execute cuRobo's 30 Hz arm positions through the articulation drive."""
 
@@ -2773,9 +3835,14 @@ def execute_curobo_trajectory(
     )
     maximum_tracking_error = 0.0
     for frame_index, command in enumerate(positions):
+        if episode_recorder is not None:
+            episode_recorder.set_arm_action(robot, command)
         _command_position(robot, command, range(6))
-        for substep in range(physics_steps_per_control):
-            world.step(render=render and substep == physics_steps_per_control - 1)
+        _advance_control_frame(
+            world,
+            render=render,
+            episode_recorder=episode_recorder,
+        )
         actual = np.asarray(robot.get_joint_positions()[:6], dtype=np.float64)
         tracking_error = float(np.max(np.abs(actual - command)))
         maximum_tracking_error = max(maximum_tracking_error, tracking_error)
@@ -2844,6 +3911,9 @@ def create_simulation_grasp_joint(
     robot: RobotSpec,
     asset_id: str,
     doll: Any,
+    *,
+    relative_pose: PoseSpec | None = None,
+    step_after_change: bool = True,
 ) -> dict[str, Any]:
     """Fix a physically contacted doll to link6 at its current relative pose."""
 
@@ -2857,18 +3927,19 @@ def create_simulation_grasp_joint(
         raise ValueError(f"Grasp joint already exists: {joint_path}")
 
     body_path = f"{robot.prim_path}/{PIPER_WRIST_LINK}"
-    body_position, body_quaternion = _xform_world_pose(
-        body_path,
-        f"{robot.name}_{asset_id}_grasp_body",
-    )
-    doll_position, doll_quaternion = doll.get_world_pose()
-    relative_pose = pose_relative_to(
-        PoseSpec(tuple(body_position), tuple(body_quaternion)),
-        PoseSpec(
-            tuple(float(value) for value in doll_position),
-            tuple(float(value) for value in doll_quaternion),
-        ),
-    )
+    if relative_pose is None:
+        body_position, body_quaternion = _xform_world_pose(
+            body_path,
+            f"{robot.name}_{asset_id}_grasp_body",
+        )
+        doll_position, doll_quaternion = doll.get_world_pose()
+        relative_pose = pose_relative_to(
+            PoseSpec(tuple(body_position), tuple(body_quaternion)),
+            PoseSpec(
+                tuple(float(value) for value in doll_position),
+                tuple(float(value) for value in doll_quaternion),
+            ),
+        )
 
     joint = UsdPhysics.FixedJoint.Define(stage, joint_path)
     joint.CreateBody0Rel().SetTargets([Sdf.Path(body_path)])
@@ -2887,7 +3958,8 @@ def create_simulation_grasp_joint(
     joint.CreateLocalPos1Attr(Gf.Vec3f(0.0, 0.0, 0.0))
     joint.CreateLocalRot1Attr(Gf.Quatf(1.0, Gf.Vec3f(0.0, 0.0, 0.0)))
     joint.CreateCollisionEnabledAttr(False)
-    world.step(render=False)
+    if step_after_change:
+        world.step(render=False)
     return {
         "joint_path": joint_path,
         "body0": body_path,
@@ -2901,13 +3973,16 @@ def remove_simulation_grasp_joint(
     world: Any,
     robot: RobotSpec,
     asset_id: str,
+    *,
+    step_after_change: bool = True,
 ) -> None:
     joint_path = _simulation_grasp_joint_path(robot, asset_id)
     if not world.stage.GetPrimAtPath(joint_path):
         raise ValueError(f"Grasp joint does not exist: {joint_path}")
     if not world.stage.RemovePrim(joint_path):
         raise RuntimeError(f"Failed to remove grasp joint {joint_path}")
-    world.step(render=False)
+    if step_after_change:
+        world.step(render=False)
 
 
 def run_curobo_motion_smoke(
@@ -3012,6 +4087,7 @@ def run_curobo_pick_place_smoke(
     render: bool,
     asset_id: str = PICK_SMOKE_ASSET_ID,
     active_robot_name: str = "left",
+    episode_recorder: Any | None = None,
 ) -> dict[str, Any]:
     """Pick, transport, place, and return home with one actual Piper."""
 
@@ -3078,11 +4154,18 @@ def run_curobo_pick_place_smoke(
             doll_poses=_current_doll_poses(dolls),
             preferred_world_orientation=target_orientation,
         )
+        _set_recording_context(
+            episode_recorder,
+            "pregrasp",
+            operator=active_spec.name,
+            object_id=asset_id,
+        )
         executions["pregrasp"] = execute_curobo_trajectory(
             world,
             active_robot,
             plans["pregrasp"],
             render=render,
+            episode_recorder=episode_recorder,
         )
         pregrasp_pose = _pose_spec_from_mapping(
             plans["pregrasp"]["selected_world_tool_pose"]
@@ -3135,20 +4218,49 @@ def run_curobo_pick_place_smoke(
             excluded_doll_ids=(asset_id,),
             preferred_world_orientation=grasp_seed_pose.quaternion,
         )
+        _set_recording_context(
+            episode_recorder,
+            "grasp",
+            operator=active_spec.name,
+            object_id=asset_id,
+        )
         executions["grasp"] = execute_curobo_trajectory(
             world,
             active_robot,
             plans["grasp"],
             render=render,
+            episode_recorder=episode_recorder,
         )
 
+        _set_recording_context(
+            episode_recorder,
+            "close_gripper",
+            operator=active_spec.name,
+            object_id=asset_id,
+        )
+        if episode_recorder is not None:
+            episode_recorder.set_gripper_action(
+                active_robot,
+                PIPER_CLOSED_GRIPPER_POSITION,
+            )
         _command_position(
             active_robot,
             (PIPER_CLOSED_GRIPPER_POSITION,),
             (6,),
         )
-        for step in range(PICK_GRIPPER_CLOSE_STEPS):
-            world.step(render=render and step == PICK_GRIPPER_CLOSE_STEPS - 1)
+        physics_steps_per_control = (
+            PHYSICS_FREQUENCY_HZ // CONTROL_FREQUENCY_HZ
+        )
+        if PICK_GRIPPER_CLOSE_STEPS % physics_steps_per_control:
+            raise ValueError("Gripper close duration is not a whole control frame")
+        for _ in range(
+            PICK_GRIPPER_CLOSE_STEPS // physics_steps_per_control
+        ):
+            _advance_control_frame(
+                world,
+                render=render,
+                episode_recorder=episode_recorder,
+            )
 
         tool_position, tool_quaternion = _xform_world_pose(
             f"{active_spec.prim_path}/{PIPER_TOOL_REL_PATH}",
@@ -3194,12 +4306,33 @@ def run_curobo_pick_place_smoke(
                 f"separation={closed_separation:.6f} m"
             )
 
+        _set_recording_context(
+            episode_recorder,
+            "attach",
+            operator=active_spec.name,
+            object_id=asset_id,
+        )
         grasp_joint = create_simulation_grasp_joint(
             world,
             active_spec,
             asset_id,
             doll,
+            step_after_change=episode_recorder is None,
         )
+        if episode_recorder is not None:
+            episode_recorder.queue_grasp_event(
+                GRASP_EVENT_ATTACH,
+                active_spec.name,
+                asset_id,
+                relative_pose=_pose_spec_from_mapping(
+                    grasp_joint["body0_to_doll_pose"]
+                ),
+            )
+            _advance_control_frame(
+                world,
+                render=render,
+                episode_recorder=episode_recorder,
+            )
         attached_tool_position, attached_tool_quaternion = _xform_world_pose(
             f"{active_spec.prim_path}/{PIPER_TOOL_REL_PATH}",
             f"{active_spec.name}_{asset_id}_pick_attached_tool",
@@ -3260,11 +4393,18 @@ def run_curobo_pick_place_smoke(
                     f"{asset_id}: lift orientation changed by "
                     f"{orientation_error} rad"
                 )
+        _set_recording_context(
+            episode_recorder,
+            "lift",
+            operator=active_spec.name,
+            object_id=asset_id,
+        )
         executions["lift"] = execute_curobo_trajectory(
             world,
             active_robot,
             plans["lift"],
             render=render,
+            episode_recorder=episode_recorder,
         )
         lifted_doll_pose = _current_doll_poses(dolls)[asset_id]
         lifted_tool_position, lifted_tool_quaternion = _xform_world_pose(
@@ -3340,11 +4480,18 @@ def run_curobo_pick_place_smoke(
                     f"{asset_id}: target transport orientation changed by "
                     f"{orientation_error} rad"
                 )
+        _set_recording_context(
+            episode_recorder,
+            "preplace",
+            operator=active_spec.name,
+            object_id=asset_id,
+        )
         executions["preplace"] = execute_curobo_trajectory(
             world,
             active_robot,
             plans["preplace"],
             render=render,
+            episode_recorder=episode_recorder,
         )
 
         preplace_tool_position, preplace_tool_quaternion = _xform_world_pose(
@@ -3381,11 +4528,18 @@ def run_curobo_pick_place_smoke(
                 doll_poses=_current_doll_poses(dolls),
                 excluded_doll_ids=(asset_id,),
             )
+            _set_recording_context(
+                episode_recorder,
+                "preplace_correction",
+                operator=active_spec.name,
+                object_id=asset_id,
+            )
             executions["preplace_correction"] = execute_curobo_trajectory(
                 world,
                 active_robot,
                 plans["preplace_correction"],
                 render=render,
+                episode_recorder=episode_recorder,
             )
             preplace_tool_position, preplace_tool_quaternion = (
                 _xform_world_pose(
@@ -3466,11 +4620,18 @@ def run_curobo_pick_place_smoke(
                     f"{asset_id}: place orientation changed by "
                     f"{orientation_error} rad"
                 )
+        _set_recording_context(
+            episode_recorder,
+            "place",
+            operator=active_spec.name,
+            object_id=asset_id,
+        )
         executions["place"] = execute_curobo_trajectory(
             world,
             active_robot,
             plans["place"],
             render=render,
+            episode_recorder=episode_recorder,
         )
         constrained_place_pose = _current_doll_poses(dolls)[asset_id]
         constrained_place_error = float(
@@ -3500,12 +4661,23 @@ def run_curobo_pick_place_smoke(
             PIPER_OPEN_GRIPPER_POSITION,
             doll_spec.footprint_radius + PICK_RELEASE_FINGER_MARGIN_M,
         )
+        _set_recording_context(
+            episode_recorder,
+            "partial_open",
+            operator=active_spec.name,
+            object_id=asset_id,
+        )
+        if episode_recorder is not None:
+            episode_recorder.set_gripper_action(
+                active_robot,
+                release_gripper_position,
+            )
         _command_position(
             active_robot,
             (release_gripper_position,),
             (6,),
         )
-        table_release_steps = _step_until(
+        table_release_steps = _step_control_until(
             world,
             lambda: float(
                 np.max(
@@ -3520,18 +4692,58 @@ def run_curobo_pick_place_smoke(
             description=(
                 f"{active_spec.name} Piper gripper to clear the placed doll"
             ),
+            render=render,
+            episode_recorder=episode_recorder,
         )
         worker.detach(active_robot=active_spec)
+        _set_recording_context(
+            episode_recorder,
+            "detach",
+            operator=active_spec.name,
+            object_id=asset_id,
+        )
         remove_simulation_grasp_joint(
             world,
             active_spec,
             asset_id,
+            step_after_change=episode_recorder is None,
         )
         grasp_joint["removed"] = True
-        for step in range(PICK_RELEASE_SETTLE_STEPS):
-            world.step(
-                render=render and step == PICK_RELEASE_SETTLE_STEPS - 1
+        if episode_recorder is not None:
+            episode_recorder.queue_grasp_event(
+                GRASP_EVENT_DETACH,
+                active_spec.name,
+                asset_id,
             )
+            _advance_control_frame(
+                world,
+                render=render,
+                episode_recorder=episode_recorder,
+            )
+            remaining_release_steps = (
+                PICK_RELEASE_SETTLE_STEPS - physics_steps_per_control
+            )
+            _set_recording_context(
+                episode_recorder,
+                "release_settle",
+                operator=active_spec.name,
+                object_id=asset_id,
+            )
+            for _ in range(
+                remaining_release_steps // physics_steps_per_control
+            ):
+                _advance_control_frame(
+                    world,
+                    render=render,
+                    episode_recorder=episode_recorder,
+                )
+        else:
+            for step in range(PICK_RELEASE_SETTLE_STEPS):
+                world.step(
+                    render=(
+                        render and step == PICK_RELEASE_SETTLE_STEPS - 1
+                    )
+                )
 
         released_tool_position, released_tool_quaternion = _xform_world_pose(
             f"{active_spec.prim_path}/{PIPER_TOOL_REL_PATH}",
@@ -3554,18 +4766,36 @@ def run_curobo_pick_place_smoke(
             doll_poses=_current_doll_poses(dolls),
             excluded_doll_ids=(asset_id,),
         )
+        _set_recording_context(
+            episode_recorder,
+            "retreat",
+            operator=active_spec.name,
+            object_id=asset_id,
+        )
         executions["retreat"] = execute_curobo_trajectory(
             world,
             active_robot,
             plans["retreat"],
             render=render,
+            episode_recorder=episode_recorder,
         )
+        _set_recording_context(
+            episode_recorder,
+            "open_gripper",
+            operator=active_spec.name,
+            object_id=asset_id,
+        )
+        if episode_recorder is not None:
+            episode_recorder.set_gripper_action(
+                active_robot,
+                PIPER_OPEN_GRIPPER_POSITION,
+            )
         _command_position(
             active_robot,
             (PIPER_OPEN_GRIPPER_POSITION,),
             (6,),
         )
-        full_open_steps = _step_until(
+        full_open_steps = _step_control_until(
             world,
             lambda: float(
                 np.max(
@@ -3580,6 +4810,8 @@ def run_curobo_pick_place_smoke(
             description=(
                 f"{active_spec.name} Piper gripper to open after retreat"
             ),
+            render=render,
+            episode_recorder=episode_recorder,
         )
         plans["home"] = worker.plan_joint(
             active_robot=active_spec,
@@ -3589,15 +4821,33 @@ def run_curobo_pick_place_smoke(
             goal_joint_position=PIPER_HOME_JOINT_POSITION,
             doll_poses=_current_doll_poses(dolls),
         )
+        _set_recording_context(
+            episode_recorder,
+            "home",
+            operator=active_spec.name,
+            object_id=asset_id,
+        )
         executions["home"] = execute_curobo_trajectory(
             world,
             active_robot,
             plans["home"],
             render=render,
+            episode_recorder=episode_recorder,
         )
         worker_diagnostics = list(worker.diagnostic_lines)
 
-    settled_report = settle_and_validate_dolls(world, dolls)
+    _set_recording_context(
+        episode_recorder,
+        "object_settle",
+        operator=active_spec.name,
+        object_id=asset_id,
+    )
+    settled_report = settle_and_validate_dolls(
+        world,
+        dolls,
+        render=render,
+        episode_recorder=episode_recorder,
+    )
     final_doll_state = settled_report["stable_states"][asset_id]
     final_position_error = float(
         np.linalg.norm(
@@ -3743,6 +4993,7 @@ def run_full_curobo_sort(
     *,
     planner_seed: int,
     render: bool,
+    episode_recorder: Any | None = None,
 ) -> dict[str, Any]:
     """Sequentially sort all five dolls with both Piper arms."""
 
@@ -3772,6 +5023,7 @@ def run_full_curobo_sort(
             render=render,
             asset_id=asset_id,
             active_robot_name=assignments[asset_id],
+            episode_recorder=episode_recorder,
         )
         operations.append(operation)
         placed_asset_ids.append(asset_id)
@@ -3806,7 +5058,16 @@ def run_full_curobo_sort(
             flush=True,
         )
 
-    final_settled = settle_and_validate_dolls(world, dolls)
+    _set_recording_context(
+        episode_recorder,
+        "final_settle",
+    )
+    final_settled = settle_and_validate_dolls(
+        world,
+        dolls,
+        render=render,
+        episode_recorder=episode_recorder,
+    )
     final_validation = validate_sorted_doll_states(
         final_settled["stable_states"]
     )
@@ -4397,6 +5658,9 @@ def validate_doll_physics(
 def settle_and_validate_dolls(
     world: Any,
     dolls: dict[str, Any],
+    *,
+    render: bool = False,
+    episode_recorder: Any | None = None,
 ) -> dict[str, Any]:
     """Advance finite physics steps until all five dolls are stably upright."""
 
@@ -4405,8 +5669,21 @@ def settle_and_validate_dolls(
     final_states: dict[str, dict[str, Any]] | None = None
     last_validation_error = "no physics steps executed"
     settle_steps = 0
+    physics_steps_per_control = (
+        PHYSICS_FREQUENCY_HZ // CONTROL_FREQUENCY_HZ
+    )
     for settle_steps in range(1, MATRYOSHKA_SETTLE_MAX_STEPS + 1):
-        world.step(render=False)
+        control_boundary = (
+            settle_steps % physics_steps_per_control == 0
+        )
+        world.step(
+            render=(
+                (render or episode_recorder is not None)
+                and control_boundary
+            )
+        )
+        if episode_recorder is not None and control_boundary:
+            episode_recorder.capture_frame()
         states = _doll_state_report(dolls)
         try:
             _validate_stable_doll_states(states)
@@ -4415,7 +5692,13 @@ def settle_and_validate_dolls(
             last_validation_error = str(error)
         else:
             consecutive += 1
-            if consecutive >= MATRYOSHKA_STABLE_CONSECUTIVE_STEPS:
+            if (
+                consecutive >= MATRYOSHKA_STABLE_CONSECUTIVE_STEPS
+                and (
+                    episode_recorder is None
+                    or control_boundary
+                )
+            ):
                 final_states = states
                 break
     if final_states is None:
@@ -4586,6 +5869,323 @@ def read_camera_observations(cameras: dict[str, Any]) -> dict[str, dict[str, Any
             ),
         }
     return observations
+
+
+def capture_episode_initial_state(
+    robots: dict[str, Any],
+    dolls: dict[str, Any],
+) -> dict[str, dict[str, Any]]:
+    """Capture the exact post-warmup state used as the replay reset state."""
+
+    import numpy as np
+
+    robot_position = np.stack(
+        [
+            np.asarray(
+                robots[name].get_joint_positions(),
+                dtype=np.float32,
+            )
+            for name in EPISODE_ROBOT_NAMES
+        ]
+    )
+    robot_velocity = np.stack(
+        [
+            np.asarray(
+                robots[name].get_joint_velocities(),
+                dtype=np.float32,
+            )
+            for name in EPISODE_ROBOT_NAMES
+        ]
+    )
+    robot_action = np.concatenate(
+        (robot_position[:, :6], robot_position[:, 6:7]),
+        axis=1,
+    )
+    states = _doll_state_report(dolls)
+    object_pose = np.asarray(
+        [
+            [
+                *states[asset_id]["position_m"],
+                *states[asset_id]["quaternion_wxyz"],
+            ]
+            for asset_id in EPISODE_OBJECT_IDS
+        ],
+        dtype=np.float32,
+    )
+    object_linear_velocity = np.asarray(
+        [
+            states[asset_id]["linear_velocity_m_s"]
+            for asset_id in EPISODE_OBJECT_IDS
+        ],
+        dtype=np.float32,
+    )
+    object_angular_velocity = np.asarray(
+        [
+            states[asset_id]["angular_velocity_rad_s"]
+            for asset_id in EPISODE_OBJECT_IDS
+        ],
+        dtype=np.float32,
+    )
+    target_pose = np.asarray(
+        [
+            [
+                *placement.pose.position,
+                *placement.pose.quaternion,
+            ]
+            for placement in compute_doll_target_layout()
+        ],
+        dtype=np.float32,
+    )
+    return {
+        "robots": {
+            "joint_position": robot_position,
+            "joint_velocity": robot_velocity,
+            "joint_action": robot_action,
+        },
+        "objects": {
+            "pose": object_pose,
+            "linear_velocity": object_linear_velocity,
+            "angular_velocity": object_angular_velocity,
+        },
+        "targets": {"object_pose": target_pose},
+    }
+
+
+class IsaacEpisodeRecorder:
+    """Bridge live Isaac state and cameras into ``Hdf5EpisodeWriter``."""
+
+    def __init__(
+        self,
+        writer: Hdf5EpisodeWriter,
+        *,
+        world: Any,
+        robots: dict[str, Any],
+        dolls: dict[str, Any],
+        cameras: dict[str, Any],
+        initial_state: dict[str, dict[str, Any]],
+    ) -> None:
+        import numpy as np
+
+        if set(robots) != set(EPISODE_ROBOT_NAMES):
+            raise ValueError(f"Unexpected robot names: {sorted(robots)}")
+        if set(dolls) != set(EPISODE_OBJECT_IDS):
+            raise ValueError(f"Unexpected object IDs: {sorted(dolls)}")
+        if set(cameras) != set(EPISODE_CAMERA_NAMES):
+            raise ValueError(f"Unexpected camera names: {sorted(cameras)}")
+        self.writer = writer
+        self.world = world
+        self.robots = robots
+        self.dolls = dolls
+        self.cameras = cameras
+        self._joint_action = np.asarray(
+            initial_state["robots"]["joint_action"],
+            dtype=np.float32,
+        ).copy()
+        self._phase = "initial_hold"
+        self._operator = ""
+        self._object_id = ""
+        self._event_code = np.full(
+            len(EPISODE_ROBOT_NAMES),
+            GRASP_EVENT_NONE,
+            dtype=np.int8,
+        )
+        self._event_object_index = np.full(
+            len(EPISODE_ROBOT_NAMES),
+            -1,
+            dtype=np.int8,
+        )
+        self._event_relative_pose = np.full(
+            (len(EPISODE_ROBOT_NAMES), 7),
+            np.nan,
+            dtype=np.float32,
+        )
+
+    def _robot_index(self, robot: Any) -> int:
+        for index, name in enumerate(EPISODE_ROBOT_NAMES):
+            if self.robots[name] is robot:
+                return index
+        raise ValueError("Action refers to an unregistered robot instance")
+
+    def set_arm_action(
+        self,
+        robot: Any,
+        joint_position: Sequence[float],
+    ) -> None:
+        import numpy as np
+
+        command = np.asarray(joint_position, dtype=np.float32)
+        if command.shape != (len(PIPER_ARM_JOINT_NAMES),):
+            raise ValueError(f"Expected six arm targets, found {command.shape}")
+        self._joint_action[self._robot_index(robot), :6] = command
+
+    def set_gripper_action(self, robot: Any, position: float) -> None:
+        self._joint_action[self._robot_index(robot), 6] = float(position)
+
+    def set_task_context(
+        self,
+        phase: str,
+        *,
+        operator: str = "",
+        object_id: str = "",
+    ) -> None:
+        if operator and operator not in EPISODE_ROBOT_NAMES:
+            raise ValueError(f"Unknown operator {operator!r}")
+        if object_id and object_id not in EPISODE_OBJECT_IDS:
+            raise ValueError(f"Unknown object ID {object_id!r}")
+        if len(phase.encode("utf-8")) > 48:
+            raise ValueError(f"Task phase is too long: {phase!r}")
+        self._phase = phase
+        self._operator = operator
+        self._object_id = object_id
+
+    def queue_grasp_event(
+        self,
+        event_code: int,
+        robot_name: str,
+        asset_id: str,
+        *,
+        relative_pose: PoseSpec | None = None,
+    ) -> None:
+        import numpy as np
+
+        if event_code not in (GRASP_EVENT_ATTACH, GRASP_EVENT_DETACH):
+            raise ValueError(f"Cannot queue grasp event {event_code}")
+        robot_index = EPISODE_ROBOT_NAMES.index(robot_name)
+        if self._event_code[robot_index] != GRASP_EVENT_NONE:
+            raise RuntimeError(
+                f"{robot_name} already has a pending grasp event"
+            )
+        self._event_code[robot_index] = event_code
+        self._event_object_index[robot_index] = (
+            EPISODE_OBJECT_IDS.index(asset_id)
+        )
+        if event_code == GRASP_EVENT_ATTACH:
+            if relative_pose is None:
+                raise ValueError("An attach event requires its relative pose")
+            self._event_relative_pose[robot_index] = np.asarray(
+                [*relative_pose.position, *relative_pose.quaternion],
+                dtype=np.float32,
+            )
+
+    def capture_frame(self) -> None:
+        """Read all state and all three rendered camera streams at one index."""
+
+        import numpy as np
+
+        observations = read_camera_observations(self.cameras)
+        robot_positions: list[Any] = []
+        robot_velocities: list[Any] = []
+        end_effector_poses: list[list[float]] = []
+        for name in EPISODE_ROBOT_NAMES:
+            robot = self.robots[name]
+            robot_positions.append(
+                np.asarray(robot.get_joint_positions(), dtype=np.float32)
+            )
+            robot_velocities.append(
+                np.asarray(robot.get_joint_velocities(), dtype=np.float32)
+            )
+            spec = _robot_spec_by_name(name)
+            position, quaternion = _xform_world_pose(
+                f"{spec.prim_path}/{PIPER_TOOL_REL_PATH}",
+                f"{name}_episode_tool",
+            )
+            end_effector_poses.append([*position, *quaternion])
+
+        object_states = _doll_state_report(self.dolls)
+        camera_frames: dict[str, dict[str, Any]] = {}
+        for camera_name in EPISODE_CAMERA_NAMES:
+            camera_position, camera_quaternion = self.cameras[
+                camera_name
+            ].get_world_pose(camera_axes="usd")
+            camera_pose = PoseSpec(
+                tuple(float(value) for value in camera_position),
+                tuple(float(value) for value in camera_quaternion),
+            )
+            camera_frames[camera_name] = {
+                **observations[camera_name],
+                "world_pose": np.asarray(
+                    [*camera_pose.position, *camera_pose.quaternion],
+                    dtype=np.float32,
+                ),
+                "world_to_camera": np.asarray(
+                    world_to_local_matrix(camera_pose),
+                    dtype=np.float32,
+                ),
+            }
+
+        world_time = getattr(self.world, "current_time", 0.0)
+        if callable(world_time):
+            world_time = world_time()
+        frame = {
+            "simulation_time_s": (
+                (self.writer.frame_count + 1) * CONTROL_DT
+            ),
+            "world_time_s": float(world_time),
+            "robots": {
+                "joint_position": np.asarray(
+                    robot_positions,
+                    dtype=np.float32,
+                ),
+                "joint_velocity": np.asarray(
+                    robot_velocities,
+                    dtype=np.float32,
+                ),
+                "joint_action": self._joint_action.copy(),
+                "end_effector_world_pose": np.asarray(
+                    end_effector_poses,
+                    dtype=np.float32,
+                ),
+            },
+            "objects": {
+                "world_pose": np.asarray(
+                    [
+                        [
+                            *object_states[asset_id]["position_m"],
+                            *object_states[asset_id][
+                                "quaternion_wxyz"
+                            ],
+                        ]
+                        for asset_id in EPISODE_OBJECT_IDS
+                    ],
+                    dtype=np.float32,
+                ),
+                "linear_velocity": np.asarray(
+                    [
+                        object_states[asset_id]["linear_velocity_m_s"]
+                        for asset_id in EPISODE_OBJECT_IDS
+                    ],
+                    dtype=np.float32,
+                ),
+                "angular_velocity": np.asarray(
+                    [
+                        object_states[asset_id][
+                            "angular_velocity_rad_s"
+                        ]
+                        for asset_id in EPISODE_OBJECT_IDS
+                    ],
+                    dtype=np.float32,
+                ),
+            },
+            "task": {
+                "phase": self._phase,
+                "operator": self._operator,
+                "object_id": self._object_id,
+            },
+            "control": {
+                "grasp_event_code": self._event_code.copy(),
+                "grasp_event_object_index": (
+                    self._event_object_index.copy()
+                ),
+                "grasp_event_relative_pose": (
+                    self._event_relative_pose.copy()
+                ),
+            },
+            "cameras": camera_frames,
+        }
+        self.writer.append_frame(frame)
+        self._event_code.fill(GRASP_EVENT_NONE)
+        self._event_object_index.fill(-1)
+        self._event_relative_pose.fill(np.nan)
 
 
 def _camera_target(name: str) -> tuple[float, float, float]:
@@ -4888,6 +6488,117 @@ def validate_and_capture_cameras(
     return report
 
 
+def summarize_sort_result(report: dict[str, Any]) -> dict[str, Any]:
+    """Strip dense planner trajectories while preserving acceptance evidence."""
+
+    return {
+        "success": bool(report["success"]),
+        "planner": report["planner"],
+        "planner_seed_per_operation": report[
+            "planner_seed_per_operation"
+        ],
+        "pick_order": report["pick_order"],
+        "assignments": report["assignments"],
+        "participating_robots": report["participating_robots"],
+        "placements": [
+            {
+                "asset_id": operation["asset_id"],
+                "active_robot": operation["active_robot"],
+                "final_place_error_m": operation["release"][
+                    "final_place_error_m"
+                ],
+                "final_upright_tilt_degrees": operation["release"][
+                    "final_doll_state"
+                ]["upright_tilt_degrees"],
+            }
+            for operation in report["operations"]
+        ],
+        "final_validation": report["final_validation"],
+        "final_robots": report["final_robots"],
+    }
+
+
+def run_hdf5_collection_worker(args: argparse.Namespace) -> dict[str, Any]:
+    """Run one cuRobo expert episode and leave it pending replay."""
+
+    if args.episode is None:
+        raise ValueError("collect-worker requires --episode")
+    episode_path = args.episode.resolve()
+    seeds = set_episode_random_seeds(args.seed)
+    layout = sample_initial_doll_layout(args.seed)
+    world = create_scene()
+    robots = create_robots(world)
+    dolls = create_dolls(world, layout)
+    settle_and_validate_dolls(world, dolls)
+    cameras = create_cameras(world)
+    camera_report = validate_and_capture_cameras(world, cameras)
+    initial_dolls = settle_and_validate_dolls(world, dolls)
+    initial_state = capture_episode_initial_state(robots, dolls)
+    metadata = build_episode_metadata(
+        episode_id=episode_path.stem.removesuffix(".partial"),
+        seed=args.seed,
+        planner_seed=args.planner_seed,
+        sampled_layout=layout,
+        initial_doll_report=initial_dolls,
+        camera_report=camera_report,
+    )
+    writer = Hdf5EpisodeWriter(
+        episode_path,
+        metadata=metadata,
+        initial_state=initial_state,
+    )
+    recorder = IsaacEpisodeRecorder(
+        writer,
+        world=world,
+        robots=robots,
+        dolls=dolls,
+        cameras=cameras,
+        initial_state=initial_state,
+    )
+    try:
+        _set_recording_context(recorder, "initial_hold")
+        _advance_control_frame(
+            world,
+            render=not args.headless,
+            episode_recorder=recorder,
+        )
+        sort_report = run_full_curobo_sort(
+            world,
+            robots,
+            dolls,
+            planner_seed=args.planner_seed,
+            render=not args.headless,
+            episode_recorder=recorder,
+        )
+        expert_summary = summarize_sort_result(sort_report)
+        writer.finish_expert(
+            success=True,
+            summary=expert_summary,
+        )
+    except Exception as error:
+        writer.finish_expert(
+            success=False,
+            failure_reason=f"{type(error).__name__}: {error}",
+        )
+        raise
+    finally:
+        writer.close()
+
+    schema = validate_episode_hdf5(episode_path)
+    return {
+        "success": True,
+        "episode_path": str(episode_path),
+        "seeds": {
+            **seeds,
+            "curobo_motion_planner": args.planner_seed,
+        },
+        "sampled_layout": [asdict(placement) for placement in layout],
+        "expert": expert_summary,
+        "schema": schema,
+        "bytes": episode_path.stat().st_size,
+    }
+
+
 def build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -4902,6 +6613,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
             "pick",
             "sort",
             "planner-worker",
+            "collect-worker",
             "demo",
             "collect",
             "replay",
@@ -4934,6 +6646,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "motion",
         "pick",
         "sort",
+        "collect-worker",
     }:
         # SimulationApp.close() shuts down the Python process in Isaac Sim 5.1,
         # so all useful output must be emitted and flushed before that call.
@@ -5055,6 +6768,9 @@ def main(argv: Sequence[str] | None = None) -> int:
                 world, args.output_dir / "sort" / preview_name
             )
             marker = "CUROBO_FULL_SORT_OK"
+        elif args.mode == "collect-worker":
+            report = run_hdf5_collection_worker(args)
+            marker = "HDF5_EXPERT_RECORDING_OK"
         elif args.mode == "cameras":
             world = create_scene()
             robots = create_robots(world)
