@@ -51,6 +51,17 @@ class StaticAssetAndConstantTests(unittest.TestCase):
             ("00004", "00003", "00002", "00001", "00000"),
         )
 
+    def test_piper_sim_and_command_joint_mapping(self) -> None:
+        self.assertEqual(
+            subject.PIPER_DOF_NAMES,
+            subject.PIPER_ARM_JOINT_NAMES + subject.PIPER_GRIPPER_JOINT_NAMES,
+        )
+        self.assertEqual(
+            subject.PIPER_COMMAND_JOINT_NAMES,
+            subject.PIPER_ARM_JOINT_NAMES + ("gripper_joint",),
+        )
+        self.assertEqual(len(subject.PIPER_HOME_DOF_POSITION), 8)
+
     def test_static_asset_and_urdf_audit(self) -> None:
         report = subject.validate_static_assets()
         joints = report["urdf"]["joints"]
@@ -70,9 +81,34 @@ class StaticAssetAndConstantTests(unittest.TestCase):
 
 
 class IsaacUsdAssetIntegrationTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.world = subject.create_scene()
+        cls.robots = None
+
+    def test_robot_home_gripper_and_workspace(self) -> None:
+        if self.__class__.robots is None:
+            self.__class__.robots = subject.create_robots(self.world)
+        report = subject.exercise_and_validate_robots(
+            self.world, self.__class__.robots
+        )
+        for name in ("left", "right"):
+            final = report["final_home"][name]
+            self.assertLessEqual(
+                final["maximum_home_error_rad"],
+                subject.PIPER_HOME_TOLERANCE_RAD,
+            )
+            self.assertGreater(
+                final["tool_forward_from_base_m"],
+                subject.PIPER_WORKSPACE_FORWARD_MINIMUM_M,
+            )
+        self.assertLess(
+            max(report["gripper_cycle"]["closed_finger_separation_m"].values()),
+            0.003,
+        )
+
     def test_scene_smoke(self) -> None:
-        world = subject.create_scene()
-        report = subject.validate_scene(world)
+        report = subject.validate_scene(self.world)
         self.assertEqual(report["active_lights"], [subject.HDR_DOME_PRIM_PATH])
         self.assertEqual(report["table"]["bbox"]["max"][2], subject.TABLE_TOP_Z)
         self.assertGreater(report["camera_stand"]["collision_prim_count"], 0)

@@ -91,6 +91,7 @@ PIPER_ARM_JOINT_NAMES: Final = (
     "joint6",
 )
 PIPER_GRIPPER_JOINT_NAMES: Final = ("gripper_joint", "joint8")
+PIPER_DOF_NAMES: Final = PIPER_ARM_JOINT_NAMES + PIPER_GRIPPER_JOINT_NAMES
 PIPER_COMMAND_JOINT_NAMES: Final = PIPER_ARM_JOINT_NAMES + ("gripper_joint",)
 PIPER_BASE_LINK: Final = "base_link"
 PIPER_TOOL_LINK: Final = "gripper_center"
@@ -102,7 +103,15 @@ PIPER_TOOL_REL_PATH: Final = "link6/gripper_center"
 PIPER_HOME_JOINT_POSITION: Final = (0.0, 1.57, -1.57, 0.0, 0.0, 0.0)
 PIPER_OPEN_GRIPPER_POSITION: Final = 0.04
 PIPER_CLOSED_GRIPPER_POSITION: Final = 0.0
+PIPER_HOME_DOF_POSITION: Final = PIPER_HOME_JOINT_POSITION + (
+    PIPER_OPEN_GRIPPER_POSITION,
+    PIPER_OPEN_GRIPPER_POSITION,
+)
 PIPER_HOME_TOLERANCE_RAD: Final = 0.02
+PIPER_GRIPPER_TOLERANCE_M: Final = 0.001
+PIPER_OPEN_FINGER_SEPARATION_M: Final = 0.08
+PIPER_WORKSPACE_FORWARD_MINIMUM_M: Final = 0.40
+PIPER_HOME_SETTLE_STEPS: Final = 60
 
 PHYSICS_FREQUENCY_HZ: Final = 120
 CONTROL_FREQUENCY_HZ: Final = 30
@@ -1030,11 +1039,388 @@ def capture_scene_preview(world: Any, output_path: Path) -> dict[str, Any]:
     }
 
 
+def create_robots(world: Any) -> dict[str, Any]:
+    """Reference and initialize both Piper articulations at their home pose."""
+
+    import numpy as np
+    from isaacsim.core.api.robots import Robot  # type: ignore[import-not-found]
+
+    robots: dict[str, Any] = {}
+    for spec in ROBOT_SPECS:
+        _add_reference(
+            world.stage,
+            prim_path=spec.prim_path,
+            asset_path=PIPER_USD,
+            pose=spec.base_pose,
+        )
+        robots[spec.name] = world.scene.add(
+            Robot(prim_path=spec.prim_path, name=f"{spec.name}_piper")
+        )
+    world.reset()
+
+    home = np.asarray(PIPER_HOME_DOF_POSITION, dtype=np.float32)
+    zero_velocity = np.zeros(len(PIPER_DOF_NAMES), dtype=np.float32)
+    for name, robot in robots.items():
+        if not robot.handles_initialized:
+            raise RuntimeError(f"{name} Piper articulation failed to initialize")
+        if tuple(robot.dof_names) != PIPER_DOF_NAMES:
+            raise ValueError(
+                f"{name} Piper DOF order changed: expected {PIPER_DOF_NAMES}, "
+                f"found {robot.dof_names}"
+            )
+        robot.set_joints_default_state(
+            positions=home,
+            velocities=zero_velocity,
+        )
+        robot.set_joint_positions(home)
+        robot.set_joint_velocities(zero_velocity)
+    for _ in range(16):
+        world.step(render=False)
+    return robots
+
+
+def _command_position(
+    robot: Any,
+    positions: Sequence[float],
+    joint_indices: Sequence[int],
+) -> None:
+    import numpy as np
+    from isaacsim.core.utils.types import (  # type: ignore[import-not-found]
+        ArticulationAction,
+    )
+
+    robot.apply_action(
+        ArticulationAction(
+            joint_positions=np.asarray(positions, dtype=np.float32),
+            joint_indices=np.asarray(joint_indices, dtype=np.int32),
+        )
+    )
+
+
+def _step_until(
+    world: Any,
+    predicate: Any,
+    *,
+    maximum_steps: int,
+    description: str,
+) -> int:
+    for step in range(1, maximum_steps + 1):
+        world.step(render=False)
+        if predicate():
+            return step
+    raise RuntimeError(
+        f"Timed out after {maximum_steps} physics steps while waiting for {description}"
+    )
+
+
+def _xform_world_pose(prim_path: str, name: str) -> tuple[list[float], list[float]]:
+    from isaacsim.core.prims import (  # type: ignore[import-not-found]
+        SingleXFormPrim,
+    )
+
+    xform = SingleXFormPrim(
+        prim_path,
+        name=name,
+        reset_xform_properties=False,
+    )
+    position, quaternion = xform.get_world_pose()
+    return position.tolist(), quaternion.tolist()
+
+
+def _finger_separation(spec: RobotSpec, label: str) -> float:
+    import numpy as np
+
+    left_position, _ = _xform_world_pose(
+        f"{spec.prim_path}/link7", f"{spec.name}_{label}_link7"
+    )
+    right_position, _ = _xform_world_pose(
+        f"{spec.prim_path}/link8", f"{spec.name}_{label}_link8"
+    )
+    return float(
+        np.linalg.norm(
+            np.asarray(left_position, dtype=np.float64)
+            - np.asarray(right_position, dtype=np.float64)
+        )
+    )
+
+
+def quaternion_angular_error(
+    first: Sequence[float], second: Sequence[float]
+) -> float:
+    """Smallest rotation angle between two wxyz quaternions, in radians."""
+
+    first_normalized = normalize_quaternion(first)
+    second_normalized = normalize_quaternion(second)
+    dot = abs(
+        sum(
+            first_normalized[index] * second_normalized[index]
+            for index in range(4)
+        )
+    )
+    return 2.0 * math.acos(min(1.0, max(-1.0, dot)))
+
+
+def validate_robots_at_home(
+    robots: dict[str, Any],
+    *,
+    label: str,
+) -> dict[str, Any]:
+    """Validate joint order, base pose, tool direction, open gripper, and home."""
+
+    import numpy as np
+
+    reports: dict[str, Any] = {}
+    home = np.asarray(PIPER_HOME_JOINT_POSITION, dtype=np.float64)
+    for spec in ROBOT_SPECS:
+        robot = robots[spec.name]
+        if tuple(robot.dof_names) != PIPER_DOF_NAMES:
+            raise ValueError(f"{spec.name}: unexpected DOF order {robot.dof_names}")
+        joint_positions = np.asarray(robot.get_joint_positions(), dtype=np.float64)
+        maximum_home_error = float(np.max(np.abs(joint_positions[:6] - home)))
+        if maximum_home_error > PIPER_HOME_TOLERANCE_RAD:
+            raise ValueError(
+                f"{spec.name}: home error {maximum_home_error:.6f} rad exceeds "
+                f"{PIPER_HOME_TOLERANCE_RAD:.6f} rad"
+            )
+        gripper_error = float(
+            np.max(
+                np.abs(
+                    joint_positions[6:8]
+                    - np.asarray(
+                        (
+                            PIPER_OPEN_GRIPPER_POSITION,
+                            PIPER_OPEN_GRIPPER_POSITION,
+                        )
+                    )
+                )
+            )
+        )
+        if gripper_error > PIPER_GRIPPER_TOLERANCE_M:
+            raise ValueError(
+                f"{spec.name}: open gripper error {gripper_error:.6f} m"
+            )
+
+        base_position, base_quaternion = robot.get_world_pose()
+        _assert_vector_close(
+            base_position,
+            spec.base_pose.position,
+            label=f"{spec.name} Piper base position",
+            tolerance=2.0e-5,
+        )
+        base_orientation_error = quaternion_angular_error(
+            base_quaternion, spec.base_pose.quaternion
+        )
+        if base_orientation_error > 2.0e-5:
+            raise ValueError(
+                f"{spec.name}: base orientation error "
+                f"{base_orientation_error:.8f} rad"
+            )
+
+        tool_position, tool_quaternion = _xform_world_pose(
+            f"{spec.prim_path}/{PIPER_TOOL_REL_PATH}",
+            f"{spec.name}_{label}_tool",
+        )
+        forward_distance = tool_position[1] - spec.base_pose.position[1]
+        if forward_distance < PIPER_WORKSPACE_FORWARD_MINIMUM_M:
+            raise ValueError(
+                f"{spec.name}: gripper center is only {forward_distance:.4f} m "
+                "in world +Y from its base"
+            )
+        if not (
+            TABLE_X_RANGE[0] <= tool_position[0] <= TABLE_X_RANGE[1]
+            and TABLE_Y_RANGE[0] <= tool_position[1] <= TABLE_Y_RANGE[1]
+            and tool_position[2] > TABLE_TOP_Z
+        ):
+            raise ValueError(
+                f"{spec.name}: home gripper center is outside the table workspace: "
+                f"{tool_position}"
+            )
+
+        separation = _finger_separation(spec, label)
+        if not math.isclose(
+            separation,
+            PIPER_OPEN_FINGER_SEPARATION_M,
+            abs_tol=2.0e-3,
+        ):
+            raise ValueError(
+                f"{spec.name}: expected about 0.08 m open separation, "
+                f"found {separation:.6f} m"
+            )
+
+        properties = robot.dof_properties
+        reports[spec.name] = {
+            "prim_path": spec.prim_path,
+            "dof_names": list(robot.dof_names),
+            "dof_limits": [
+                [float(lower), float(upper)]
+                for lower, upper in zip(
+                    properties["lower"], properties["upper"]
+                )
+            ],
+            "base_pose": {
+                "position": base_position.tolist(),
+                "quaternion": base_quaternion.tolist(),
+                "orientation_error_rad": base_orientation_error,
+            },
+            "home_joint_position": joint_positions.tolist(),
+            "maximum_home_error_rad": maximum_home_error,
+            "gripper_open_error_m": gripper_error,
+            "finger_separation_m": separation,
+            "tool_world_pose": {
+                "position": tool_position,
+                "quaternion": tool_quaternion,
+            },
+            "tool_forward_from_base_m": forward_distance,
+        }
+    return reports
+
+
+def exercise_and_validate_robots(
+    world: Any, robots: dict[str, Any]
+) -> dict[str, Any]:
+    """Exercise both grippers and arm drives, then return both robots home."""
+
+    import numpy as np
+
+    initial = validate_robots_at_home(robots, label="initial_home")
+
+    for robot in robots.values():
+        _command_position(robot, (PIPER_CLOSED_GRIPPER_POSITION,), (6,))
+    close_steps = _step_until(
+        world,
+        lambda: all(
+            float(np.max(np.abs(robot.get_joint_positions()[6:8])))
+            <= PIPER_GRIPPER_TOLERANCE_M
+            for robot in robots.values()
+        ),
+        maximum_steps=240,
+        description="both Piper grippers to close through the mimic joint",
+    )
+    closed_separations = {
+        spec.name: _finger_separation(spec, "closed") for spec in ROBOT_SPECS
+    }
+    if any(value > 0.003 for value in closed_separations.values()):
+        raise ValueError(
+            f"Closed gripper finger separation is too large: {closed_separations}"
+        )
+
+    for robot in robots.values():
+        _command_position(robot, (PIPER_OPEN_GRIPPER_POSITION,), (6,))
+    open_steps = _step_until(
+        world,
+        lambda: all(
+            float(
+                np.max(
+                    np.abs(
+                        robot.get_joint_positions()[6:8]
+                        - PIPER_OPEN_GRIPPER_POSITION
+                    )
+                )
+            )
+            <= PIPER_GRIPPER_TOLERANCE_M
+            for robot in robots.values()
+        ),
+        maximum_steps=240,
+        description="both Piper grippers to reopen through the mimic joint",
+    )
+    reopened_separations = {
+        spec.name: _finger_separation(spec, "reopened") for spec in ROBOT_SPECS
+    }
+
+    home = np.asarray(PIPER_HOME_JOINT_POSITION, dtype=np.float64)
+    for sign, spec in zip((1.0, -1.0), ROBOT_SPECS):
+        perturbed = home.copy()
+        perturbed[0] = sign * 0.2
+        _command_position(robots[spec.name], perturbed, range(6))
+    perturb_steps = _step_until(
+        world,
+        lambda: all(
+            abs(float(robots[spec.name].get_joint_positions()[0]) - sign * 0.2)
+            <= 0.01
+            for sign, spec in zip((1.0, -1.0), ROBOT_SPECS)
+        ),
+        maximum_steps=240,
+        description="opposed joint1 perturbations",
+    )
+    perturbed_joint1 = {
+        spec.name: float(robots[spec.name].get_joint_positions()[0])
+        for spec in ROBOT_SPECS
+    }
+
+    for robot in robots.values():
+        _command_position(
+            robot,
+            PIPER_HOME_JOINT_POSITION + (PIPER_OPEN_GRIPPER_POSITION,),
+            range(7),
+        )
+    home_steps = _step_until(
+        world,
+        lambda: all(
+            float(
+                np.max(
+                    np.abs(
+                        robot.get_joint_positions()[:6]
+                        - np.asarray(PIPER_HOME_JOINT_POSITION)
+                    )
+                )
+            )
+            <= PIPER_HOME_TOLERANCE_RAD
+            and float(
+                np.max(
+                    np.abs(
+                        robot.get_joint_positions()[6:8]
+                        - PIPER_OPEN_GRIPPER_POSITION
+                    )
+                )
+            )
+            <= PIPER_GRIPPER_TOLERANCE_M
+            for robot in robots.values()
+        ),
+        maximum_steps=480,
+        description="both Piper arms to return home with open grippers",
+    )
+    for _ in range(PIPER_HOME_SETTLE_STEPS):
+        world.step(render=False)
+    final = validate_robots_at_home(robots, label="final_home")
+
+    return {
+        "joint_mapping": {
+            "all_sim_dofs": list(PIPER_DOF_NAMES),
+            "curobo_arm_joints": list(PIPER_ARM_JOINT_NAMES),
+            "commanded_gripper_joint": "gripper_joint",
+            "mimic_joint": "joint8",
+        },
+        "initial_home": initial,
+        "gripper_cycle": {
+            "close_steps": close_steps,
+            "closed_finger_separation_m": closed_separations,
+            "open_steps": open_steps,
+            "reopened_finger_separation_m": reopened_separations,
+        },
+        "home_cycle": {
+            "perturb_steps": perturb_steps,
+            "perturbed_joint1_rad": perturbed_joint1,
+            "return_home_steps": home_steps,
+            "post_tolerance_settle_steps": PIPER_HOME_SETTLE_STEPS,
+        },
+        "final_home": final,
+    }
+
+
 def build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--mode",
-        choices=("audit", "scene", "cameras", "demo", "collect", "replay", "validate"),
+        choices=(
+            "audit",
+            "scene",
+            "robots",
+            "cameras",
+            "demo",
+            "collect",
+            "replay",
+            "validate",
+        ),
         default="demo",
     )
     parser.add_argument("--headless", action="store_true")
@@ -1050,7 +1436,7 @@ def build_argument_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_argument_parser().parse_args(argv)
-    if args.mode in {"audit", "scene"}:
+    if args.mode in {"audit", "scene", "robots"}:
         # SimulationApp.close() shuts down the Python process in Isaac Sim 5.1,
         # so all useful output must be emitted and flushed before that call.
         validate_static_assets()
@@ -1062,7 +1448,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         if args.mode == "audit":
             report = run_asset_audit()
             marker = "ASSET_AUDIT_OK"
-        else:
+        elif args.mode == "scene":
             world = create_scene()
             report = validate_scene(world)
             preview_name = (
@@ -1072,6 +1458,20 @@ def main(argv: Sequence[str] | None = None) -> int:
                 world, args.output_dir / "scene" / preview_name
             )
             marker = "SCENE_SMOKE_OK"
+        else:
+            world = create_scene()
+            robots = create_robots(world)
+            report = {
+                "scene": validate_scene(world),
+                "robots": exercise_and_validate_robots(world, robots),
+            }
+            preview_name = (
+                "robots_headless.png" if args.headless else "robots_headed.png"
+            )
+            report["preview"] = capture_scene_preview(
+                world, args.output_dir / "robots" / preview_name
+            )
+            marker = "ROBOT_SMOKE_OK"
         print(marker)
         print(json.dumps(report, indent=2, sort_keys=True, default=str))
         sys.stdout.flush()

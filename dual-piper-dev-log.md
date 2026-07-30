@@ -43,3 +43,14 @@
 - 问题与处理：首次 headless viewport capture 在 MDL 首次编译时耗时约 34 秒，但有限 240 render-step 上限内完成；Mahogany MDL 报告已有资产内部的 float-to-float2 compiler warning，不影响 shader 创建、entry 验证和渲染，未修改原始 MDL。
 - 参考资料：`third_parties/IsaacLab/source/isaaclab/isaaclab/sim/spawners/lights/lights.py`；`third_parties/IsaacLab/source/isaaclab/isaaclab/sim/spawners/materials/visual_materials.py`；`.venv/lib/python3.11/site-packages/isaacsim/extscache/omni.kit.viewport.utility-1.1.2+69cbf6ad/omni/kit/viewport/utility/__init__.py`。
 - Commit message：`feat: build static dual Piper scene`
+
+## 2026-07-30 23:31 — 加载双 Piper 并验证关节、夹爪、安装位姿和归位
+
+- 目标：在固定桌面位姿加载两个独立 Piper articulation，确定真实仿真 DOF 映射，验证夹爪 mimic、home 驱动、安装方向和 headed/headless 几何。
+- 完成内容：实现 `create_robots()`、有限步 action/convergence helper、`validate_robots_at_home()` 和 `exercise_and_validate_robots()`；两个 prim 均引用同一 `Piper.usd`，使用固定 base pose；用实际 articulation controller 闭合/打开 `gripper_joint`，确认 `joint8` 跟随；给左右 joint1 分别施加 `+0.2/-0.2 rad` 后自动返回 home 并等待额外 60 个稳定步；读取 `gripper_center`、两指和 base 的实际 world pose，验证两臂都朝世界 `+Y` 的桌面内部工作；新增 `--mode robots` 和 headed/headless 预览。
+- 修改文件：`dual_piper_sort.py`、`test_dual_piper_sort.py`、`dual-piper-dev-log.md`。
+- 运行命令：`git status --short`；两次 `uv run python - <<'PY' ...` 最小 articulation/控制探针；`uv run python test_dual_piper_sort.py --mode fast`；`uv run python dual_piper_sort.py --mode robots --headless`；`uv run python dual_piper_sort.py --mode robots`；`uv run python test_dual_piper_sort.py --mode integration --headless`；`uv run python -m py_compile dual_piper_sort.py test_dual_piper_sort.py`；`git diff --check -- dual_piper_sort.py test_dual_piper_sort.py`。
+- 验证结果：fast 6/6、集成 9/9 通过；headed/headless 均输出 `ROBOT_SMOKE_OK` 且退出码 0；两臂 base 实际位置分别为约 `[-0.3,-0.45,0.765]`、`[0.3,-0.45,0.765]`，姿态与归一化后的 `+90° Z` 四元数一致；两臂 home `gripper_center` 从 base 向世界 `+Y` 前伸约 `0.51236 m`；夹爪约 45 physics steps 从 `0.080 m` 开距闭到约 `6e-6 m` 并重新打开；两臂回 home 的最大关节误差约 `0.000661 rad`，远低于 `0.02 rad`；headed 预览目视确认两个基座、等待姿态、支架和桌面互不穿插。
+- 问题与处理：首个探针沿用旧示例假定只有 7 DOF，`set_joint_positions` 报 `(1,7)` 到 `(1,8)` shape mismatch；实际 USD/PhysX 暴露顺序为六个 arm joints、`gripper_joint`、`joint8` 共 8 DOF，改为初始化全部 8 DOF，但 action 只下发六臂关节加 `gripper_joint`，让 `joint8` 由 mimic schema 跟随。USD 的 `joint8` 下限为 `-0.007 m`，与 URDF 的 `0 m` 不同，因此以实际 USD limit 记录，控制目标仍限制在 `[0,0.05] m`。
+- 参考资料：`.venv/lib/python3.11/site-packages/isaacsim/exts/isaacsim.core.api/isaacsim/core/api/robots/robot.py`；`.venv/lib/python3.11/site-packages/isaacsim/exts/isaacsim.core.prims/isaacsim/core/prims/impl/single_articulation.py`；`.venv/lib/python3.11/site-packages/isaacsim/exts/isaacsim.core.prims/isaacsim/core/prims/impl/articulation.py`；`Assets/Robots/piper/Piper.usd`。
+- Commit message：`feat: validate dual Piper articulations`
