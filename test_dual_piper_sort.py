@@ -1,0 +1,118 @@
+#!/usr/bin/env python3
+"""Single test entry point for the dual-Piper simulation."""
+
+from __future__ import annotations
+
+import argparse
+import math
+import sys
+import unittest
+
+import dual_piper_sort as subject
+
+
+class StaticAssetAndConstantTests(unittest.TestCase):
+    def test_fixed_table_and_ground_constants(self) -> None:
+        self.assertEqual(subject.TABLE_POSITION, (0.0, -0.05, 0.74))
+        self.assertEqual(subject.TABLE_SIZE, (1.4, 1.1, 0.05))
+        self.assertEqual(subject.TABLE_X_RANGE, (-0.70, 0.70))
+        self.assertEqual(subject.TABLE_Y_RANGE, (-0.60, 0.50))
+        self.assertEqual(subject.TABLE_TOP_Z, 0.765)
+        self.assertEqual(subject.GROUND_POSITION, (0.0, 0.0, -0.05))
+        self.assertEqual(subject.GROUND_SIZE, (6.0, 6.0, 0.1))
+
+    def test_fixed_dual_piper_poses_and_wxyz_convention(self) -> None:
+        self.assertEqual(subject.QUATERNION_ORDER, "wxyz")
+        self.assertEqual(subject.LEFT_PIPER.base_pose.position, (-0.3, -0.45, 0.765))
+        self.assertEqual(subject.RIGHT_PIPER.base_pose.position, (0.3, -0.45, 0.765))
+        self.assertEqual(
+            subject.LEFT_PIPER.base_pose.quaternion,
+            subject.RIGHT_PIPER.base_pose.quaternion,
+        )
+        quaternion = subject.LEFT_PIPER.base_pose.quaternion
+        self.assertTrue(math.isclose(sum(value * value for value in quaternion), 1.0))
+        expected = 1.0 / math.sqrt(2.0)
+        self.assertTrue(math.isclose(quaternion[0], expected, abs_tol=1.0e-12))
+        self.assertTrue(math.isclose(quaternion[3], expected, abs_tol=1.0e-12))
+        self.assertEqual(quaternion[1:3], (0.0, 0.0))
+
+    def test_selected_doll_metadata(self) -> None:
+        dolls = subject.get_doll_specs()
+        self.assertEqual([doll.asset_id for doll in dolls], [f"{i:05d}" for i in range(5)])
+        for actual, expected in zip(
+            (doll.height for doll in dolls), (0.13, 0.11, 0.09, 0.07, 0.05)
+        ):
+            self.assertTrue(math.isclose(actual, expected, abs_tol=1.0e-9))
+        self.assertEqual({doll.uuid for doll in dolls}, {subject.MATRYOSHKA_UUID})
+        self.assertTrue(all(doll.mass == 0.05 for doll in dolls))
+        self.assertTrue(all(doll.friction == 0.45 for doll in dolls))
+        self.assertEqual(
+            subject.MATRYOSHKA_SORT_ORDER,
+            ("00004", "00003", "00002", "00001", "00000"),
+        )
+
+    def test_static_asset_and_urdf_audit(self) -> None:
+        report = subject.validate_static_assets()
+        joints = report["urdf"]["joints"]
+        self.assertEqual(tuple(joints)[:6], subject.PIPER_ARM_JOINT_NAMES)
+        self.assertEqual(joints["joint8"]["mimic"], "gripper_joint")
+        self.assertEqual(joints["gripper_center_fixed"]["child"], "gripper_center")
+        self.assertEqual(joints["camera_fixed"]["child"], "camera")
+
+    def test_simulation_rates_have_integer_substeps(self) -> None:
+        self.assertEqual(
+            subject.PHYSICS_FREQUENCY_HZ % subject.CONTROL_FREQUENCY_HZ, 0
+        )
+        self.assertEqual(
+            subject.PHYSICS_FREQUENCY_HZ % subject.RENDER_FREQUENCY_HZ, 0
+        )
+        self.assertEqual(subject.CONTROL_FREQUENCY_HZ, subject.CAMERA_FREQUENCY_HZ)
+
+
+class IsaacUsdAssetIntegrationTest(unittest.TestCase):
+    def test_usd_asset_audit(self) -> None:
+        report = subject.run_asset_audit()
+        self.assertTrue(report["usd"]["doll_mass_and_friction_override_required"])
+        self.assertTrue(report["usd"]["piper_camera_helper_is_not_sensor"])
+
+
+def build_argument_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--mode", choices=("fast", "integration"), default="fast")
+    parser.add_argument("--headless", action="store_true")
+    return parser
+
+
+def main() -> int:
+    args = build_argument_parser().parse_args()
+    simulation_app = None
+    if args.mode == "fast":
+        suite = unittest.defaultTestLoader.loadTestsFromTestCase(
+            StaticAssetAndConstantTests
+        )
+    else:
+        # Isaac-supplied pxr bindings are available only after the application
+        # starts.  Keep it alive until all assertions and runner output finish.
+        from isaacsim import SimulationApp
+
+        simulation_app = SimulationApp({"headless": args.headless})
+        suite = unittest.TestSuite(
+            (
+                unittest.defaultTestLoader.loadTestsFromTestCase(
+                    StaticAssetAndConstantTests
+                ),
+                unittest.defaultTestLoader.loadTestsFromTestCase(
+                    IsaacUsdAssetIntegrationTest
+                ),
+            )
+        )
+    result = unittest.TextTestRunner(verbosity=2).run(suite)
+    if result.wasSuccessful() and simulation_app is not None:
+        sys.stdout.flush()
+        sys.stderr.flush()
+        simulation_app.close()
+    return 0 if result.wasSuccessful() else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
