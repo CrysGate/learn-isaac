@@ -222,3 +222,6 @@ __marimo__/
 
 # Third party libraries
 third_parties/
+
+# Generated dual-Piper episodes, previews, and diagnostics
+dual_piper_output/

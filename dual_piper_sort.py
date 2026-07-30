@@ -60,6 +60,8 @@ GROUND_POSITION: Final = (0.0, 0.0, -0.05)
 GROUND_ORIENTATION: Final = IDENTITY_QUATERNION
 GROUND_SIZE: Final = (6.0, 6.0, 0.1)
 GROUND_MATERIAL_ENTRY: Final = "Wood_Tiles_Fineline"
+TABLE_VISUAL_MATERIAL_PATH: Final = "/World/Looks/TableMahogany"
+GROUND_VISUAL_MATERIAL_PATH: Final = "/World/Looks/GroundWoodTiles"
 
 ROOM_PRIM_PATH: Final = "/World/Scene/Room"
 ROOM_RESIDUAL_LIGHT_REL_PATH: Final = "simple_room/RectLight"
@@ -125,6 +127,8 @@ LEFT_WRIST_CAMERA_NAME: Final = "left_wrist_camera"
 RIGHT_WRIST_CAMERA_NAME: Final = "right_wrist_camera"
 OVERHEAD_CAMERA_NAME: Final = "overhead_camera"
 OVERHEAD_CAMERA_TARGET: Final = (0.0, -0.05, TABLE_TOP_Z)
+SCENE_PREVIEW_EYE: Final = (2.1, -2.3, 1.9)
+SCENE_PREVIEW_TARGET: Final = (0.0, -0.05, 0.75)
 
 MATRYOSHKA_UUID: Final = "a5a44251-6d8c-4cee-a8d7-90c443e47e53"
 MATRYOSHKA_SORT_ORDER: Final = ("00004", "00003", "00002", "00001", "00000")
@@ -565,6 +569,467 @@ def run_asset_audit() -> dict[str, Any]:
     return {"static": validate_static_assets(), "usd": inspect_usd_assets()}
 
 
+def _set_xform(
+    prim: Any,
+    *,
+    position: Sequence[float],
+    quaternion: Sequence[float],
+    scale: Sequence[float] | None = None,
+) -> None:
+    """Author one unambiguous translate/orient/(optional) scale stack."""
+
+    from pxr import Gf, UsdGeom  # type: ignore[import-not-found]
+
+    normalized = normalize_quaternion(quaternion)
+    xformable = UsdGeom.Xformable(prim)
+    xformable.ClearXformOpOrder()
+    xformable.AddTranslateOp(UsdGeom.XformOp.PrecisionDouble).Set(
+        Gf.Vec3d(*(float(value) for value in position))
+    )
+    xformable.AddOrientOp(UsdGeom.XformOp.PrecisionDouble).Set(
+        Gf.Quatd(
+            normalized[0],
+            Gf.Vec3d(normalized[1], normalized[2], normalized[3]),
+        )
+    )
+    if scale is not None:
+        xformable.AddScaleOp(UsdGeom.XformOp.PrecisionDouble).Set(
+            Gf.Vec3d(*(float(value) for value in scale))
+        )
+
+
+def _create_mdl_material(
+    stage: Any, material_path: str, mdl_path: Path, material_entry: str
+) -> Any:
+    """Create a USD material backed by one explicit local MDL entry."""
+
+    from omni.usd.commands import (  # type: ignore[import-not-found]
+        CreateMdlMaterialPrimCommand,
+    )
+    from pxr import UsdShade  # type: ignore[import-not-found]
+
+    CreateMdlMaterialPrimCommand(
+        mtl_url=str(mdl_path),
+        mtl_name=material_entry,
+        mtl_path=material_path,
+        stage=stage,
+        select_new_prim=False,
+    ).do()
+    material = UsdShade.Material(stage.GetPrimAtPath(material_path))
+    if not material:
+        raise RuntimeError(
+            f"Failed to create material {material_entry!r} from {mdl_path}"
+        )
+    return material
+
+
+def _create_static_cube(
+    stage: Any,
+    *,
+    prim_path: str,
+    position: Sequence[float],
+    quaternion: Sequence[float],
+    size: Sequence[float],
+    material: Any,
+) -> Any:
+    """Create a unit USD cube scaled to metres and make it a static collider."""
+
+    from pxr import UsdGeom, UsdPhysics, UsdShade  # type: ignore[import-not-found]
+
+    cube = UsdGeom.Cube.Define(stage, prim_path)
+    cube.CreateSizeAttr(1.0)
+    _set_xform(
+        cube.GetPrim(),
+        position=position,
+        quaternion=quaternion,
+        scale=size,
+    )
+    collision = UsdPhysics.CollisionAPI.Apply(cube.GetPrim())
+    collision.CreateCollisionEnabledAttr(True)
+    binding = UsdShade.MaterialBindingAPI.Apply(cube.GetPrim())
+    binding.Bind(
+        material,
+        bindingStrength=UsdShade.Tokens.strongerThanDescendants,
+    )
+    return cube.GetPrim()
+
+
+def _add_reference(
+    stage: Any,
+    *,
+    prim_path: str,
+    asset_path: Path,
+    pose: PoseSpec,
+) -> Any:
+    prim = stage.DefinePrim(prim_path, "Xform")
+    if not prim.GetReferences().AddReference(str(asset_path)):
+        raise RuntimeError(f"Failed to reference {asset_path} at {prim_path}")
+    _set_xform(
+        prim,
+        position=pose.position,
+        quaternion=pose.quaternion,
+    )
+    return prim
+
+
+def _prim_references(prim: Any) -> list[str]:
+    references: list[str] = []
+    for prim_spec in prim.GetPrimStack():
+        for reference in prim_spec.referenceList.prependedItems:
+            references.append(str(reference.assetPath))
+    return references
+
+
+def create_scene() -> Any:
+    """Build the static room/HDR/ground/table/stand scene and reset physics."""
+
+    import omni.usd  # type: ignore[import-not-found]
+    from isaacsim.core.api import World  # type: ignore[import-not-found]
+    from pxr import Sdf, UsdGeom, UsdLux  # type: ignore[import-not-found]
+
+    world = World(
+        physics_dt=PHYSICS_DT,
+        rendering_dt=RENDER_DT,
+        stage_units_in_meters=WORLD_METERS_PER_UNIT,
+    )
+    stage = omni.usd.get_context().get_stage()
+    UsdGeom.SetStageMetersPerUnit(stage, WORLD_METERS_PER_UNIT)
+    UsdGeom.SetStageUpAxis(stage, UsdGeom.Tokens.z)
+    stage.DefinePrim("/World", "Xform")
+    stage.DefinePrim("/World/Scene", "Xform")
+    stage.DefinePrim("/World/Robots", "Xform")
+    stage.DefinePrim("/World/Looks", "Scope")
+
+    room_prim = _add_reference(
+        stage,
+        prim_path=ROOM_PRIM_PATH,
+        asset_path=ROOM_USD,
+        pose=PoseSpec((0.0, 0.0, 0.0), IDENTITY_QUATERNION),
+    )
+    room_light_path = f"{ROOM_PRIM_PATH}/{ROOM_RESIDUAL_LIGHT_REL_PATH}"
+    room_light = stage.GetPrimAtPath(room_light_path)
+    if not room_light:
+        raise RuntimeError(f"Expected authored room light at {room_light_path}")
+    room_light.SetActive(False)
+
+    stand_prim = _add_reference(
+        stage,
+        prim_path=CAMERA_STAND_PRIM_PATH,
+        asset_path=CAMERA_STAND_USD,
+        pose=PoseSpec(CAMERA_STAND_POSITION, CAMERA_STAND_ORIENTATION),
+    )
+
+    table_material = _create_mdl_material(
+        stage,
+        TABLE_VISUAL_MATERIAL_PATH,
+        TABLE_MDL,
+        TABLE_MATERIAL_ENTRY,
+    )
+    ground_material = _create_mdl_material(
+        stage,
+        GROUND_VISUAL_MATERIAL_PATH,
+        GROUND_MDL,
+        GROUND_MATERIAL_ENTRY,
+    )
+    _create_static_cube(
+        stage,
+        prim_path=TABLE_PRIM_PATH,
+        position=TABLE_POSITION,
+        quaternion=TABLE_ORIENTATION,
+        size=TABLE_SIZE,
+        material=table_material,
+    )
+    _create_static_cube(
+        stage,
+        prim_path=GROUND_PRIM_PATH,
+        position=GROUND_POSITION,
+        quaternion=GROUND_ORIENTATION,
+        size=GROUND_SIZE,
+        material=ground_material,
+    )
+
+    dome = UsdLux.DomeLight.Define(stage, HDR_DOME_PRIM_PATH)
+    dome.CreateIntensityAttr(HDR_DOME_INTENSITY)
+    dome.CreateTextureFileAttr(Sdf.AssetPath(str(HDR_TEXTURE)))
+    dome.CreateTextureFormatAttr("latlong")
+    dome.GetPrim().CreateAttribute(
+        "visibleInPrimaryRay", Sdf.ValueTypeNames.Bool
+    ).Set(HDR_DOME_VISIBLE_IN_PRIMARY_RAYS)
+    dome_xform = UsdGeom.Xformable(dome.GetPrim())
+    dome_xform.ClearXformOpOrder()
+    dome_xform.AddRotateZOp(UsdGeom.XformOp.PrecisionDouble).Set(
+        HDR_DOME_ROTATION_DEGREES
+    )
+
+    # Keep strong references until composition is complete; the returned World
+    # owns the current stage after reset.
+    if not room_prim or not stand_prim:
+        raise RuntimeError("Failed to compose the static references")
+    world.reset()
+    return world
+
+
+def _world_bbox(stage: Any, prim_path: str) -> dict[str, list[float]]:
+    from pxr import Usd, UsdGeom  # type: ignore[import-not-found]
+
+    prim = stage.GetPrimAtPath(prim_path)
+    if not prim:
+        raise ValueError(f"Missing prim for bounds check: {prim_path}")
+    return _aligned_bbox(stage, prim, Usd, UsdGeom)
+
+
+def _assert_vector_close(
+    actual: Sequence[float],
+    expected: Sequence[float],
+    *,
+    label: str,
+    tolerance: float = 1.0e-5,
+) -> None:
+    if len(actual) != len(expected) or any(
+        not math.isclose(float(a), float(e), abs_tol=tolerance)
+        for a, e in zip(actual, expected)
+    ):
+        raise ValueError(f"{label}: expected {list(expected)}, found {list(actual)}")
+
+
+def _material_report(stage: Any, geometry_path: str, material_path: str) -> dict[str, Any]:
+    from pxr import UsdShade  # type: ignore[import-not-found]
+
+    geometry = stage.GetPrimAtPath(geometry_path)
+    direct_binding = UsdShade.MaterialBindingAPI(geometry).GetDirectBinding()
+    bound_path = str(direct_binding.GetMaterialPath())
+    if bound_path != material_path:
+        raise ValueError(
+            f"{geometry_path}: expected material {material_path}, found {bound_path}"
+        )
+    shader = stage.GetPrimAtPath(f"{material_path}/Shader")
+    if not shader:
+        raise ValueError(f"{material_path}: missing MDL Shader prim")
+    return {
+        "material_path": bound_path,
+        "shader_attributes": {
+            attribute.GetName(): str(attribute.Get())
+            for attribute in shader.GetAttributes()
+            if "sourceAsset" in attribute.GetName()
+            or "implementationSource" in attribute.GetName()
+        },
+    }
+
+
+def validate_scene(world: Any) -> dict[str, Any]:
+    """Validate the composed static scene against all fixed scene invariants."""
+
+    import omni.usd  # type: ignore[import-not-found]
+    from pxr import Sdf, UsdGeom, UsdPhysics  # type: ignore[import-not-found]
+
+    stage = omni.usd.get_context().get_stage()
+    if not math.isclose(
+        float(UsdGeom.GetStageMetersPerUnit(stage)), WORLD_METERS_PER_UNIT
+    ):
+        raise ValueError("Scene stage is not metre-scaled")
+    if str(UsdGeom.GetStageUpAxis(stage)) != WORLD_UP_AXIS:
+        raise ValueError("Scene stage is not Z-up")
+    if not math.isclose(float(world.get_physics_dt()), PHYSICS_DT, abs_tol=1.0e-12):
+        raise ValueError("Physics dt differs from the configured 120 Hz")
+    if not math.isclose(float(world.get_rendering_dt()), RENDER_DT, abs_tol=1.0e-12):
+        raise ValueError("Rendering dt differs from the configured 30 Hz")
+
+    table = stage.GetPrimAtPath(TABLE_PRIM_PATH)
+    ground = stage.GetPrimAtPath(GROUND_PRIM_PATH)
+    for name, prim in (("table", table), ("ground", ground)):
+        if not prim or not prim.HasAPI(UsdPhysics.CollisionAPI):
+            raise ValueError(f"{name} is missing its static CollisionAPI")
+        if prim.HasAPI(UsdPhysics.RigidBodyAPI):
+            raise ValueError(f"{name} must be static, not a rigid body")
+
+    table_bbox = _world_bbox(stage, TABLE_PRIM_PATH)
+    ground_bbox = _world_bbox(stage, GROUND_PRIM_PATH)
+    _assert_vector_close(
+        table_bbox["min"],
+        (TABLE_X_RANGE[0], TABLE_Y_RANGE[0], TABLE_POSITION[2] - TABLE_SIZE[2] / 2),
+        label="table bbox min",
+    )
+    _assert_vector_close(
+        table_bbox["max"],
+        (TABLE_X_RANGE[1], TABLE_Y_RANGE[1], TABLE_TOP_Z),
+        label="table bbox max",
+    )
+    _assert_vector_close(
+        ground_bbox["min"], (-3.0, -3.0, -0.1), label="ground bbox min"
+    )
+    _assert_vector_close(
+        ground_bbox["max"], (3.0, 3.0, 0.0), label="ground bbox max"
+    )
+
+    room = stage.GetPrimAtPath(ROOM_PRIM_PATH)
+    stand = stage.GetPrimAtPath(CAMERA_STAND_PRIM_PATH)
+    room_references = _prim_references(room)
+    stand_references = _prim_references(stand)
+    if str(ROOM_USD) not in room_references:
+        raise ValueError(f"Room reference missing: {room_references}")
+    if str(CAMERA_STAND_USD) not in stand_references:
+        raise ValueError(f"Camera-stand reference missing: {stand_references}")
+
+    room_light_path = f"{ROOM_PRIM_PATH}/{ROOM_RESIDUAL_LIGHT_REL_PATH}"
+    room_light = stage.GetPrimAtPath(room_light_path)
+    if not room_light or room_light.IsActive():
+        raise ValueError("The room's authored RectLight was not deactivated")
+    active_lights = [
+        str(prim.GetPath())
+        for prim in stage.Traverse()
+        if str(prim.GetTypeName()).endswith("Light")
+    ]
+    if active_lights != [HDR_DOME_PRIM_PATH]:
+        raise ValueError(f"Expected exactly the HDR DomeLight, found {active_lights}")
+
+    dome = stage.GetPrimAtPath(HDR_DOME_PRIM_PATH)
+    texture = dome.GetAttribute("inputs:texture:file").Get()
+    texture_path = texture.path if isinstance(texture, Sdf.AssetPath) else str(texture)
+    if texture_path != str(HDR_TEXTURE):
+        raise ValueError(f"DomeLight texture mismatch: {texture_path}")
+    if not math.isclose(
+        float(dome.GetAttribute("inputs:intensity").Get()), HDR_DOME_INTENSITY
+    ):
+        raise ValueError("DomeLight intensity mismatch")
+    if (
+        bool(dome.GetAttribute("visibleInPrimaryRay").Get())
+        != HDR_DOME_VISIBLE_IN_PRIMARY_RAYS
+    ):
+        raise ValueError("DomeLight primary-ray visibility mismatch")
+
+    stand_bbox = _world_bbox(stage, CAMERA_STAND_PRIM_PATH)
+    _assert_vector_close(
+        stand_bbox["min"],
+        tuple(
+            CAMERA_STAND_POSITION[index] + CAMERA_STAND_SOURCE_BBOX_MIN[index]
+            for index in range(3)
+        ),
+        label="camera stand bbox min",
+        tolerance=2.0e-4,
+    )
+    _assert_vector_close(
+        stand_bbox["max"],
+        tuple(
+            CAMERA_STAND_POSITION[index] + CAMERA_STAND_SOURCE_BBOX_MAX[index]
+            for index in range(3)
+        ),
+        label="camera stand bbox max",
+        tolerance=2.0e-4,
+    )
+    stand_collisions = [
+        str(prim.GetPath())
+        for prim in stage.Traverse()
+        if str(prim.GetPath()).startswith(CAMERA_STAND_PRIM_PATH + "/")
+        and prim.HasAPI(UsdPhysics.CollisionAPI)
+    ]
+    if not stand_collisions:
+        raise ValueError("Composed camera stand has no collision geometry")
+
+    for forbidden_path in (
+        "/World/defaultGroundPlane",
+        "/World/defaultDomeLight",
+        "/World/groundPlane",
+    ):
+        if stage.GetPrimAtPath(forbidden_path):
+            raise ValueError(f"Unexpected default scene primitive: {forbidden_path}")
+
+    return {
+        "world": {
+            "meters_per_unit": float(UsdGeom.GetStageMetersPerUnit(stage)),
+            "up_axis": str(UsdGeom.GetStageUpAxis(stage)),
+            "physics_dt": float(world.get_physics_dt()),
+            "rendering_dt": float(world.get_rendering_dt()),
+        },
+        "table": {
+            "prim_path": TABLE_PRIM_PATH,
+            "bbox": table_bbox,
+            "collision": True,
+            "static": True,
+            "material": _material_report(
+                stage, TABLE_PRIM_PATH, TABLE_VISUAL_MATERIAL_PATH
+            ),
+        },
+        "ground": {
+            "prim_path": GROUND_PRIM_PATH,
+            "bbox": ground_bbox,
+            "collision": True,
+            "static": True,
+            "material": _material_report(
+                stage, GROUND_PRIM_PATH, GROUND_VISUAL_MATERIAL_PATH
+            ),
+        },
+        "room": {
+            "prim_path": ROOM_PRIM_PATH,
+            "reference": str(ROOM_USD),
+            "bbox": _world_bbox(stage, ROOM_PRIM_PATH),
+            "disabled_light": room_light_path,
+        },
+        "camera_stand": {
+            "prim_path": CAMERA_STAND_PRIM_PATH,
+            "reference": str(CAMERA_STAND_USD),
+            "pose": asdict(
+                PoseSpec(CAMERA_STAND_POSITION, CAMERA_STAND_ORIENTATION)
+            ),
+            "bbox": stand_bbox,
+            "collision_prim_count": len(stand_collisions),
+        },
+        "dome_light": {
+            "prim_path": HDR_DOME_PRIM_PATH,
+            "texture": texture_path,
+            "texture_format": str(
+                dome.GetAttribute("inputs:texture:format").Get()
+            ),
+            "intensity": float(dome.GetAttribute("inputs:intensity").Get()),
+            "rotation_degrees": HDR_DOME_ROTATION_DEGREES,
+            "visible_in_primary_ray": bool(
+                dome.GetAttribute("visibleInPrimaryRay").Get()
+            ),
+        },
+        "active_lights": active_lights,
+    }
+
+
+def capture_scene_preview(world: Any, output_path: Path) -> dict[str, Any]:
+    """Render a finite overview and save the active viewport as a PNG."""
+
+    from isaacsim.core.utils.viewports import (  # type: ignore[import-not-found]
+        set_camera_view,
+    )
+    from omni.kit.viewport.utility import (  # type: ignore[import-not-found]
+        capture_viewport_to_file,
+        get_active_viewport,
+    )
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    set_camera_view(SCENE_PREVIEW_EYE, SCENE_PREVIEW_TARGET)
+    for _ in range(8):
+        world.step(render=True)
+    viewport = get_active_viewport()
+    if viewport is None:
+        raise RuntimeError("No active viewport is available for the scene preview")
+    capture = capture_viewport_to_file(viewport, str(output_path), is_hdr=False)
+    completed = False
+    for _ in range(240):
+        world.step(render=True)
+        if getattr(capture, "done", lambda: False)():
+            completed = True
+            break
+    if completed:
+        capture.result()
+    if not output_path.is_file() or output_path.stat().st_size == 0:
+        raise RuntimeError(f"Viewport capture did not produce {output_path}")
+
+    from PIL import Image
+
+    with Image.open(output_path) as image:
+        image_info = {"size": list(image.size), "mode": image.mode}
+    return {
+        "path": str(output_path.resolve()),
+        "bytes": output_path.stat().st_size,
+        **image_info,
+    }
+
+
 def build_argument_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
@@ -585,15 +1050,29 @@ def build_argument_parser() -> argparse.ArgumentParser:
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_argument_parser().parse_args(argv)
-    if args.mode == "audit":
+    if args.mode in {"audit", "scene"}:
         # SimulationApp.close() shuts down the Python process in Isaac Sim 5.1,
         # so all useful output must be emitted and flushed before that call.
         validate_static_assets()
         from isaacsim import SimulationApp  # type: ignore[import-not-found]
 
-        simulation_app = SimulationApp({"headless": args.headless})
-        report = run_asset_audit()
-        print("ASSET_AUDIT_OK")
+        simulation_app = SimulationApp(
+            {"headless": args.headless, "width": 1280, "height": 720}
+        )
+        if args.mode == "audit":
+            report = run_asset_audit()
+            marker = "ASSET_AUDIT_OK"
+        else:
+            world = create_scene()
+            report = validate_scene(world)
+            preview_name = (
+                "scene_headless.png" if args.headless else "scene_headed.png"
+            )
+            report["preview"] = capture_scene_preview(
+                world, args.output_dir / "scene" / preview_name
+            )
+            marker = "SCENE_SMOKE_OK"
+        print(marker)
         print(json.dumps(report, indent=2, sort_keys=True, default=str))
         sys.stdout.flush()
         simulation_app.close()

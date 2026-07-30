@@ -70,6 +70,13 @@ class StaticAssetAndConstantTests(unittest.TestCase):
 
 
 class IsaacUsdAssetIntegrationTest(unittest.TestCase):
+    def test_scene_smoke(self) -> None:
+        world = subject.create_scene()
+        report = subject.validate_scene(world)
+        self.assertEqual(report["active_lights"], [subject.HDR_DOME_PRIM_PATH])
+        self.assertEqual(report["table"]["bbox"]["max"][2], subject.TABLE_TOP_Z)
+        self.assertGreater(report["camera_stand"]["collision_prim_count"], 0)
+
     def test_usd_asset_audit(self) -> None:
         report = subject.run_asset_audit()
         self.assertTrue(report["usd"]["doll_mass_and_friction_override_required"])
