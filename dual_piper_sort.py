@@ -101,7 +101,8 @@ PIPER_GRIPPER_JOINT_NAMES: Final = ("gripper_joint", "joint8")
 PIPER_DOF_NAMES: Final = PIPER_ARM_JOINT_NAMES + PIPER_GRIPPER_JOINT_NAMES
 PIPER_COMMAND_JOINT_NAMES: Final = PIPER_ARM_JOINT_NAMES + ("gripper_joint",)
 PIPER_BASE_LINK: Final = "base_link"
-PIPER_TOOL_LINK: Final = "gripper_center"
+PIPER_URDF_TOOL_LINK: Final = "gripper_center"
+PIPER_TOOL_LINK: Final = "finger_center"
 PIPER_WRIST_LINK: Final = "link6"
 PIPER_CAMERA_MOUNT_REL_PATH: Final = "link6/camera"
 PIPER_TOOL_REL_PATH: Final = "link6/gripper_center"
@@ -170,6 +171,7 @@ SCENE_PREVIEW_TARGET: Final = (0.0, -0.05, 0.75)
 
 MATRYOSHKA_UUID: Final = "a5a44251-6d8c-4cee-a8d7-90c443e47e53"
 MATRYOSHKA_SORT_ORDER: Final = ("00004", "00003", "00002", "00001", "00000")
+MATRYOSHKA_PICK_ORDER: Final = MATRYOSHKA_SORT_ORDER
 MATRYOSHKA_TARGET_GAP: Final = 0.025
 MATRYOSHKA_INITIAL_GAP: Final = 0.04
 MATRYOSHKA_POSITION_TOLERANCE: Final = 0.02
@@ -207,12 +209,18 @@ CUROBO_MAX_PLAN_ATTEMPTS: Final = 5
 CUROBO_POSITION_TOLERANCE_M: Final = 0.008
 CUROBO_ORIENTATION_TOLERANCE_RAD: Final = 0.08
 CUROBO_COLLISION_ACTIVATION_DISTANCE_M: Final = 0.005
+CUROBO_CURRENT_STATE_LIMIT_MARGIN_RAD: Final = 1.0e-5
+CUROBO_MAX_CURRENT_STATE_PROJECTION_RAD: Final = 1.0e-3
 CUROBO_COLLISION_CACHE: Final = {"cuboid": 32, "sphere": 160}
 CUROBO_ATTACHED_OBJECT_LINK: Final = "attached_object"
 CUROBO_ATTACHED_OBJECT_SPHERES: Final = 4
-CUROBO_ATTACHED_OBJECT_INSET_M: Final = 0.007
+CUROBO_ATTACHED_OBJECT_INSET_M: Final = 0.009
 CUROBO_MAX_TRAJECTORY_STEPS: Final = 1_000
-CUROBO_MAX_EXECUTION_ERROR_RAD: Final = 0.08
+CUROBO_FINAL_EXECUTION_TOLERANCE_RAD: Final = 0.01
+CUROBO_MAX_EXECUTION_ERROR_RAD: Final = 0.080
+CUROBO_FINAL_SETTLE_MAX_CONTROL_FRAMES: Final = 30
+CUROBO_GRASP_EXECUTION_TOLERANCE_RAD: Final = 0.003
+CUROBO_GRASP_SETTLE_MAX_CONTROL_FRAMES: Final = 60
 CUROBO_WORKER_RESPONSE_PREFIX: Final = "CUROBO_WORKER_RESPONSE "
 CUROBO_WORKER_TIMEOUT_S: Final = 60.0
 GRASP_JOINT_ROOT: Final = "/World/GraspJoints"
@@ -241,23 +249,95 @@ GRASP_EVENT_NAMES: Final = {
     GRASP_EVENT_ATTACH: "attach_fixed_joint",
     GRASP_EVENT_DETACH: "detach_fixed_joint",
 }
+EPISODE_WORKER_SUCCESS_MARKERS: Final = {
+    "collect-worker": "HDF5_EXPERT_RECORDING_OK",
+    "replay-worker": "HDF5_ACTION_REPLAY_OK",
+}
 
-# In this top-down tool pose, gripper_center +X points down from the wrist to
-# the grasp point.  Tool +Y lies along world +X, making the fingers close
-# across the doll in the table X direction.
+# The URDF's ``gripper_center`` origin is at the distal finger plane.  Both
+# finger meshes extend along its local -X axis, so their longitudinal centre
+# is about 40 mm at local X=-0.040 rather than +0.040.  cuRobo plans the
+# virtual ``finger_center`` frame authored below at exactly that offset.
+# In this nominal top-down orientation, local +X points toward the fingertips
+# and local +Y lies along world +X, the gripper closing direction.
 PIPER_TOP_DOWN_TOOL_WORLD_ORIENTATION: Final = (
     0.5,
     0.5,
     0.5,
     -0.5,
 )
-PIPER_FINGER_CENTER_BELOW_TOOL_M: Final = 0.040
+PIPER_FINGER_CENTER_BELOW_TOOL_M: Final = -0.040
+PIPER_FINGER_CENTER_OFFSET_IN_TOOL_M: Final = (
+    PIPER_FINGER_CENTER_BELOW_TOOL_M,
+    0.0,
+    0.0,
+)
 PIPER_GRASP_TOOL_HEIGHT_ABOVE_TABLE_M: Final = 0.082
+PIPER_GRASP_CENTER_TOLERANCE_M: Final = 0.008
+PIPER_GRASP_MAX_CENTER_TOLERANCE_M: Final = 0.012
+PIPER_GRASP_CENTER_DIAMETER_FRACTION: Final = 0.25
+PIPER_GRASP_CORRECTION_TRIGGER_M: Final = 0.004
+PIPER_NEAR_GRASP_ALIGNMENT_TOLERANCE_M: Final = 0.005
+PIPER_GRASP_MAX_AXIAL_ERROR_M: Final = 0.035
+PIPER_GRASP_MIN_SEPARATION_M: Final = 0.005
+PIPER_GRASP_MIN_DIAMETER_FRACTION: Final = 0.25
+PIPER_GRASP_MIN_DOWNWARD_AXIS_COMPONENT: Final = 0.45
+PIPER_NOMINAL_GRASP_HEIGHT_M: Final = 0.035
+PIPER_LARGE_DOLL_DIAMETER_THRESHOLD_M: Final = 0.070
+PIPER_LARGE_DOLL_GRASP_HEIGHT_M: Final = 0.085
+PIPER_LARGE_DOLL_CENTER_ABOVE_TOP_M: Final = 0.020
+PIPER_LARGE_DOLL_MIN_DOWNWARD_AXIS_COMPONENT: Final = 0.75
+PIPER_REGULAR_DOLL_MAX_CLOSING_AXIS_WORLD_Z: Final = 0.50
+PIPER_LARGE_DOLL_MAX_CLOSING_AXIS_WORLD_Z: Final = 0.10
+PIPER_LARGE_DOLL_GRASP_SEED_CANDIDATES: Final = 32
+PIPER_APPROACH_MAX_DOLL_DISPLACEMENT_M: Final = 0.004
 PIPER_PREGRASP_CLEARANCE_M: Final = 0.110
+PIPER_NEAR_GRASP_CLEARANCE_M: Final = 0.040
+PIPER_FINAL_APPROACH_CLEARANCES_M: Final = (
+    0.030,
+    0.020,
+    0.010,
+    0.0,
+)
+PIPER_LARGE_DOLL_FINAL_APPROACH_CLEARANCES_M: Final = (
+    0.030,
+    0.020,
+    0.015,
+)
+PIPER_GRASP_SEED_CANDIDATES: Final = 6
+PIPER_PREGRASP_CLEARANCE_CANDIDATES_M: Final = (
+    PIPER_PREGRASP_CLEARANCE_M,
+    0.090,
+    0.070,
+    0.055,
+)
 PIPER_LIFT_CLEARANCE_M: Final = 0.130
 PIPER_PREPLACE_CLEARANCE_M: Final = 0.120
+PIPER_LARGE_DOLL_PREPLACE_CLEARANCE_M: Final = 0.050
 PIPER_RETREAT_CLEARANCE_M: Final = 0.130
+PIPER_LARGE_DOLL_RETREAT_CLEARANCE_M: Final = 0.0
+PIPER_RELEASE_AXIS_CLEARANCES_M: Final = (0.020, 0.040, 0.060)
+PIPER_UPRIGHT_YAW_OFFSETS_RAD: Final = (
+    0.0,
+    math.pi / 4.0,
+    -math.pi / 4.0,
+    math.pi / 2.0,
+    -math.pi / 2.0,
+    math.pi,
+)
 PIPER_TRANSPORT_UPRIGHT_TOLERANCE_DEGREES: Final = 9.0
+PIPER_POST_GRASP_UPRIGHT_TOLERANCE_DEGREES: Final = 2.0
+PIPER_PLANNED_UPRIGHT_TOLERANCE_DEGREES: Final = 1.5
+PIPER_CONSTRAINED_PLACE_TOLERANCE_M: Final = 0.004
+# cuRobo must not terminate a collision-avoidance trajectory at exact support
+# contact.  Hold the still-attached doll just above the tabletop, open both
+# fingers, then detach and let full PhysX geometry settle this small gap.
+PIPER_PLANNED_PLACE_SUPPORT_CLEARANCE_M: Final = 0.002
+PIPER_PLACE_APPROACH_CLEARANCES_M: Final = (
+    0.030,
+    0.015,
+    PIPER_PLANNED_PLACE_SUPPORT_CLEARANCE_M,
+)
 
 
 @dataclass(frozen=True)
@@ -354,6 +434,43 @@ def quaternion_multiply(
     )
 
 
+def upright_yaw_quaternion(
+    quaternion: Sequence[float],
+) -> tuple[float, float, float, float]:
+    """Keep an object's world yaw while removing its roll and pitch."""
+
+    w, x, y, z = normalize_quaternion(quaternion)
+    yaw = math.atan2(
+        2.0 * (w * z + x * y),
+        1.0 - 2.0 * (y * y + z * z),
+    )
+    return (
+        math.cos(0.5 * yaw),
+        0.0,
+        0.0,
+        math.sin(0.5 * yaw),
+    )
+
+
+def attached_object_upright_tilt_degrees(
+    tool_world_orientation: Sequence[float],
+    tool_to_object_orientation: Sequence[float],
+) -> float:
+    """Predict a rigidly attached object's world roll/pitch magnitude."""
+
+    object_world_orientation = quaternion_multiply(
+        tool_world_orientation,
+        tool_to_object_orientation,
+    )
+    object_up = _quaternion_rotate_vector(
+        object_world_orientation,
+        (0.0, 0.0, 1.0),
+    )
+    return math.degrees(
+        math.acos(min(1.0, max(-1.0, float(object_up[2]))))
+    )
+
+
 def world_pose_to_robot_base(spec: RobotSpec, pose: PoseSpec) -> PoseSpec:
     """Express a world pose in one Piper base frame."""
 
@@ -405,6 +522,205 @@ def pose_relative_to(parent: PoseSpec, child: PoseSpec) -> PoseSpec:
     return PoseSpec(
         _quaternion_rotate_vector(inverse_parent_orientation, offset),
         quaternion_multiply(inverse_parent_orientation, child.quaternion),
+    )
+
+
+def tool_pose_for_attached_object_pose(
+    tool_pose: PoseSpec,
+    object_pose: PoseSpec,
+    desired_object_pose: PoseSpec,
+) -> PoseSpec:
+    """Solve a tool pose from a measured rigid tool-to-object transform."""
+
+    tool_to_object = pose_relative_to(tool_pose, object_pose)
+    desired_tool_orientation = quaternion_multiply(
+        desired_object_pose.quaternion,
+        quaternion_conjugate(tool_to_object.quaternion),
+    )
+    desired_world_offset = _quaternion_rotate_vector(
+        desired_tool_orientation,
+        tool_to_object.position,
+    )
+    return PoseSpec(
+        tuple(
+            desired_object_pose.position[index] - desired_world_offset[index]
+            for index in range(3)
+        ),  # type: ignore[arg-type]
+        desired_tool_orientation,
+    )
+
+
+def tool_pose_for_attached_object_orientation(
+    tool_pose: PoseSpec,
+    object_pose: PoseSpec,
+    desired_object_orientation: Sequence[float],
+) -> PoseSpec:
+    """Rotate a grasped object about its centre to a requested orientation."""
+
+    return tool_pose_for_attached_object_pose(
+        tool_pose,
+        object_pose,
+        PoseSpec(
+            object_pose.position,
+            normalize_quaternion(desired_object_orientation),
+        ),
+    )
+
+
+def piper_finger_center_pose(tool_pose: PoseSpec) -> PoseSpec:
+    """Transform the authored distal tool pose to the physical finger centre."""
+
+    offset = _quaternion_rotate_vector(
+        tool_pose.quaternion,
+        PIPER_FINGER_CENTER_OFFSET_IN_TOOL_M,
+    )
+    return PoseSpec(
+        tuple(
+            tool_pose.position[index] + offset[index] for index in range(3)
+        ),  # type: ignore[arg-type]
+        tool_pose.quaternion,
+    )
+
+
+def piper_axis_approach_pose(
+    grasp_pose: PoseSpec,
+    clearance_m: float,
+) -> PoseSpec:
+    """Back the physical finger centre away along the grasp tool axis."""
+
+    if clearance_m < 0.0:
+        raise ValueError("Grasp approach clearance cannot be negative")
+    approach_axis = _quaternion_rotate_vector(
+        grasp_pose.quaternion,
+        (1.0, 0.0, 0.0),
+    )
+    return PoseSpec(
+        tuple(
+            grasp_pose.position[index]
+            - clearance_m * approach_axis[index]
+            for index in range(3)
+        ),  # type: ignore[arg-type]
+        grasp_pose.quaternion,
+    )
+
+
+def piper_horizontal_closing_orientation_candidates(
+    quaternion: Sequence[float],
+) -> tuple[
+    tuple[tuple[float, float, float, float], float],
+    ...,
+]:
+    """Roll a tool pose so its local closing axis is horizontal.
+
+    Local +X is the longitudinal finger/approach axis and local +Y is the
+    symmetric closing direction.  Rolling about +X preserves the already
+    selected approach direction while giving the wrist two equivalent
+    horizontal-closing configurations separated by pi radians.
+    """
+
+    normalized = normalize_quaternion(quaternion)
+    local_y_world = _quaternion_rotate_vector(
+        normalized,
+        (0.0, 1.0, 0.0),
+    )
+    local_z_world = _quaternion_rotate_vector(
+        normalized,
+        (0.0, 0.0, 1.0),
+    )
+    roll = math.atan2(
+        -local_y_world[2],
+        local_z_world[2],
+    )
+    if math.hypot(local_y_world[2], local_z_world[2]) <= 1.0e-12:
+        return ((normalized, 0.0),)
+    alternate_roll = roll - math.copysign(math.pi, roll or 1.0)
+    candidates = tuple(
+        (
+            quaternion_multiply(
+                normalized,
+                (
+                    math.cos(0.5 * candidate_roll),
+                    math.sin(0.5 * candidate_roll),
+                    0.0,
+                    0.0,
+                ),
+            ),
+            candidate_roll,
+        )
+        for candidate_roll in (roll, alternate_roll)
+    )
+    return tuple(sorted(candidates, key=lambda candidate: abs(candidate[1])))
+
+
+def piper_grasp_contact_height(doll_spec: DollSpec) -> float:
+    """Choose a finger centre height that clears each doll's widest section."""
+
+    nominal_height = min(
+        PIPER_NOMINAL_GRASP_HEIGHT_M,
+        0.35 * doll_spec.height,
+    )
+    diameter = 2.0 * doll_spec.footprint_radius
+    if diameter < PIPER_LARGE_DOLL_DIAMETER_THRESHOLD_M:
+        return nominal_height
+    return min(
+        PIPER_LARGE_DOLL_GRASP_HEIGHT_M,
+        0.5 * doll_spec.height + PIPER_LARGE_DOLL_CENTER_ABOVE_TOP_M,
+    )
+
+
+def piper_grasp_search_parameters(doll_spec: DollSpec) -> tuple[float, int]:
+    """Return the safe downward-axis threshold and IK search budget."""
+
+    diameter = 2.0 * doll_spec.footprint_radius
+    if diameter < PIPER_LARGE_DOLL_DIAMETER_THRESHOLD_M:
+        return (
+            PIPER_GRASP_MIN_DOWNWARD_AXIS_COMPONENT,
+            PIPER_GRASP_SEED_CANDIDATES,
+        )
+    return (
+        PIPER_LARGE_DOLL_MIN_DOWNWARD_AXIS_COMPONENT,
+        PIPER_LARGE_DOLL_GRASP_SEED_CANDIDATES,
+    )
+
+
+def piper_final_approach_clearances(doll_spec: DollSpec) -> tuple[float, ...]:
+    """Stop a large doll's long fingertips before they enter its wide waist."""
+
+    diameter = 2.0 * doll_spec.footprint_radius
+    if diameter < PIPER_LARGE_DOLL_DIAMETER_THRESHOLD_M:
+        return PIPER_FINAL_APPROACH_CLEARANCES_M
+    return PIPER_LARGE_DOLL_FINAL_APPROACH_CLEARANCES_M
+
+
+def piper_preplace_clearance(doll_spec: DollSpec) -> float:
+    """Keep a top-grasped large doll within Piper's transport workspace."""
+
+    diameter = 2.0 * doll_spec.footprint_radius
+    if diameter < PIPER_LARGE_DOLL_DIAMETER_THRESHOLD_M:
+        return PIPER_PREPLACE_CLEARANCE_M
+    return PIPER_LARGE_DOLL_PREPLACE_CLEARANCE_M
+
+
+def piper_post_axis_retreat_clearance(doll_spec: DollSpec) -> float:
+    """Avoid an unreachable extra lift after a top-grasped large-doll retreat."""
+
+    diameter = 2.0 * doll_spec.footprint_radius
+    if diameter < PIPER_LARGE_DOLL_DIAMETER_THRESHOLD_M:
+        return PIPER_RETREAT_CLEARANCE_M
+    return PIPER_LARGE_DOLL_RETREAT_CLEARANCE_M
+
+
+def piper_planned_place_center(
+    target_center: Sequence[float],
+) -> tuple[float, float, float]:
+    """Return the collision-free centre used before physical support settling."""
+
+    if len(target_center) != 3:
+        raise ValueError("A placement centre must contain three coordinates")
+    return (
+        float(target_center[0]),
+        float(target_center[1]),
+        float(target_center[2]) + PIPER_PLANNED_PLACE_SUPPORT_CLEARANCE_M,
     )
 
 
@@ -1615,6 +1931,19 @@ def build_curobo_robot_config() -> dict[str, Any]:
                     CUROBO_ATTACHED_OBJECT_LINK: CUROBO_ATTACHED_OBJECT_SPHERES,
                 },
                 "extra_links": {
+                    PIPER_TOOL_LINK: {
+                        "link_name": PIPER_TOOL_LINK,
+                        "parent_link_name": PIPER_URDF_TOOL_LINK,
+                        "joint_name": "finger_center_fixed",
+                        "joint_type": "FIXED",
+                        "fixed_transform": [
+                            *PIPER_FINGER_CENTER_OFFSET_IN_TOOL_M,
+                            1.0,
+                            0.0,
+                            0.0,
+                            0.0,
+                        ],
+                    },
                     CUROBO_ATTACHED_OBJECT_LINK: {
                         "link_name": CUROBO_ATTACHED_OBJECT_LINK,
                         "parent_link_name": PIPER_TOOL_LINK,
@@ -1872,9 +2201,22 @@ def run_curobo_planner_worker(seed: int) -> int:
                         preferred_world_orientation=request.get(
                             "preferred_world_orientation"
                         ),
+                        tool_to_attached_object_orientation=request.get(
+                            "tool_to_attached_object_orientation"
+                        ),
+                        max_attached_object_tilt_degrees=request.get(
+                            "max_attached_object_tilt_degrees"
+                        ),
                     )
                 elif command == "plan_pose":
                     report = plan_curobo_pose(
+                        planner,
+                        active_robot,
+                        request["current_joint_position"],
+                        _pose_spec_from_mapping(request["world_goal"]),
+                    )
+                elif command == "check_pose":
+                    report = check_curobo_pose_ik(
                         planner,
                         active_robot,
                         request["current_joint_position"],
@@ -2007,6 +2349,10 @@ class CuroboPlannerWorker:
         excluded_doll_ids: Sequence[str] = (),
         prefer_tool_x_down: bool = True,
         preferred_world_orientation: Sequence[float] | None = None,
+        tool_to_attached_object_orientation: (
+            Sequence[float] | None
+        ) = None,
+        max_attached_object_tilt_degrees: float | None = None,
     ) -> dict[str, Any]:
         response = self.request(
             {
@@ -2035,6 +2381,19 @@ class CuroboPlannerWorker:
                         float(value)
                         for value in preferred_world_orientation
                     ]
+                ),
+                "tool_to_attached_object_orientation": (
+                    None
+                    if tool_to_attached_object_orientation is None
+                    else [
+                        float(value)
+                        for value in tool_to_attached_object_orientation
+                    ]
+                ),
+                "max_attached_object_tilt_degrees": (
+                    None
+                    if max_attached_object_tilt_degrees is None
+                    else float(max_attached_object_tilt_degrees)
                 ),
             }
         )
@@ -2088,6 +2447,38 @@ class CuroboPlannerWorker:
         response = self.request(
             {
                 "command": "plan_pose",
+                "active_robot": active_robot.name,
+                "other_robot": other_robot.name,
+                "current_joint_position": [
+                    float(value) for value in current_joint_position
+                ],
+                "other_joint_position": [
+                    float(value) for value in other_joint_position
+                ],
+                "world_goal": asdict(world_goal),
+                "doll_poses": {
+                    asset_id: asdict(pose)
+                    for asset_id, pose in (doll_poses or {}).items()
+                },
+                "excluded_doll_ids": list(excluded_doll_ids),
+            }
+        )
+        return response["report"]
+
+    def check_pose(
+        self,
+        *,
+        active_robot: RobotSpec,
+        other_robot: RobotSpec,
+        current_joint_position: Sequence[float],
+        other_joint_position: Sequence[float],
+        world_goal: PoseSpec,
+        doll_poses: dict[str, PoseSpec] | None = None,
+        excluded_doll_ids: Sequence[str] = (),
+    ) -> dict[str, Any]:
+        response = self.request(
+            {
+                "command": "check_pose",
                 "active_robot": active_robot.name,
                 "other_robot": other_robot.name,
                 "current_joint_position": [
@@ -2377,13 +2768,11 @@ def plan_curobo_pose(
     from curobo.types import GoalToolPose, JointState, Pose
 
     base_goal = world_pose_to_robot_base(robot, world_goal)
-    current_state = JointState.from_position(
-        torch.as_tensor(
-            [list(float(value) for value in current_joint_position)],
-            device=CUROBO_DEVICE,
-            dtype=torch.float32,
-        ),
-        joint_names=list(PIPER_ARM_JOINT_NAMES),
+    current_state, current_state_projection = (
+        _curobo_planning_current_state(
+            planner,
+            current_joint_position,
+        )
     )
     goal_pose = Pose(
         position=torch.as_tensor(
@@ -2426,7 +2815,75 @@ def plan_curobo_pose(
         "solve_time_s": float(result.solve_time),
         "world_goal": asdict(world_goal),
         "base_goal": asdict(base_goal),
+        "current_state_projection_max_rad": current_state_projection,
         "success": True,
+    }
+
+
+def check_curobo_pose_ik(
+    planner: Any,
+    robot: RobotSpec,
+    current_joint_position: Sequence[float],
+    world_goal: PoseSpec,
+) -> dict[str, Any]:
+    """Check exact pose IK/collision feasibility without planning a path."""
+
+    import torch
+    from curobo.types import GoalToolPose, JointState, Pose
+
+    base_goal = world_pose_to_robot_base(robot, world_goal)
+    current_state, current_state_projection = (
+        _curobo_planning_current_state(
+            planner,
+            current_joint_position,
+        )
+    )
+    goal_pose = Pose(
+        position=torch.as_tensor(
+            [base_goal.position],
+            device=CUROBO_DEVICE,
+            dtype=torch.float32,
+        ),
+        quaternion=torch.as_tensor(
+            [base_goal.quaternion],
+            device=CUROBO_DEVICE,
+            dtype=torch.float32,
+        ),
+    )
+    goal = GoalToolPose.from_poses(
+        {PIPER_TOOL_LINK: goal_pose},
+        ordered_tool_frames=[PIPER_TOOL_LINK],
+    )
+    result = planner.ik_solver.solve_pose(
+        goal,
+        return_seeds=CUROBO_NUM_IK_SEEDS,
+        current_state=current_state,
+    )
+    success_count = int(result.success.sum().item())
+    if success_count:
+        joint_position = (
+            result.solution[result.success][0]
+            .detach()
+            .cpu()
+            .reshape(1, -1)
+            .numpy()
+        )
+    else:
+        joint_position = (
+            torch.empty(
+                (0, len(PIPER_ARM_JOINT_NAMES)),
+                dtype=torch.float32,
+            )
+            .numpy()
+        )
+    return {
+        "joint_position": joint_position,
+        "joint_names": list(PIPER_ARM_JOINT_NAMES),
+        "world_goal": asdict(world_goal),
+        "base_goal": asdict(base_goal),
+        "ik_success_count": success_count,
+        "current_state_projection_max_rad": current_state_projection,
+        "success": success_count > 0,
     }
 
 
@@ -2445,6 +2902,113 @@ def _extract_curobo_arm_positions(trajectory: Any) -> Any:
     return trajectory_positions[:, arm_indices]
 
 
+def _curobo_planning_current_state(
+    planner: Any,
+    current_joint_position: Sequence[float],
+) -> tuple[Any, float]:
+    """Project float-noisy simulator feedback just inside cuRobo joint limits."""
+
+    import torch
+    from curobo.types import JointState
+
+    raw_position = torch.as_tensor(
+        [list(float(value) for value in current_joint_position)],
+        device=CUROBO_DEVICE,
+        dtype=torch.float32,
+    )
+    rollout = planner.trajopt_solver.core.auxiliary_rollout
+    lower = rollout.action_bound_lows.reshape(1, -1)
+    upper = rollout.action_bound_highs.reshape(1, -1)
+    projected_position = torch.maximum(
+        raw_position,
+        lower + CUROBO_CURRENT_STATE_LIMIT_MARGIN_RAD,
+    )
+    projected_position = torch.minimum(
+        projected_position,
+        upper - CUROBO_CURRENT_STATE_LIMIT_MARGIN_RAD,
+    )
+    maximum_projection = float(
+        torch.max(torch.abs(projected_position - raw_position)).item()
+    )
+    if maximum_projection > CUROBO_MAX_CURRENT_STATE_PROJECTION_RAD:
+        raise RuntimeError(
+            "Simulator joint feedback lies materially outside cuRobo limits: "
+            f"projection={maximum_projection:.9f} rad"
+        )
+    return (
+        JointState.from_position(
+            projected_position,
+            joint_names=list(PIPER_ARM_JOINT_NAMES),
+        ),
+        maximum_projection,
+    )
+
+
+def _curobo_cspace_failure_diagnostics(
+    planner: Any,
+    current_position: Any,
+    goal_position: Any,
+) -> dict[str, Any]:
+    """Explain whether a failed c-space request starts or ends in collision."""
+
+    import torch
+
+    if planner.graph_planner is None:
+        return {"graph_planner_available": False}
+    fractions = torch.linspace(
+        0.0,
+        1.0,
+        21,
+        device=current_position.device,
+        dtype=current_position.dtype,
+    )
+    samples = (
+        current_position
+        + fractions[:, None] * (goal_position - current_position)
+    )
+    feasible = (
+        planner.graph_planner.check_samples_feasibility(samples)
+        .detach()
+        .cpu()
+        .reshape(-1)
+    )
+    rollout_metrics = (
+        planner.graph_planner.feasibility_rollout.compute_metrics_from_action(
+            samples.unsqueeze(1)
+        )
+    )
+    constraints = rollout_metrics.costs_and_constraints.constraints
+    constraint_maxima: dict[str, list[float]] = {}
+    for name, values in zip(constraints.names, constraints.values):
+        per_sample = (
+            values.detach().cpu().reshape(samples.shape[0], -1).amax(dim=-1)
+        )
+        constraint_maxima[name] = [
+            float(per_sample[0].item()),
+            float(per_sample[-1].item()),
+            float(per_sample.max().item()),
+        ]
+    invalid_indices = [
+        index for index, value in enumerate(feasible.tolist()) if not value
+    ]
+    return {
+        "graph_planner_available": True,
+        "current_state_feasible": bool(feasible[0].item()),
+        "goal_state_feasible": bool(feasible[-1].item()),
+        "linear_feasible_samples": int(feasible.sum().item()),
+        "linear_sample_count": int(feasible.numel()),
+        "first_infeasible_fraction": (
+            None
+            if not invalid_indices
+            else float(fractions[invalid_indices[0]].item())
+        ),
+        "maximum_absolute_joint_delta_rad": float(
+            torch.max(torch.abs(goal_position - current_position)).item()
+        ),
+        "constraint_maxima_current_goal_path": constraint_maxima,
+    }
+
+
 def plan_curobo_to_position(
     planner: Any,
     robot: RobotSpec,
@@ -2453,6 +3017,8 @@ def plan_curobo_to_position(
     *,
     prefer_tool_x_down: bool = True,
     preferred_world_orientation: Sequence[float] | None = None,
+    tool_to_attached_object_orientation: Sequence[float] | None = None,
+    max_attached_object_tilt_degrees: float | None = None,
 ) -> dict[str, Any]:
     """Use cuRobo position IK plus collision-checked c-space planning.
 
@@ -2467,13 +3033,11 @@ def plan_curobo_to_position(
     from curobo.types import GoalToolPose, JointState, Pose, ToolPoseCriteria
 
     joint_names = list(PIPER_ARM_JOINT_NAMES)
-    current_state = JointState.from_position(
-        torch.as_tensor(
-            [list(float(value) for value in current_joint_position)],
-            device=CUROBO_DEVICE,
-            dtype=torch.float32,
-        ),
-        joint_names=joint_names,
+    current_state, current_state_projection = (
+        _curobo_planning_current_state(
+            planner,
+            current_joint_position,
+        )
     )
     base_goal = world_pose_to_robot_base(
         robot,
@@ -2533,6 +3097,34 @@ def plan_curobo_to_position(
         solutions - current_state.position,
         dim=-1,
     )
+    if (
+        max_attached_object_tilt_degrees is not None
+        and tool_to_attached_object_orientation is None
+    ):
+        raise ValueError(
+            "An attached-object tilt limit requires its tool-relative "
+            "orientation"
+        )
+    attached_object_tilt = None
+    if tool_to_attached_object_orientation is not None:
+        attached_object_tilt = torch.as_tensor(
+            [
+                math.radians(
+                    attached_object_upright_tilt_degrees(
+                        quaternion_multiply(
+                            robot.base_pose.quaternion,
+                            candidate_base_orientation,
+                        ),
+                        tool_to_attached_object_orientation,
+                    )
+                )
+                for candidate_base_orientation in (
+                    tool_quaternions.detach().cpu().tolist()
+                )
+            ],
+            device=CUROBO_DEVICE,
+            dtype=torch.float32,
+        )
     orientation_error = None
     if preferred_world_orientation is not None:
         preferred_base_orientation = world_pose_to_robot_base(
@@ -2557,8 +3149,42 @@ def plan_curobo_to_position(
     else:
         candidate_score = 0.02 * joint_distance
 
+    if attached_object_tilt is not None:
+        candidate_score = (
+            attached_object_tilt
+            + (
+                0.01 * orientation_error
+                if orientation_error is not None
+                else 0.0
+            )
+            + 0.02 * joint_distance
+        )
+
     failures: list[dict[str, Any]] = []
+    planned_candidate_failures = 0
     for candidate_index in torch.argsort(candidate_score).tolist():
+        candidate_attached_object_tilt_degrees = (
+            None
+            if attached_object_tilt is None
+            else math.degrees(
+                float(attached_object_tilt[candidate_index].item())
+            )
+        )
+        if (
+            max_attached_object_tilt_degrees is not None
+            and candidate_attached_object_tilt_degrees is not None
+            and candidate_attached_object_tilt_degrees
+            > max_attached_object_tilt_degrees
+        ):
+            failures.append(
+                {
+                    "candidate_index": candidate_index,
+                    "attached_object_tilt_degrees": (
+                        candidate_attached_object_tilt_degrees
+                    ),
+                }
+            )
+            continue
         candidate = solutions[candidate_index : candidate_index + 1]
         candidate_state = JointState.from_position(
             candidate,
@@ -2571,14 +3197,22 @@ def plan_curobo_to_position(
             enable_graph_attempt=1,
         )
         if result is None or not bool(result.success.any().item()):
-            failures.append(
-                {
-                    "candidate_index": candidate_index,
-                    "tool_x_world_z": float(
-                        tool_x_world_z[candidate_index].item()
-                    ),
-                }
-            )
+            failure = {
+                "candidate_index": candidate_index,
+                "tool_x_world_z": float(
+                    tool_x_world_z[candidate_index].item()
+                ),
+            }
+            if planned_candidate_failures == 0:
+                failure["cspace_diagnostics"] = (
+                    _curobo_cspace_failure_diagnostics(
+                        planner,
+                        current_state.position,
+                        candidate,
+                    )
+                )
+            failures.append(failure)
+            planned_candidate_failures += 1
             continue
         trajectory = result.get_interpolated_plan()
         positions = _extract_curobo_arm_positions(trajectory)
@@ -2627,11 +3261,15 @@ def plan_curobo_to_position(
                 if orientation_error is None
                 else float(orientation_error[candidate_index].item())
             ),
+            "attached_object_tilt_degrees": (
+                candidate_attached_object_tilt_degrees
+            ),
             "world_goal_position": [
                 float(value) for value in world_goal_position
             ],
             "selected_world_tool_pose": asdict(selected_world_pose),
             "failed_candidates": failures,
+            "current_state_projection_max_rad": current_state_projection,
             "success": True,
         }
     raise RuntimeError(
@@ -2653,13 +3291,11 @@ def plan_curobo_joint_goal(
     from curobo.types import JointState
 
     joint_names = list(PIPER_ARM_JOINT_NAMES)
-    current_state = JointState.from_position(
-        torch.as_tensor(
-            [list(float(value) for value in current_joint_position)],
-            device=CUROBO_DEVICE,
-            dtype=torch.float32,
-        ),
-        joint_names=joint_names,
+    current_state, current_state_projection = (
+        _curobo_planning_current_state(
+            planner,
+            current_joint_position,
+        )
     )
     goal_state = JointState.from_position(
         torch.as_tensor(
@@ -2696,6 +3332,7 @@ def plan_curobo_joint_goal(
         "goal_joint_position": [
             float(value) for value in goal_joint_position
         ],
+        "current_state_projection_max_rad": current_state_projection,
         "success": True,
     }
 
@@ -3815,6 +4452,10 @@ def execute_curobo_trajectory(
     render: bool = False,
     frame_callback: Any | None = None,
     episode_recorder: Any | None = None,
+    final_tolerance_rad: float = CUROBO_FINAL_EXECUTION_TOLERANCE_RAD,
+    final_settle_max_control_frames: int = (
+        CUROBO_FINAL_SETTLE_MAX_CONTROL_FRAMES
+    ),
 ) -> dict[str, Any]:
     """Execute cuRobo's 30 Hz arm positions through the articulation drive."""
 
@@ -3830,6 +4471,10 @@ def execute_curobo_trajectory(
         raise ValueError(
             f"Expected [T,6] cuRobo trajectory, found {positions.shape}"
         )
+    if final_tolerance_rad <= 0.0:
+        raise ValueError("Final joint tolerance must be positive")
+    if final_settle_max_control_frames < 0:
+        raise ValueError("Final settle control-frame limit cannot be negative")
     physics_steps_per_control = (
         PHYSICS_FREQUENCY_HZ // CONTROL_FREQUENCY_HZ
     )
@@ -3852,18 +4497,49 @@ def execute_curobo_trajectory(
     final_actual = np.asarray(robot.get_joint_positions()[:6], dtype=np.float64)
     final_command = positions[-1]
     final_error = float(np.max(np.abs(final_actual - final_command)))
+    terminal_settle_frames = 0
+    while (
+        final_error > final_tolerance_rad
+        and terminal_settle_frames
+        < final_settle_max_control_frames
+    ):
+        if episode_recorder is not None:
+            episode_recorder.set_arm_action(robot, final_command)
+        _command_position(robot, final_command, range(6))
+        _advance_control_frame(
+            world,
+            render=render,
+            episode_recorder=episode_recorder,
+        )
+        terminal_settle_frames += 1
+        final_actual = np.asarray(
+            robot.get_joint_positions()[:6],
+            dtype=np.float64,
+        )
+        final_error = float(np.max(np.abs(final_actual - final_command)))
+        maximum_tracking_error = max(maximum_tracking_error, final_error)
     if final_error > CUROBO_MAX_EXECUTION_ERROR_RAD:
         raise RuntimeError(
             f"cuRobo trajectory execution ended with {final_error:.6f} rad "
-            f"error, over {CUROBO_MAX_EXECUTION_ERROR_RAD:.6f}"
+            f"error after {terminal_settle_frames} terminal settle frames, "
+            f"over {CUROBO_MAX_EXECUTION_ERROR_RAD:.6f}"
         )
     return {
-        "control_frames": int(positions.shape[0]),
+        "control_frames": int(
+            positions.shape[0] + terminal_settle_frames
+        ),
+        "trajectory_control_frames": int(positions.shape[0]),
+        "terminal_settle_control_frames": terminal_settle_frames,
         "physics_steps": int(
-            positions.shape[0] * physics_steps_per_control
+            (positions.shape[0] + terminal_settle_frames)
+            * physics_steps_per_control
         ),
         "maximum_tracking_error_rad": maximum_tracking_error,
         "final_tracking_error_rad": final_error,
+        "requested_final_tolerance_rad": final_tolerance_rad,
+        "terminal_settle_limit_control_frames": (
+            final_settle_max_control_frames
+        ),
         "final_actual_joint_position": final_actual.tolist(),
         "final_command_joint_position": final_command.tolist(),
     }
@@ -3897,6 +4573,19 @@ def _xform_world_pose(prim_path: str, name: str) -> tuple[list[float], list[floa
     )
     position, quaternion = xform.get_world_pose()
     return position.tolist(), quaternion.tolist()
+
+
+def _piper_finger_center_world_pose(
+    robot: RobotSpec,
+    label: str,
+) -> PoseSpec:
+    tool_position, tool_quaternion = _xform_world_pose(
+        f"{robot.prim_path}/{PIPER_TOOL_REL_PATH}",
+        f"{robot.name}_{label}_distal_tool",
+    )
+    return piper_finger_center_pose(
+        PoseSpec(tuple(tool_position), tuple(tool_quaternion))
+    )
 
 
 def _simulation_grasp_joint_path(
@@ -4017,10 +4706,12 @@ def run_curobo_motion_smoke(
             reach_plan,
             render=render,
         )
-        reached_position, reached_quaternion = _xform_world_pose(
-            f"{active_spec.prim_path}/{PIPER_TOOL_REL_PATH}",
-            "left_curobo_reached_tool",
+        reached_pose = _piper_finger_center_world_pose(
+            active_spec,
+            "curobo_reached",
         )
+        reached_position = reached_pose.position
+        reached_quaternion = reached_pose.quaternion
         position_error = float(
             np.linalg.norm(
                 np.asarray(reached_position, dtype=np.float64)
@@ -4078,6 +4769,72 @@ def _current_doll_poses(dolls: dict[str, Any]) -> dict[str, PoseSpec]:
     }
 
 
+def validate_grasp_before_attach(
+    doll_spec: DollSpec,
+    *,
+    center_error_m: float,
+    axial_center_error_m: float = 0.0,
+    finger_separation_m: float,
+) -> dict[str, float]:
+    """Reject attachment unless a doll lies between and along the fingers."""
+
+    if not math.isfinite(center_error_m) or not math.isfinite(
+        axial_center_error_m
+    ) or not math.isfinite(
+        finger_separation_m
+    ):
+        raise RuntimeError(
+            f"{doll_spec.asset_id}: non-finite physical grasp measurement"
+        )
+    center_tolerance = min(
+        PIPER_GRASP_MAX_CENTER_TOLERANCE_M,
+        max(
+            PIPER_GRASP_CENTER_TOLERANCE_M,
+            2.0
+            * doll_spec.footprint_radius
+            * PIPER_GRASP_CENTER_DIAMETER_FRACTION,
+        ),
+    )
+    if center_error_m > center_tolerance:
+        raise RuntimeError(
+            f"{doll_spec.asset_id}: physical finger centre missed the doll "
+            f"contact point by {center_error_m:.6f} m; "
+            f"allowed={center_tolerance:.6f} m, "
+            f"finger_separation={finger_separation_m:.6f} m"
+        )
+    if axial_center_error_m > PIPER_GRASP_MAX_AXIAL_ERROR_M:
+        raise RuntimeError(
+            f"{doll_spec.asset_id}: doll lies outside the effective finger "
+            f"length; axial_error={axial_center_error_m:.6f} m, "
+            f"allowed={PIPER_GRASP_MAX_AXIAL_ERROR_M:.6f} m"
+        )
+    minimum_captured_separation = max(
+        PIPER_GRASP_MIN_SEPARATION_M,
+        2.0
+        * doll_spec.footprint_radius
+        * PIPER_GRASP_MIN_DIAMETER_FRACTION,
+    )
+    if finger_separation_m < minimum_captured_separation:
+        raise RuntimeError(
+            f"{doll_spec.asset_id}: gripper closed through the grasp without "
+            "trapping the doll; "
+            f"separation={finger_separation_m:.6f} m, "
+            f"required>={minimum_captured_separation:.6f} m"
+        )
+    maximum_closed_separation = PIPER_OPEN_FINGER_SEPARATION_M - 0.005
+    if finger_separation_m >= maximum_closed_separation:
+        raise RuntimeError(
+            f"{doll_spec.asset_id}: gripper remained open at the doll; "
+            f"separation={finger_separation_m:.6f} m"
+        )
+    return {
+        "center_tolerance_m": center_tolerance,
+        "maximum_axial_center_error_m": PIPER_GRASP_MAX_AXIAL_ERROR_M,
+        "minimum_captured_separation_m": minimum_captured_separation,
+        "maximum_closed_separation_m": maximum_closed_separation,
+    }
+
+
 def run_curobo_pick_place_smoke(
     world: Any,
     robots: dict[str, Any],
@@ -4102,12 +4859,14 @@ def run_curobo_pick_place_smoke(
     doll = dolls[asset_id]
     specs_by_id = {spec.asset_id: spec for spec in get_doll_specs()}
     doll_spec = specs_by_id[asset_id]
-    grasp_contact_height = min(0.035, 0.35 * doll_spec.height)
+    grasp_contact_height = piper_grasp_contact_height(doll_spec)
+    preplace_clearance = piper_preplace_clearance(doll_spec)
     target_by_id = {
         placement.asset_id: placement
         for placement in compute_doll_target_layout()
     }
     target_center = target_by_id[asset_id].pose.position
+    planned_place_center = piper_planned_place_center(target_center)
     initial_robots = validate_robots_at_home(
         robots,
         label="pick_place_initial",
@@ -4121,12 +4880,19 @@ def run_curobo_pick_place_smoke(
     attachment: dict[str, Any] | None = None
 
     with CuroboPlannerWorker(planner_seed) as worker:
+        initial_contact_offset = _quaternion_rotate_vector(
+            initial_doll_pose.quaternion,
+            (0.0, 0.0, grasp_contact_height),
+        )
+        initial_contact_point = tuple(
+            initial_doll_pose.position[index]
+            + initial_contact_offset[index]
+            for index in range(3)
+        )
         target_orientation_probe_goal = (
             target_center[0],
             target_center[1],
-            target_center[2]
-            + PIPER_PREPLACE_CLEARANCE_M
-            + PIPER_FINGER_CENTER_BELOW_TOOL_M,
+            target_center[2] + preplace_clearance,
         )
         plans["target_orientation_probe"] = worker.plan_position(
             active_robot=active_spec,
@@ -4140,19 +4906,392 @@ def run_curobo_pick_place_smoke(
             plans["target_orientation_probe"]["selected_world_tool_pose"]
         ).quaternion
 
-        pregrasp_goal = (
-            initial_doll_pose.position[0],
-            initial_doll_pose.position[1],
-            initial_doll_pose.position[2] + PIPER_PREGRASP_CLEARANCE_M,
+        # Solve the physical grasp configuration first, then approach along
+        # that pose's local finger axis.  A world-Z descent can sweep a finger
+        # sideways through the lightweight doll when the selected wrist pose
+        # is oblique.
+        grasp_candidates: list[tuple[dict[str, Any], PoseSpec]] = []
+        grasp_search_failures: list[str] = []
+        selected_grasp_seed: dict[str, Any] | None = None
+        selected_pregrasp_plan: dict[str, Any] | None = None
+        grasp_pose: PoseSpec | None = None
+        selected_pregrasp_clearance: float | None = None
+        (
+            minimum_downward_axis_component,
+            grasp_seed_candidate_count,
+        ) = piper_grasp_search_parameters(doll_spec)
+        large_doll_grasp_search = (
+            grasp_seed_candidate_count
+            > PIPER_GRASP_SEED_CANDIDATES
         )
-        plans["pregrasp"] = worker.plan_position(
-            active_robot=active_spec,
-            other_robot=other_spec,
-            current_joint_position=active_robot.get_joint_positions()[:6],
-            other_joint_position=other_robot.get_joint_positions()[:6],
-            world_goal_position=pregrasp_goal,
-            doll_poses=_current_doll_poses(dolls),
-            preferred_world_orientation=target_orientation,
+        for candidate_index in range(grasp_seed_candidate_count):
+            try:
+                candidate_seed = worker.plan_position(
+                    active_robot=active_spec,
+                    other_robot=other_spec,
+                    current_joint_position=active_robot.get_joint_positions()[
+                        :6
+                    ],
+                    other_joint_position=other_robot.get_joint_positions()[:6],
+                    world_goal_position=initial_contact_point,
+                    doll_poses=_current_doll_poses(dolls),
+                    excluded_doll_ids=(asset_id,),
+                    preferred_world_orientation=target_orientation,
+                )
+            except RuntimeError as seed_error:
+                grasp_search_failures.append(
+                    f"seed {candidate_index}: {seed_error}"
+                )
+                continue
+            candidate_pose = _pose_spec_from_mapping(
+                candidate_seed["selected_world_tool_pose"]
+            )
+            candidate_closing_axis_world_z = _quaternion_rotate_vector(
+                candidate_pose.quaternion,
+                (0.0, 1.0, 0.0),
+            )[2]
+            candidate_seed["tool_y_world_z"] = (
+                candidate_closing_axis_world_z
+            )
+            if (
+                -float(candidate_seed["tool_x_world_z"])
+                < minimum_downward_axis_component
+            ):
+                grasp_search_failures.append(
+                    f"seed {candidate_index}: tool axis downward component "
+                    f"{-float(candidate_seed['tool_x_world_z']):.6f} is "
+                    f"below {minimum_downward_axis_component:.6f}"
+                )
+                continue
+            if large_doll_grasp_search:
+                for (
+                    rolled_orientation,
+                    roll_adjustment,
+                ) in piper_horizontal_closing_orientation_candidates(
+                    candidate_pose.quaternion
+                ):
+                    rolled_pose = PoseSpec(
+                        candidate_pose.position,
+                        rolled_orientation,
+                    )
+                    rolled_seed = dict(candidate_seed)
+                    rolled_seed["source_tool_y_world_z"] = (
+                        candidate_closing_axis_world_z
+                    )
+                    rolled_seed["wrist_roll_adjustment_rad"] = (
+                        roll_adjustment
+                    )
+                    rolled_seed["selected_world_tool_pose"] = asdict(
+                        rolled_pose
+                    )
+                    rolled_seed["tool_x_world_z"] = (
+                        _quaternion_rotate_vector(
+                            rolled_orientation,
+                            (1.0, 0.0, 0.0),
+                        )[2]
+                    )
+                    rolled_seed["tool_y_world_z"] = (
+                        _quaternion_rotate_vector(
+                            rolled_orientation,
+                            (0.0, 1.0, 0.0),
+                        )[2]
+                    )
+                    if (
+                        abs(float(rolled_seed["tool_y_world_z"]))
+                        > PIPER_LARGE_DOLL_MAX_CLOSING_AXIS_WORLD_Z
+                    ):
+                        raise RuntimeError(
+                            "Wrist-roll compensation did not make the "
+                            "large-doll closing axis horizontal"
+                        )
+                    grasp_candidates.append((rolled_seed, rolled_pose))
+                continue
+            regular_candidates = [(candidate_seed, candidate_pose)]
+            if (
+                abs(candidate_closing_axis_world_z)
+                > PIPER_REGULAR_DOLL_MAX_CLOSING_AXIS_WORLD_Z
+            ):
+                regular_candidates = []
+                for (
+                    rolled_orientation,
+                    roll_adjustment,
+                ) in piper_horizontal_closing_orientation_candidates(
+                    candidate_pose.quaternion
+                ):
+                    rolled_pose = PoseSpec(
+                        candidate_pose.position,
+                        rolled_orientation,
+                    )
+                    rolled_seed = dict(candidate_seed)
+                    rolled_seed["source_tool_y_world_z"] = (
+                        candidate_closing_axis_world_z
+                    )
+                    rolled_seed["wrist_roll_adjustment_rad"] = (
+                        roll_adjustment
+                    )
+                    rolled_seed["selected_world_tool_pose"] = asdict(
+                        rolled_pose
+                    )
+                    rolled_seed["tool_x_world_z"] = (
+                        _quaternion_rotate_vector(
+                            rolled_orientation,
+                            (1.0, 0.0, 0.0),
+                        )[2]
+                    )
+                    rolled_seed["tool_y_world_z"] = (
+                        _quaternion_rotate_vector(
+                            rolled_orientation,
+                            (0.0, 1.0, 0.0),
+                        )[2]
+                    )
+                    regular_candidates.append((rolled_seed, rolled_pose))
+            for regular_seed, regular_pose in regular_candidates:
+                grasp_candidates.append((regular_seed, regular_pose))
+                try:
+                    candidate_pregrasp = worker.plan_pose(
+                        active_robot=active_spec,
+                        other_robot=other_spec,
+                        current_joint_position=(
+                            active_robot.get_joint_positions()[:6]
+                        ),
+                        other_joint_position=(
+                            other_robot.get_joint_positions()[:6]
+                        ),
+                        world_goal=piper_axis_approach_pose(
+                            regular_pose,
+                            PIPER_PREGRASP_CLEARANCE_M,
+                        ),
+                        doll_poses=_current_doll_poses(dolls),
+                    )
+                except RuntimeError as pregrasp_error:
+                    grasp_search_failures.append(
+                        f"seed {candidate_index} at "
+                        f"{PIPER_PREGRASP_CLEARANCE_M:.3f} m, wrist roll "
+                        f"{float(regular_seed.get('wrist_roll_adjustment_rad', 0.0)):.6f}: "
+                        f"{pregrasp_error}"
+                    )
+                    continue
+                selected_grasp_seed = regular_seed
+                selected_pregrasp_plan = candidate_pregrasp
+                grasp_pose = regular_pose
+                selected_pregrasp_clearance = (
+                    PIPER_PREGRASP_CLEARANCE_M
+                )
+                break
+            if selected_grasp_seed is not None:
+                break
+
+        if large_doll_grasp_search:
+            grasp_candidates.sort(
+                key=lambda candidate: (
+                    abs(
+                        float(
+                            candidate[0]["wrist_roll_adjustment_rad"]
+                        )
+                    ),
+                    float(candidate[0]["tool_x_world_z"]),
+                )
+            )
+
+            def nominal_upright_preplace_ik(
+                candidate_pose: PoseSpec,
+            ) -> tuple[PoseSpec, dict[str, Any]] | None:
+                terminal_pose = piper_axis_approach_pose(
+                    candidate_pose,
+                    piper_final_approach_clearances(doll_spec)[-1],
+                )
+                nominal_object_orientation = upright_yaw_quaternion(
+                    initial_doll_pose.quaternion
+                )
+                for yaw_offset in PIPER_UPRIGHT_YAW_OFFSETS_RAD:
+                    yaw_rotation = (
+                        math.cos(0.5 * yaw_offset),
+                        0.0,
+                        0.0,
+                        math.sin(0.5 * yaw_offset),
+                    )
+                    desired_object_pose = PoseSpec(
+                        (
+                            target_center[0],
+                            target_center[1],
+                            target_center[2] + preplace_clearance,
+                        ),
+                        quaternion_multiply(
+                            yaw_rotation,
+                            nominal_object_orientation,
+                        ),
+                    )
+                    candidate_goal = tool_pose_for_attached_object_pose(
+                        terminal_pose,
+                        initial_doll_pose,
+                        desired_object_pose,
+                    )
+                    ik_report = worker.check_pose(
+                        active_robot=active_spec,
+                        other_robot=other_spec,
+                        current_joint_position=(
+                            active_robot.get_joint_positions()[:6]
+                        ),
+                        other_joint_position=(
+                            other_robot.get_joint_positions()[:6]
+                        ),
+                        world_goal=candidate_goal,
+                        doll_poses=_current_doll_poses(dolls),
+                        excluded_doll_ids=(asset_id,),
+                    )
+                    if bool(ik_report["success"]):
+                        return candidate_goal, ik_report
+                return None
+
+            for candidate_index, (
+                candidate_seed,
+                candidate_pose,
+            ) in enumerate(grasp_candidates):
+                try:
+                    candidate_pregrasp = worker.plan_pose(
+                        active_robot=active_spec,
+                        other_robot=other_spec,
+                        current_joint_position=(
+                            active_robot.get_joint_positions()[:6]
+                        ),
+                        other_joint_position=(
+                            other_robot.get_joint_positions()[:6]
+                        ),
+                        world_goal=piper_axis_approach_pose(
+                            candidate_pose,
+                            PIPER_PREGRASP_CLEARANCE_M,
+                        ),
+                        doll_poses=_current_doll_poses(dolls),
+                    )
+                except RuntimeError as pregrasp_error:
+                    grasp_search_failures.append(
+                        f"ranked candidate {candidate_index} at "
+                        f"{PIPER_PREGRASP_CLEARANCE_M:.3f} m: "
+                        f"{pregrasp_error}"
+                    )
+                    continue
+                preplace_ik = nominal_upright_preplace_ik(
+                    candidate_pose
+                )
+                if preplace_ik is None:
+                    grasp_search_failures.append(
+                        f"ranked candidate {candidate_index}: no exact "
+                        "upright IK at the large-doll preplace"
+                    )
+                    continue
+                (
+                    nominal_preplace_goal,
+                    nominal_preplace_ik_report,
+                ) = preplace_ik
+                candidate_seed["nominal_upright_preplace_goal"] = asdict(
+                    nominal_preplace_goal
+                )
+                candidate_seed["nominal_upright_preplace_ik"] = (
+                    nominal_preplace_ik_report
+                )
+                selected_grasp_seed = candidate_seed
+                selected_pregrasp_plan = candidate_pregrasp
+                grasp_pose = candidate_pose
+                selected_pregrasp_clearance = (
+                    PIPER_PREGRASP_CLEARANCE_M
+                )
+                break
+
+        if selected_grasp_seed is None:
+            for clearance_m in (
+                PIPER_PREGRASP_CLEARANCE_CANDIDATES_M[1:]
+            ):
+                for candidate_index, (
+                    candidate_seed,
+                    candidate_pose,
+                ) in enumerate(grasp_candidates):
+                    try:
+                        candidate_pregrasp = worker.plan_pose(
+                            active_robot=active_spec,
+                            other_robot=other_spec,
+                            current_joint_position=(
+                                active_robot.get_joint_positions()[:6]
+                            ),
+                            other_joint_position=(
+                                other_robot.get_joint_positions()[:6]
+                            ),
+                            world_goal=piper_axis_approach_pose(
+                                candidate_pose,
+                                clearance_m,
+                            ),
+                            doll_poses=_current_doll_poses(dolls),
+                        )
+                    except RuntimeError as pregrasp_error:
+                        grasp_search_failures.append(
+                            f"candidate {candidate_index} at "
+                            f"{clearance_m:.3f} m: {pregrasp_error}"
+                        )
+                        continue
+                    if large_doll_grasp_search:
+                        preplace_ik = nominal_upright_preplace_ik(
+                            candidate_pose
+                        )
+                        if preplace_ik is None:
+                            grasp_search_failures.append(
+                                f"candidate {candidate_index} at "
+                                f"{clearance_m:.3f} m: no exact upright "
+                                "IK at the large-doll preplace"
+                            )
+                            continue
+                        (
+                            nominal_preplace_goal,
+                            nominal_preplace_ik_report,
+                        ) = preplace_ik
+                        candidate_seed[
+                            "nominal_upright_preplace_goal"
+                        ] = asdict(nominal_preplace_goal)
+                        candidate_seed[
+                            "nominal_upright_preplace_ik"
+                        ] = nominal_preplace_ik_report
+                    selected_grasp_seed = candidate_seed
+                    selected_pregrasp_plan = candidate_pregrasp
+                    grasp_pose = candidate_pose
+                    selected_pregrasp_clearance = clearance_m
+                    break
+                if selected_grasp_seed is not None:
+                    break
+
+        if (
+            selected_grasp_seed is None
+            or selected_pregrasp_plan is None
+            or grasp_pose is None
+            or selected_pregrasp_clearance is None
+        ):
+            raise RuntimeError(
+                f"{asset_id}: no collision-free axis pregrasp across "
+                f"{len(grasp_candidates)} grasp poses; "
+                f"failures={grasp_search_failures}"
+            )
+        plans["grasp_seed"] = selected_grasp_seed
+        plans["pregrasp"] = selected_pregrasp_plan
+        plans["grasp_seed_search"] = {
+            "candidate_count": len(grasp_candidates),
+            "requested_candidate_count": grasp_seed_candidate_count,
+            "minimum_downward_axis_component": (
+                minimum_downward_axis_component
+            ),
+            "selected_pregrasp_clearance_m": (
+                selected_pregrasp_clearance
+            ),
+            "failures": grasp_search_failures,
+        }
+        print(
+            "CUROBO_GRASP_PLAN "
+            f"asset={asset_id} robot={active_spec.name} "
+            f"contact_height_m={grasp_contact_height:.6f} "
+            f"tool_x_world_z="
+            f"{float(selected_grasp_seed['tool_x_world_z']):.6f} "
+            f"tool_y_world_z="
+            f"{float(selected_grasp_seed['tool_y_world_z']):.6f} "
+            f"wrist_roll_adjustment_rad="
+            f"{float(selected_grasp_seed.get('wrist_roll_adjustment_rad', 0.0)):.6f} "
+            f"pregrasp_clearance_m={selected_pregrasp_clearance:.6f}",
+            flush=True,
         )
         _set_recording_context(
             episode_recorder,
@@ -4166,71 +5305,339 @@ def run_curobo_pick_place_smoke(
             plans["pregrasp"],
             render=render,
             episode_recorder=episode_recorder,
-        )
-        pregrasp_pose = _pose_spec_from_mapping(
-            plans["pregrasp"]["selected_world_tool_pose"]
+            final_tolerance_rad=CUROBO_GRASP_EXECUTION_TOLERANCE_RAD,
+            final_settle_max_control_frames=(
+                CUROBO_GRASP_SETTLE_MAX_CONTROL_FRAMES
+            ),
         )
 
-        grasp_goal = (
-            initial_doll_pose.position[0],
-            initial_doll_pose.position[1],
-            initial_doll_pose.position[2]
-            + PIPER_FINGER_CENTER_BELOW_TOOL_M
-            + grasp_contact_height,
-        )
-        plans["grasp_seed"] = worker.plan_position(
+        plans["near_grasp"] = worker.plan_pose(
             active_robot=active_spec,
             other_robot=other_spec,
             current_joint_position=active_robot.get_joint_positions()[:6],
             other_joint_position=other_robot.get_joint_positions()[:6],
-            world_goal_position=grasp_goal,
+            world_goal=piper_axis_approach_pose(
+                grasp_pose,
+                PIPER_NEAR_GRASP_CLEARANCE_M,
+            ),
             doll_poses=_current_doll_poses(dolls),
-            excluded_doll_ids=(asset_id,),
-            preferred_world_orientation=pregrasp_pose.quaternion,
-        )
-        grasp_seed_pose = _pose_spec_from_mapping(
-            plans["grasp_seed"]["selected_world_tool_pose"]
-        )
-        predicted_finger_offset = _quaternion_rotate_vector(
-            grasp_seed_pose.quaternion,
-            (PIPER_FINGER_CENTER_BELOW_TOOL_M, 0.0, 0.0),
-        )
-        initial_contact_offset = _quaternion_rotate_vector(
-            initial_doll_pose.quaternion,
-            (0.0, 0.0, grasp_contact_height),
-        )
-        initial_contact_point = tuple(
-            initial_doll_pose.position[index]
-            + initial_contact_offset[index]
-            for index in range(3)
-        )
-        refined_grasp_goal = tuple(
-            initial_contact_point[index] - predicted_finger_offset[index]
-            for index in range(3)
-        )
-        plans["grasp"] = worker.plan_position(
-            active_robot=active_spec,
-            other_robot=other_spec,
-            current_joint_position=active_robot.get_joint_positions()[:6],
-            other_joint_position=other_robot.get_joint_positions()[:6],
-            world_goal_position=refined_grasp_goal,
-            doll_poses=_current_doll_poses(dolls),
-            excluded_doll_ids=(asset_id,),
-            preferred_world_orientation=grasp_seed_pose.quaternion,
         )
         _set_recording_context(
             episode_recorder,
-            "grasp",
+            "pregrasp",
             operator=active_spec.name,
             object_id=asset_id,
         )
-        executions["grasp"] = execute_curobo_trajectory(
+        executions["near_grasp"] = execute_curobo_trajectory(
             world,
             active_robot,
-            plans["grasp"],
+            plans["near_grasp"],
             render=render,
             episode_recorder=episode_recorder,
+            final_tolerance_rad=CUROBO_GRASP_EXECUTION_TOLERANCE_RAD,
+            final_settle_max_control_frames=(
+                CUROBO_GRASP_SETTLE_MAX_CONTROL_FRAMES
+            ),
         )
+
+        def measure_axis_alignment(
+            clearance_m: float,
+            label: str,
+        ) -> tuple[PoseSpec, float]:
+            live_doll_pose = _current_doll_poses(dolls)[asset_id]
+            live_contact_offset = _quaternion_rotate_vector(
+                live_doll_pose.quaternion,
+                (0.0, 0.0, grasp_contact_height),
+            )
+            live_contact_point = tuple(
+                live_doll_pose.position[index]
+                + live_contact_offset[index]
+                for index in range(3)
+            )
+            expected_pose = piper_axis_approach_pose(
+                PoseSpec(live_contact_point, grasp_pose.quaternion),
+                clearance_m,
+            )
+            measured_pose = _piper_finger_center_world_pose(
+                active_spec,
+                f"{asset_id}_{label}",
+            )
+            alignment_error = float(
+                np.linalg.norm(
+                    np.asarray(
+                        measured_pose.position,
+                        dtype=np.float64,
+                    )
+                    - np.asarray(
+                        expected_pose.position,
+                        dtype=np.float64,
+                    )
+                )
+            )
+            return expected_pose, alignment_error
+
+        near_alignment_pose, near_alignment_error = measure_axis_alignment(
+            PIPER_NEAR_GRASP_CLEARANCE_M,
+            "near_grasp_alignment",
+        )
+        initial_near_alignment_error = near_alignment_error
+        if near_alignment_error > PIPER_GRASP_CORRECTION_TRIGGER_M:
+            plans["near_grasp_correction"] = worker.plan_pose(
+                active_robot=active_spec,
+                other_robot=other_spec,
+                current_joint_position=active_robot.get_joint_positions()[:6],
+                other_joint_position=other_robot.get_joint_positions()[:6],
+                world_goal=near_alignment_pose,
+                doll_poses=_current_doll_poses(dolls),
+            )
+            executions["near_grasp_correction"] = execute_curobo_trajectory(
+                world,
+                active_robot,
+                plans["near_grasp_correction"],
+                render=render,
+                episode_recorder=episode_recorder,
+                final_tolerance_rad=CUROBO_GRASP_EXECUTION_TOLERANCE_RAD,
+                final_settle_max_control_frames=(
+                    CUROBO_GRASP_SETTLE_MAX_CONTROL_FRAMES
+                ),
+            )
+            (
+                near_alignment_pose,
+                near_alignment_error,
+            ) = measure_axis_alignment(
+                PIPER_NEAR_GRASP_CLEARANCE_M,
+                "near_grasp_corrected",
+            )
+        print(
+            "CUROBO_NEAR_GRASP_ALIGNMENT "
+            f"asset={asset_id} robot={active_spec.name} "
+            f"initial_error_m={initial_near_alignment_error:.6f} "
+            f"final_error_m={near_alignment_error:.6f}",
+            flush=True,
+        )
+        if near_alignment_error > PIPER_NEAR_GRASP_ALIGNMENT_TOLERANCE_M:
+            raise RuntimeError(
+                f"{asset_id}: finger centre is not aligned above the doll "
+                f"before insertion; error={near_alignment_error:.6f} m, "
+                f"allowed={PIPER_NEAR_GRASP_ALIGNMENT_TOLERANCE_M:.6f} m"
+            )
+
+        final_approach_clearances = piper_final_approach_clearances(
+            doll_spec
+        )
+        terminal_grasp_clearance = final_approach_clearances[-1]
+        for final_step, clearance_m in enumerate(
+            final_approach_clearances,
+            start=1,
+        ):
+            plan_key = (
+                "grasp"
+                if final_step == len(final_approach_clearances)
+                else f"grasp_approach_{final_step}"
+            )
+            plans[plan_key] = worker.plan_pose(
+                active_robot=active_spec,
+                other_robot=other_spec,
+                current_joint_position=active_robot.get_joint_positions()[:6],
+                other_joint_position=other_robot.get_joint_positions()[:6],
+                world_goal=piper_axis_approach_pose(
+                    grasp_pose,
+                    clearance_m,
+                ),
+                doll_poses=_current_doll_poses(dolls),
+                excluded_doll_ids=(asset_id,),
+            )
+            _set_recording_context(
+                episode_recorder,
+                "grasp",
+                operator=active_spec.name,
+                object_id=asset_id,
+            )
+            executions[plan_key] = execute_curobo_trajectory(
+                world,
+                active_robot,
+                plans[plan_key],
+                render=render,
+                episode_recorder=episode_recorder,
+                final_tolerance_rad=CUROBO_GRASP_EXECUTION_TOLERANCE_RAD,
+                final_settle_max_control_frames=(
+                    CUROBO_GRASP_SETTLE_MAX_CONTROL_FRAMES
+                ),
+            )
+            _, step_alignment_error = measure_axis_alignment(
+                clearance_m,
+                f"{plan_key}_complete",
+            )
+            step_doll_pose = _current_doll_poses(dolls)[asset_id]
+            step_doll_displacement = float(
+                np.linalg.norm(
+                    np.asarray(
+                        step_doll_pose.position,
+                        dtype=np.float64,
+                    )
+                    - np.asarray(
+                        initial_doll_pose.position,
+                        dtype=np.float64,
+                    )
+                )
+            )
+            step_up = _quaternion_rotate_vector(
+                step_doll_pose.quaternion,
+                (0.0, 0.0, 1.0),
+            )
+            step_tilt = math.degrees(
+                math.acos(
+                    min(1.0, max(-1.0, float(step_up[2])))
+                )
+            )
+            print(
+                "CUROBO_GRASP_INSERTION "
+                f"asset={asset_id} robot={active_spec.name} "
+                f"clearance_m={clearance_m:.6f} "
+                f"alignment_error_m={step_alignment_error:.6f} "
+                f"doll_displacement_m={step_doll_displacement:.6f} "
+                f"doll_tilt_deg={step_tilt:.6f}",
+                flush=True,
+            )
+            if (
+                step_doll_displacement
+                > PIPER_APPROACH_MAX_DOLL_DISPLACEMENT_M
+            ):
+                raise RuntimeError(
+                    f"{asset_id}: doll moved during open-finger insertion; "
+                    f"clearance={clearance_m:.6f} m, "
+                    f"displacement={step_doll_displacement:.6f} m, "
+                    f"allowed="
+                    f"{PIPER_APPROACH_MAX_DOLL_DISPLACEMENT_M:.6f} m"
+                )
+        def measure_grasp_approach(
+            label: str,
+        ) -> tuple[PoseSpec, PoseSpec, tuple[float, float, float], float]:
+            measured_finger_pose = _piper_finger_center_world_pose(
+                active_spec,
+                f"{asset_id}_{label}",
+            )
+            measured_doll_pose = _current_doll_poses(dolls)[asset_id]
+            measured_contact_offset = _quaternion_rotate_vector(
+                measured_doll_pose.quaternion,
+                (0.0, 0.0, grasp_contact_height),
+            )
+            measured_contact_point = tuple(
+                measured_doll_pose.position[index]
+                + measured_contact_offset[index]
+                for index in range(3)
+            )
+            measured_contact_point = piper_axis_approach_pose(
+                PoseSpec(
+                    measured_contact_point,
+                    grasp_pose.quaternion,
+                ),
+                terminal_grasp_clearance,
+            ).position
+            measured_error = float(
+                np.linalg.norm(
+                    np.asarray(
+                        measured_finger_pose.position,
+                        dtype=np.float64,
+                    )
+                    - np.asarray(
+                        measured_contact_point,
+                        dtype=np.float64,
+                    )
+                )
+            )
+            return (
+                measured_finger_pose,
+                measured_doll_pose,
+                measured_contact_point,
+                measured_error,
+            )
+
+        (
+            approach_finger_pose,
+            approach_doll_pose,
+            approach_contact_point,
+            approach_center_error,
+        ) = measure_grasp_approach("approach_complete")
+        initial_approach_center_error = approach_center_error
+        if (
+            approach_center_error
+            > PIPER_GRASP_CORRECTION_TRIGGER_M
+            and terminal_grasp_clearance == 0.0
+        ):
+            plans["grasp_correction"] = worker.plan_pose(
+                active_robot=active_spec,
+                other_robot=other_spec,
+                current_joint_position=active_robot.get_joint_positions()[:6],
+                other_joint_position=other_robot.get_joint_positions()[:6],
+                world_goal=PoseSpec(
+                    approach_contact_point,
+                    approach_finger_pose.quaternion,
+                ),
+                doll_poses=_current_doll_poses(dolls),
+                excluded_doll_ids=(asset_id,),
+            )
+            _set_recording_context(
+                episode_recorder,
+                "grasp",
+                operator=active_spec.name,
+                object_id=asset_id,
+            )
+            executions["grasp_correction"] = execute_curobo_trajectory(
+                world,
+                active_robot,
+                plans["grasp_correction"],
+                render=render,
+                episode_recorder=episode_recorder,
+                final_tolerance_rad=CUROBO_GRASP_EXECUTION_TOLERANCE_RAD,
+                final_settle_max_control_frames=(
+                    CUROBO_GRASP_SETTLE_MAX_CONTROL_FRAMES
+                ),
+            )
+            (
+                approach_finger_pose,
+                approach_doll_pose,
+                approach_contact_point,
+                approach_center_error,
+            ) = measure_grasp_approach("approach_corrected")
+        approach_displacement = float(
+            np.linalg.norm(
+                np.asarray(
+                    approach_doll_pose.position,
+                    dtype=np.float64,
+                )
+                - np.asarray(
+                    initial_doll_pose.position,
+                    dtype=np.float64,
+                )
+            )
+        )
+        approach_up = _quaternion_rotate_vector(
+            approach_doll_pose.quaternion,
+            (0.0, 0.0, 1.0),
+        )
+        approach_tilt = math.degrees(
+            math.acos(min(1.0, max(-1.0, float(approach_up[2]))))
+        )
+        print(
+            "CUROBO_GRASP_APPROACH "
+            f"asset={asset_id} robot={active_spec.name} "
+            f"initial_error_m={initial_approach_center_error:.6f} "
+            f"final_error_m={approach_center_error:.6f} "
+            f"doll_displacement_m={approach_displacement:.6f} "
+            f"doll_tilt_deg={approach_tilt:.6f}",
+            flush=True,
+        )
+        if approach_center_error > PIPER_GRASP_CENTER_TOLERANCE_M:
+            raise RuntimeError(
+                f"{asset_id}: grasp approach missed before closing; "
+                f"finger_center={approach_finger_pose.position}, "
+                f"contact_point={approach_contact_point}, "
+                f"initial_error={initial_approach_center_error:.6f} m, "
+                f"corrected_error={approach_center_error:.6f} m, "
+                f"doll_displacement={approach_displacement:.6f} m, "
+                f"doll_tilt={approach_tilt:.6f} degrees"
+            )
 
         _set_recording_context(
             episode_recorder,
@@ -4262,20 +5669,13 @@ def run_curobo_pick_place_smoke(
                 episode_recorder=episode_recorder,
             )
 
-        tool_position, tool_quaternion = _xform_world_pose(
-            f"{active_spec.prim_path}/{PIPER_TOOL_REL_PATH}",
-            f"{active_spec.name}_{asset_id}_pick_grasp_tool",
+        finger_center_pose = _piper_finger_center_world_pose(
+            active_spec,
+            f"{asset_id}_pick_grasp",
         )
         closed_doll_poses = _current_doll_poses(dolls)
         closed_doll_pose = closed_doll_poses[asset_id]
-        finger_center_offset = _quaternion_rotate_vector(
-            tool_quaternion,
-            (PIPER_FINGER_CENTER_BELOW_TOOL_M, 0.0, 0.0),
-        )
-        finger_center = tuple(
-            tool_position[index] + finger_center_offset[index]
-            for index in range(3)
-        )
+        finger_center = finger_center_pose.position
         closed_contact_offset = _quaternion_rotate_vector(
             closed_doll_pose.quaternion,
             (0.0, 0.0, grasp_contact_height),
@@ -4285,26 +5685,79 @@ def run_curobo_pick_place_smoke(
             + closed_contact_offset[index]
             for index in range(3)
         )
-        grasp_center_error = float(
+        closed_contact_point = piper_axis_approach_pose(
+            PoseSpec(
+                closed_contact_point,
+                grasp_pose.quaternion,
+            ),
+            terminal_grasp_clearance,
+        ).position
+        closed_center_delta = (
+            np.asarray(finger_center, dtype=np.float64)
+            - np.asarray(closed_contact_point, dtype=np.float64)
+        )
+        closed_tool_axis = np.asarray(
+            _quaternion_rotate_vector(
+                finger_center_pose.quaternion,
+                (1.0, 0.0, 0.0),
+            ),
+            dtype=np.float64,
+        )
+        signed_axial_center_error = float(
+            np.dot(closed_center_delta, closed_tool_axis)
+        )
+        axial_center_error = abs(signed_axial_center_error)
+        lateral_center_error = float(
             np.linalg.norm(
-                np.asarray(finger_center, dtype=np.float64)
-                - np.asarray(closed_contact_point, dtype=np.float64)
+                closed_center_delta
+                - signed_axial_center_error * closed_tool_axis
             )
         )
+        grasp_center_error = float(np.linalg.norm(closed_center_delta))
         closed_separation = _finger_separation(
             active_spec,
             "pick_contact",
         )
-        if grasp_center_error > doll_spec.footprint_radius + 0.02:
-            raise RuntimeError(
-                f"{asset_id}: finger centre missed doll by "
-                f"{grasp_center_error:.6f} m"
+        closed_doll_displacement = float(
+            np.linalg.norm(
+                np.asarray(
+                    closed_doll_pose.position,
+                    dtype=np.float64,
+                )
+                - np.asarray(
+                    initial_doll_pose.position,
+                    dtype=np.float64,
+                )
             )
-        if closed_separation >= PIPER_OPEN_FINGER_SEPARATION_M - 0.005:
-            raise RuntimeError(
-                f"{asset_id}: gripper did not close around the doll; "
-                f"separation={closed_separation:.6f} m"
-            )
+        )
+        closed_up = _quaternion_rotate_vector(
+            closed_doll_pose.quaternion,
+            (0.0, 0.0, 1.0),
+        )
+        closed_tilt = math.degrees(
+            math.acos(min(1.0, max(-1.0, float(closed_up[2]))))
+        )
+        print(
+            "CUROBO_GRASP_PHYSICS "
+            f"asset={asset_id} robot={active_spec.name} "
+            f"initial_approach_error_m="
+            f"{initial_approach_center_error:.6f} "
+            f"approach_error_m={approach_center_error:.6f} "
+            f"closed_error_m={grasp_center_error:.6f} "
+            f"closed_lateral_error_m={lateral_center_error:.6f} "
+            f"closed_axial_error_m={axial_center_error:.6f} "
+            f"closed_doll_displacement_m="
+            f"{closed_doll_displacement:.6f} "
+            f"closed_doll_tilt_deg={closed_tilt:.6f} "
+            f"closed_separation_m={closed_separation:.6f}",
+            flush=True,
+        )
+        attachment_gate = validate_grasp_before_attach(
+            doll_spec,
+            center_error_m=lateral_center_error,
+            axial_center_error_m=axial_center_error,
+            finger_separation_m=closed_separation,
+        )
 
         _set_recording_context(
             episode_recorder,
@@ -4333,10 +5786,12 @@ def run_curobo_pick_place_smoke(
                 render=render,
                 episode_recorder=episode_recorder,
             )
-        attached_tool_position, attached_tool_quaternion = _xform_world_pose(
-            f"{active_spec.prim_path}/{PIPER_TOOL_REL_PATH}",
-            f"{active_spec.name}_{asset_id}_pick_attached_tool",
+        attached_tool_pose = _piper_finger_center_world_pose(
+            active_spec,
+            f"{asset_id}_pick_attached",
         )
+        attached_tool_position = attached_tool_pose.position
+        attached_tool_quaternion = attached_tool_pose.quaternion
         attached_doll_pose = _current_doll_poses(dolls)[asset_id]
         attachment = worker.attach(
             active_robot=active_spec,
@@ -4350,6 +5805,10 @@ def run_curobo_pick_place_smoke(
             for index in range(3)
         )
         transport_orientation = tuple(attached_tool_quaternion)
+        tool_to_attached_doll = pose_relative_to(
+            attached_tool_pose,
+            attached_doll_pose,
+        )
 
         lift_goal = PoseSpec(
             (
@@ -4371,7 +5830,7 @@ def run_curobo_pick_place_smoke(
                 excluded_doll_ids=(asset_id,),
             )
         except RuntimeError as exact_error:
-            lift_mode = "position_with_bounded_orientation"
+            lift_mode = "position_with_upright_object"
             plans["lift_exact_failure"] = {"error": str(exact_error)}
             plans["lift"] = worker.plan_position(
                 active_robot=active_spec,
@@ -4382,16 +5841,24 @@ def run_curobo_pick_place_smoke(
                 doll_poses=_current_doll_poses(dolls),
                 excluded_doll_ids=(asset_id,),
                 preferred_world_orientation=transport_orientation,
+                tool_to_attached_object_orientation=(
+                    tool_to_attached_doll.quaternion
+                ),
+                max_attached_object_tilt_degrees=(
+                    PIPER_TRANSPORT_UPRIGHT_TOLERANCE_DEGREES
+                ),
             )
-            orientation_error = plans["lift"][
-                "preferred_orientation_error_rad"
+            planned_lift_tilt = plans["lift"][
+                "attached_object_tilt_degrees"
             ]
-            if orientation_error is None or math.degrees(
-                orientation_error
-            ) > PIPER_TRANSPORT_UPRIGHT_TOLERANCE_DEGREES:
+            if (
+                planned_lift_tilt is None
+                or planned_lift_tilt
+                > PIPER_TRANSPORT_UPRIGHT_TOLERANCE_DEGREES
+            ):
                 raise RuntimeError(
-                    f"{asset_id}: lift orientation changed by "
-                    f"{orientation_error} rad"
+                    f"{asset_id}: planned lift left object tilt at "
+                    f"{planned_lift_tilt} degrees"
                 )
         _set_recording_context(
             episode_recorder,
@@ -4407,9 +5874,9 @@ def run_curobo_pick_place_smoke(
             episode_recorder=episode_recorder,
         )
         lifted_doll_pose = _current_doll_poses(dolls)[asset_id]
-        lifted_tool_position, lifted_tool_quaternion = _xform_world_pose(
-            f"{active_spec.prim_path}/{PIPER_TOOL_REL_PATH}",
-            f"{active_spec.name}_{asset_id}_lifted_tool",
+        lifted_tool_pose = _piper_finger_center_world_pose(
+            active_spec,
+            f"{asset_id}_lifted",
         )
         lifted_distance = (
             lifted_doll_pose.position[2] - attached_doll_pose.position[2]
@@ -4418,68 +5885,335 @@ def run_curobo_pick_place_smoke(
             raise RuntimeError(
                 f"{asset_id}: fixed grasp lifted only {lifted_distance:.6f} m"
             )
-        lifted_tilt = _doll_state_report(dolls)[asset_id][
+        lifted_tilt_before_upright = _doll_state_report(dolls)[asset_id][
             "upright_tilt_degrees"
         ]
-        if lifted_tilt > PIPER_TRANSPORT_UPRIGHT_TOLERANCE_DEGREES:
+        if (
+            lifted_tilt_before_upright
+            > PIPER_TRANSPORT_UPRIGHT_TOLERANCE_DEGREES
+        ):
             raise RuntimeError(
-                f"{asset_id}: lifted doll tilt is "
+                f"{asset_id}: doll tilted too far during lift to correct "
+                f"safely: {lifted_tilt_before_upright:.6f} degrees"
+            )
+        print(
+            "CUROBO_LIFT_STATE "
+            f"asset={asset_id} robot={active_spec.name} "
+            f"mode={lift_mode} "
+            f"lifted_distance_m={lifted_distance:.6f} "
+            f"tilt_deg={lifted_tilt_before_upright:.6f}",
+            flush=True,
+        )
+
+        # The fixed grasp preserves the measured tool-to-object transform.
+        # Use that transform to rotate the arm joints about the lifted doll's
+        # centre until the doll's local Z axis is vertical.  If the source-side
+        # wrist branch cannot rotate in place, keep the bounded transport tilt
+        # and require the target-side preplace trajectory to end upright before
+        # any descent.
+        base_upright_orientation = upright_yaw_quaternion(
+            lifted_doll_pose.quaternion
+        )
+        desired_upright_orientation = base_upright_orientation
+        upright_failures: list[str] = []
+        selected_upright_yaw_offset: float | None = None
+        for yaw_offset in PIPER_UPRIGHT_YAW_OFFSETS_RAD:
+            yaw_rotation = (
+                math.cos(0.5 * yaw_offset),
+                0.0,
+                0.0,
+                math.sin(0.5 * yaw_offset),
+            )
+            candidate_upright_orientation = quaternion_multiply(
+                yaw_rotation,
+                base_upright_orientation,
+            )
+            upright_goal = tool_pose_for_attached_object_orientation(
+                lifted_tool_pose,
+                lifted_doll_pose,
+                candidate_upright_orientation,
+            )
+            try:
+                plans["upright"] = worker.plan_pose(
+                    active_robot=active_spec,
+                    other_robot=other_spec,
+                    current_joint_position=(
+                        active_robot.get_joint_positions()[:6]
+                    ),
+                    other_joint_position=(
+                        other_robot.get_joint_positions()[:6]
+                    ),
+                    world_goal=upright_goal,
+                    doll_poses=_current_doll_poses(dolls),
+                    excluded_doll_ids=(asset_id,),
+                )
+            except RuntimeError as upright_error:
+                upright_failures.append(
+                    f"yaw_offset={yaw_offset:.6f}: {upright_error}"
+                )
+                continue
+            desired_upright_orientation = (
+                candidate_upright_orientation
+            )
+            selected_upright_yaw_offset = yaw_offset
+            break
+        upright_correction_deferred_to_preplace = (
+            selected_upright_yaw_offset is None
+        )
+        plans["upright_yaw_search"] = {
+            "selected_yaw_offset_rad": selected_upright_yaw_offset,
+            "failed_candidate_count": len(upright_failures),
+            "failures": upright_failures,
+            "deferred_to_preplace": (
+                upright_correction_deferred_to_preplace
+            ),
+        }
+        if upright_correction_deferred_to_preplace:
+            plans["upright"] = {
+                "skipped": True,
+                "reason": "source_side_upright_yaw_unreachable",
+                "success": True,
+            }
+            upright_doll_pose = lifted_doll_pose
+            upright_tool_pose = lifted_tool_pose
+            upright_center_drift = 0.0
+            lifted_tilt = lifted_tilt_before_upright
+        else:
+            _set_recording_context(
+                episode_recorder,
+                "lift",
+                operator=active_spec.name,
+                object_id=asset_id,
+            )
+            executions["upright"] = execute_curobo_trajectory(
+                world,
+                active_robot,
+                plans["upright"],
+                render=render,
+                episode_recorder=episode_recorder,
+            )
+            upright_doll_pose = _current_doll_poses(dolls)[asset_id]
+            upright_tool_pose = _piper_finger_center_world_pose(
+                active_spec,
+                f"{asset_id}_upright",
+            )
+            upright_center_drift = float(
+                np.linalg.norm(
+                    np.asarray(
+                        upright_doll_pose.position,
+                        dtype=np.float64,
+                    )
+                    - np.asarray(
+                        lifted_doll_pose.position,
+                        dtype=np.float64,
+                    )
+                )
+            )
+            lifted_tilt = _doll_state_report(dolls)[asset_id][
+                "upright_tilt_degrees"
+            ]
+        if (
+            not upright_correction_deferred_to_preplace
+            and lifted_tilt
+            > PIPER_POST_GRASP_UPRIGHT_TOLERANCE_DEGREES
+        ):
+            raise RuntimeError(
+                f"{asset_id}: post-grasp joint rotation left doll tilt at "
                 f"{lifted_tilt:.6f} degrees"
             )
+        if upright_center_drift > PIPER_GRASP_CENTER_TOLERANCE_M:
+            raise RuntimeError(
+                f"{asset_id}: post-grasp joint rotation displaced the doll "
+                f"centre by {upright_center_drift:.6f} m"
+            )
+        print(
+            "CUROBO_UPRIGHT_CORRECTION "
+            f"asset={asset_id} robot={active_spec.name} "
+            f"before_tilt_deg={lifted_tilt_before_upright:.6f} "
+            f"after_tilt_deg={lifted_tilt:.6f} "
+            f"center_drift_m={upright_center_drift:.6f} "
+            f"deferred_to_preplace="
+            f"{str(upright_correction_deferred_to_preplace).lower()}",
+            flush=True,
+        )
         attached_offset = tuple(
-            lifted_doll_pose.position[index] - lifted_tool_position[index]
+            upright_doll_pose.position[index]
+            - upright_tool_pose.position[index]
             for index in range(3)
         )
-        transport_orientation = tuple(lifted_tool_quaternion)
+        transport_orientation = tuple(upright_tool_pose.quaternion)
 
         preplace_object_center = (
             target_center[0],
             target_center[1],
-            target_center[2] + PIPER_PREPLACE_CLEARANCE_M,
+            target_center[2] + preplace_clearance,
         )
-        preplace_goal = PoseSpec(
-            tuple(
-                preplace_object_center[index] - attached_offset[index]
-                for index in range(3)
-            ),
-            transport_orientation,
+        tool_to_upright_doll = pose_relative_to(
+            upright_tool_pose,
+            upright_doll_pose,
         )
-        preplace_mode = "exact_pose"
-        try:
-            plans["preplace"] = worker.plan_pose(
-                active_robot=active_spec,
-                other_robot=other_spec,
-                current_joint_position=active_robot.get_joint_positions()[:6],
-                other_joint_position=other_robot.get_joint_positions()[:6],
-                world_goal=preplace_goal,
-                doll_poses=_current_doll_poses(dolls),
-                excluded_doll_ids=(asset_id,),
-            )
-        except RuntimeError as exact_error:
-            preplace_mode = "position_with_bounded_orientation"
-            plans["preplace_exact_failure"] = {
-                "error": str(exact_error),
-            }
-            plans["preplace"] = worker.plan_position(
-                active_robot=active_spec,
-                other_robot=other_spec,
-                current_joint_position=active_robot.get_joint_positions()[:6],
-                other_joint_position=other_robot.get_joint_positions()[:6],
-                world_goal_position=preplace_goal.position,
-                doll_poses=_current_doll_poses(dolls),
-                excluded_doll_ids=(asset_id,),
-                preferred_world_orientation=transport_orientation,
-            )
-            orientation_error = plans["preplace"][
-                "preferred_orientation_error_rad"
-            ]
-            if orientation_error is None or math.degrees(
-                orientation_error
-            ) > PIPER_TRANSPORT_UPRIGHT_TOLERANCE_DEGREES:
-                raise RuntimeError(
-                    f"{asset_id}: target transport orientation changed by "
-                    f"{orientation_error} rad"
+        probe_object_orientation = quaternion_multiply(
+            target_orientation,
+            tool_to_upright_doll.quaternion,
+        )
+        probe_upright_orientation = upright_yaw_quaternion(
+            probe_object_orientation
+        )
+        upright_orientation_candidates: list[
+            tuple[float, float, float, float]
+        ] = []
+        for base_orientation in (
+            probe_upright_orientation,
+            desired_upright_orientation,
+        ):
+            for yaw_offset in PIPER_UPRIGHT_YAW_OFFSETS_RAD:
+                yaw_rotation = (
+                    math.cos(0.5 * yaw_offset),
+                    0.0,
+                    0.0,
+                    math.sin(0.5 * yaw_offset),
                 )
+                candidate = quaternion_multiply(
+                    yaw_rotation,
+                    base_orientation,
+                )
+                if not any(
+                    abs(
+                        sum(
+                            candidate[index] * existing[index]
+                            for index in range(4)
+                        )
+                    )
+                    > 1.0 - 1.0e-8
+                    for existing in upright_orientation_candidates
+                ):
+                    upright_orientation_candidates.append(candidate)
+
+        preplace_failures: list[str] = []
+        preplace_goal: PoseSpec | None = None
+        selected_object_orientation: tuple[
+            float, float, float, float
+        ] | None = None
+        preplace_mode: str | None = None
+        for candidate_index, object_orientation in enumerate(
+            upright_orientation_candidates
+        ):
+            candidate_object_pose = PoseSpec(
+                preplace_object_center,
+                object_orientation,
+            )
+            candidate_goal = tool_pose_for_attached_object_pose(
+                upright_tool_pose,
+                upright_doll_pose,
+                candidate_object_pose,
+            )
+            try:
+                candidate_plan = worker.plan_pose(
+                    active_robot=active_spec,
+                    other_robot=other_spec,
+                    current_joint_position=active_robot.get_joint_positions()[
+                        :6
+                    ],
+                    other_joint_position=other_robot.get_joint_positions()[:6],
+                    world_goal=candidate_goal,
+                    doll_poses=_current_doll_poses(dolls),
+                    excluded_doll_ids=(asset_id,),
+                )
+            except RuntimeError as exact_error:
+                preplace_failures.append(
+                    f"candidate {candidate_index} exact: {exact_error}"
+                )
+                try:
+                    candidate_plan = worker.plan_position(
+                        active_robot=active_spec,
+                        other_robot=other_spec,
+                        current_joint_position=(
+                            active_robot.get_joint_positions()[:6]
+                        ),
+                        other_joint_position=(
+                            other_robot.get_joint_positions()[:6]
+                        ),
+                        world_goal_position=candidate_goal.position,
+                        doll_poses=_current_doll_poses(dolls),
+                        excluded_doll_ids=(asset_id,),
+                        preferred_world_orientation=(
+                            candidate_goal.quaternion
+                        ),
+                        tool_to_attached_object_orientation=(
+                            tool_to_upright_doll.quaternion
+                        ),
+                        max_attached_object_tilt_degrees=(
+                            PIPER_PLANNED_UPRIGHT_TOLERANCE_DEGREES
+                        ),
+                    )
+                except RuntimeError as position_error:
+                    preplace_failures.append(
+                        f"candidate {candidate_index} position: "
+                        f"{position_error}"
+                    )
+                    continue
+                selected_tool_pose = _pose_spec_from_mapping(
+                    candidate_plan["selected_world_tool_pose"]
+                )
+                predicted_object_orientation = quaternion_multiply(
+                    selected_tool_pose.quaternion,
+                    tool_to_upright_doll.quaternion,
+                )
+                predicted_object_tilt = (
+                    attached_object_upright_tilt_degrees(
+                        selected_tool_pose.quaternion,
+                        tool_to_upright_doll.quaternion,
+                    )
+                )
+                if (
+                    predicted_object_tilt
+                    > PIPER_TRANSPORT_UPRIGHT_TOLERANCE_DEGREES
+                ):
+                    preplace_failures.append(
+                        f"candidate {candidate_index} position changed "
+                        f"predicted doll tilt to "
+                        f"{predicted_object_tilt:.6f} degrees"
+                    )
+                    continue
+                candidate_plan["predicted_object_tilt_degrees"] = (
+                    predicted_object_tilt
+                )
+                candidate_plan["predicted_object_orientation"] = list(
+                    predicted_object_orientation
+                )
+                preplace_goal = selected_tool_pose
+                selected_object_orientation = (
+                    predicted_object_orientation
+                )
+                preplace_mode = (
+                    "position_with_bounded_transport_tilt"
+                )
+            else:
+                preplace_goal = candidate_goal
+                selected_object_orientation = object_orientation
+                preplace_mode = "exact_pose_upright_yaw_search"
+            plans["preplace"] = candidate_plan
+            break
+        if (
+            preplace_goal is None
+            or selected_object_orientation is None
+            or preplace_mode is None
+        ):
+            plans["preplace_failures"] = list(preplace_failures)
+            raise RuntimeError(
+                f"{asset_id}: no collision-free preplace plan kept the "
+                f"doll upright across {len(upright_orientation_candidates)} "
+                f"yaw candidates; failures={preplace_failures}"
+            )
+        plans["preplace_upright_yaw_search"] = {
+            "candidate_count": len(upright_orientation_candidates),
+            "failed_candidate_count": len(preplace_failures),
+            "selected_object_orientation": list(
+                selected_object_orientation
+            ),
+            "failures": list(preplace_failures),
+            "mode": preplace_mode,
+        }
         _set_recording_context(
             episode_recorder,
             "preplace",
@@ -4494,10 +6228,12 @@ def run_curobo_pick_place_smoke(
             episode_recorder=episode_recorder,
         )
 
-        preplace_tool_position, preplace_tool_quaternion = _xform_world_pose(
-            f"{active_spec.prim_path}/{PIPER_TOOL_REL_PATH}",
-            f"{active_spec.name}_{asset_id}_preplace_tool",
+        preplace_tool_pose = _piper_finger_center_world_pose(
+            active_spec,
+            f"{asset_id}_preplace",
         )
+        preplace_tool_position = preplace_tool_pose.position
+        preplace_tool_quaternion = preplace_tool_pose.quaternion
         preplace_doll_pose = _current_doll_poses(dolls)[asset_id]
         preplace_center_error = float(
             np.linalg.norm(
@@ -4541,12 +6277,12 @@ def run_curobo_pick_place_smoke(
                 render=render,
                 episode_recorder=episode_recorder,
             )
-            preplace_tool_position, preplace_tool_quaternion = (
-                _xform_world_pose(
-                    f"{active_spec.prim_path}/{PIPER_TOOL_REL_PATH}",
-                    f"{active_spec.name}_{asset_id}_corrected_preplace_tool",
-                )
+            preplace_tool_pose = _piper_finger_center_world_pose(
+                active_spec,
+                f"{asset_id}_corrected_preplace",
             )
+            preplace_tool_position = preplace_tool_pose.position
+            preplace_tool_quaternion = preplace_tool_pose.quaternion
             preplace_doll_pose = _current_doll_poses(dolls)[asset_id]
             preplace_center_error = float(
                 np.linalg.norm(
@@ -4563,76 +6299,369 @@ def run_curobo_pick_place_smoke(
         preplace_tilt = _doll_state_report(dolls)[asset_id][
             "upright_tilt_degrees"
         ]
+        preplace_tilt_before_upright = preplace_tilt
+        preplace_upright_center_drift = 0.0
         if (
             preplace_tilt
             > PIPER_TRANSPORT_UPRIGHT_TOLERANCE_DEGREES
         ):
             raise RuntimeError(
-                f"{asset_id}: transported doll tilt is "
+                f"{asset_id}: transported doll tilted too far to correct "
+                f"safely: {preplace_tilt:.6f} degrees"
+            )
+        if (
+            preplace_tilt
+            > PIPER_POST_GRASP_UPRIGHT_TOLERANCE_DEGREES
+        ):
+            preplace_upright_goal = (
+                tool_pose_for_attached_object_orientation(
+                    preplace_tool_pose,
+                    preplace_doll_pose,
+                    upright_yaw_quaternion(
+                        preplace_doll_pose.quaternion
+                    ),
+                )
+            )
+            plans["preplace_upright"] = worker.plan_pose(
+                active_robot=active_spec,
+                other_robot=other_spec,
+                current_joint_position=active_robot.get_joint_positions()[:6],
+                other_joint_position=other_robot.get_joint_positions()[:6],
+                world_goal=preplace_upright_goal,
+                doll_poses=_current_doll_poses(dolls),
+                excluded_doll_ids=(asset_id,),
+            )
+            _set_recording_context(
+                episode_recorder,
+                "preplace_upright",
+                operator=active_spec.name,
+                object_id=asset_id,
+            )
+            executions["preplace_upright"] = execute_curobo_trajectory(
+                world,
+                active_robot,
+                plans["preplace_upright"],
+                render=render,
+                episode_recorder=episode_recorder,
+            )
+            corrected_preplace_doll_pose = _current_doll_poses(dolls)[
+                asset_id
+            ]
+            preplace_upright_center_drift = float(
+                np.linalg.norm(
+                    np.asarray(
+                        corrected_preplace_doll_pose.position,
+                        dtype=np.float64,
+                    )
+                    - np.asarray(
+                        preplace_doll_pose.position,
+                        dtype=np.float64,
+                    )
+                )
+            )
+            preplace_doll_pose = corrected_preplace_doll_pose
+            preplace_tool_pose = _piper_finger_center_world_pose(
+                active_spec,
+                f"{asset_id}_preplace_upright",
+            )
+            preplace_tool_position = preplace_tool_pose.position
+            preplace_tool_quaternion = preplace_tool_pose.quaternion
+            preplace_center_error = float(
+                np.linalg.norm(
+                    np.asarray(
+                        preplace_doll_pose.position,
+                        dtype=np.float64,
+                    )
+                    - np.asarray(
+                        preplace_object_center,
+                        dtype=np.float64,
+                    )
+                )
+            )
+            preplace_tilt = _doll_state_report(dolls)[asset_id][
+                "upright_tilt_degrees"
+            ]
+            print(
+                "CUROBO_PREPLACE_UPRIGHT_CORRECTION "
+                f"asset={asset_id} robot={active_spec.name} "
+                f"before_tilt_deg="
+                f"{preplace_tilt_before_upright:.6f} "
+                f"after_tilt_deg={preplace_tilt:.6f} "
+                f"center_drift_m="
+                f"{preplace_upright_center_drift:.6f}",
+                flush=True,
+            )
+            if (
+                preplace_upright_center_drift
+                > PIPER_GRASP_CENTER_TOLERANCE_M
+            ):
+                raise RuntimeError(
+                    f"{asset_id}: preplace joint rotation displaced the "
+                    f"doll centre by "
+                    f"{preplace_upright_center_drift:.6f} m"
+                )
+        if (
+            preplace_tilt
+            > PIPER_POST_GRASP_UPRIGHT_TOLERANCE_DEGREES
+        ):
+            raise RuntimeError(
+                f"{asset_id}: preplace joint rotation left doll tilt at "
                 f"{preplace_tilt:.6f} degrees"
             )
-        attached_offset = tuple(
-            preplace_doll_pose.position[index]
-            - preplace_tool_position[index]
-            for index in range(3)
+        print(
+            "CUROBO_PREPLACE_STATE "
+            f"asset={asset_id} robot={active_spec.name} "
+            f"mode={preplace_mode} "
+            f"center_error_m={preplace_center_error:.6f} "
+            f"tilt_deg={preplace_tilt:.6f}",
+            flush=True,
         )
-        transport_orientation = tuple(preplace_tool_quaternion)
-        place_goal = PoseSpec(
-            tuple(
-                target_center[index] - attached_offset[index]
+        place_segment_modes: list[str] = []
+        place_segment_states: list[dict[str, Any]] = []
+        for segment_index, support_clearance in enumerate(
+            PIPER_PLACE_APPROACH_CLEARANCES_M,
+            start=1,
+        ):
+            plan_key = (
+                "place"
+                if segment_index == len(PIPER_PLACE_APPROACH_CLEARANCES_M)
+                else f"place_approach_{segment_index}"
+            )
+            current_place_doll_pose = _current_doll_poses(dolls)[asset_id]
+            current_place_tool_pose = _piper_finger_center_world_pose(
+                active_spec,
+                f"{asset_id}_{plan_key}_start",
+            )
+            attached_offset = tuple(
+                current_place_doll_pose.position[index]
+                - current_place_tool_pose.position[index]
                 for index in range(3)
-            ),
-            transport_orientation,
-        )
-        place_mode = "exact_pose"
-        try:
-            plans["place"] = worker.plan_pose(
-                active_robot=active_spec,
-                other_robot=other_spec,
-                current_joint_position=active_robot.get_joint_positions()[:6],
-                other_joint_position=other_robot.get_joint_positions()[:6],
-                world_goal=place_goal,
-                doll_poses=_current_doll_poses(dolls),
-                excluded_doll_ids=(asset_id,),
             )
-        except RuntimeError as exact_error:
-            place_mode = "position_with_bounded_orientation"
-            plans["place_exact_failure"] = {
-                "error": str(exact_error),
-            }
-            plans["place"] = worker.plan_position(
-                active_robot=active_spec,
-                other_robot=other_spec,
-                current_joint_position=active_robot.get_joint_positions()[:6],
-                other_joint_position=other_robot.get_joint_positions()[:6],
-                world_goal_position=place_goal.position,
-                doll_poses=_current_doll_poses(dolls),
-                excluded_doll_ids=(asset_id,),
-                preferred_world_orientation=transport_orientation,
+            transport_orientation = tuple(
+                current_place_tool_pose.quaternion
             )
-            orientation_error = plans["place"][
-                "preferred_orientation_error_rad"
-            ]
-            if orientation_error is None or math.degrees(
-                orientation_error
-            ) > PIPER_TRANSPORT_UPRIGHT_TOLERANCE_DEGREES:
-                raise RuntimeError(
-                    f"{asset_id}: place orientation changed by "
-                    f"{orientation_error} rad"
+            segment_object_center = (
+                target_center[0],
+                target_center[1],
+                target_center[2] + support_clearance,
+            )
+            place_goal = PoseSpec(
+                tuple(
+                    segment_object_center[index] - attached_offset[index]
+                    for index in range(3)
+                ),
+                transport_orientation,
+            )
+            segment_mode = "exact_pose"
+            try:
+                plans[plan_key] = worker.plan_pose(
+                    active_robot=active_spec,
+                    other_robot=other_spec,
+                    current_joint_position=(
+                        active_robot.get_joint_positions()[:6]
+                    ),
+                    other_joint_position=other_robot.get_joint_positions()[:6],
+                    world_goal=place_goal,
+                    doll_poses=_current_doll_poses(dolls),
+                    excluded_doll_ids=(asset_id,),
                 )
-        _set_recording_context(
-            episode_recorder,
-            "place",
-            operator=active_spec.name,
-            object_id=asset_id,
-        )
-        executions["place"] = execute_curobo_trajectory(
-            world,
-            active_robot,
-            plans["place"],
-            render=render,
-            episode_recorder=episode_recorder,
-        )
+            except RuntimeError as exact_error:
+                segment_mode = "position_with_upright_object"
+                plans[f"{plan_key}_exact_failure"] = {
+                    "error": str(exact_error),
+                }
+                tool_to_attached_object = pose_relative_to(
+                    current_place_tool_pose,
+                    current_place_doll_pose,
+                )
+                plans[plan_key] = worker.plan_position(
+                    active_robot=active_spec,
+                    other_robot=other_spec,
+                    current_joint_position=(
+                        active_robot.get_joint_positions()[:6]
+                    ),
+                    other_joint_position=other_robot.get_joint_positions()[:6],
+                    world_goal_position=place_goal.position,
+                    doll_poses=_current_doll_poses(dolls),
+                    excluded_doll_ids=(asset_id,),
+                    preferred_world_orientation=transport_orientation,
+                    tool_to_attached_object_orientation=(
+                        tool_to_attached_object.quaternion
+                    ),
+                    max_attached_object_tilt_degrees=(
+                        PIPER_PLANNED_UPRIGHT_TOLERANCE_DEGREES
+                    ),
+                )
+                orientation_error = plans[plan_key][
+                    "preferred_orientation_error_rad"
+                ]
+                if orientation_error is None or math.degrees(
+                    orientation_error
+                ) > PIPER_POST_GRASP_UPRIGHT_TOLERANCE_DEGREES:
+                    raise RuntimeError(
+                        f"{asset_id}: {plan_key} changed tool orientation by "
+                        f"{orientation_error} rad"
+                    )
+            _set_recording_context(
+                episode_recorder,
+                "place",
+                operator=active_spec.name,
+                object_id=asset_id,
+            )
+            executions[plan_key] = execute_curobo_trajectory(
+                world,
+                active_robot,
+                plans[plan_key],
+                render=render,
+                episode_recorder=episode_recorder,
+            )
+            segment_pose = _current_doll_poses(dolls)[asset_id]
+            segment_state = _doll_state_report(dolls)[asset_id]
+            segment_center_error = float(
+                np.linalg.norm(
+                    np.asarray(segment_pose.position, dtype=np.float64)
+                    - np.asarray(segment_object_center, dtype=np.float64)
+                )
+            )
+            segment_tilt = segment_state["upright_tilt_degrees"]
+            segment_tilt_before_upright = segment_tilt
+            segment_upright_center_drift = 0.0
+            if (
+                segment_tilt
+                > PIPER_PLANNED_UPRIGHT_TOLERANCE_DEGREES
+            ):
+                if (
+                    segment_tilt
+                    > PIPER_TRANSPORT_UPRIGHT_TOLERANCE_DEGREES
+                ):
+                    raise RuntimeError(
+                        f"{asset_id}: {plan_key} tilted too far to correct "
+                        f"safely: {segment_tilt:.6f} degrees"
+                    )
+                segment_tool_pose = _piper_finger_center_world_pose(
+                    active_spec,
+                    f"{asset_id}_{plan_key}_before_upright",
+                )
+                segment_upright_goal = (
+                    tool_pose_for_attached_object_orientation(
+                        segment_tool_pose,
+                        segment_pose,
+                        upright_yaw_quaternion(
+                            segment_pose.quaternion
+                        ),
+                    )
+                )
+                upright_plan_key = f"{plan_key}_upright"
+                plans[upright_plan_key] = worker.plan_pose(
+                    active_robot=active_spec,
+                    other_robot=other_spec,
+                    current_joint_position=(
+                        active_robot.get_joint_positions()[:6]
+                    ),
+                    other_joint_position=other_robot.get_joint_positions()[:6],
+                    world_goal=segment_upright_goal,
+                    doll_poses=_current_doll_poses(dolls),
+                    excluded_doll_ids=(asset_id,),
+                )
+                _set_recording_context(
+                    episode_recorder,
+                    "place_upright",
+                    operator=active_spec.name,
+                    object_id=asset_id,
+                )
+                executions[upright_plan_key] = execute_curobo_trajectory(
+                    world,
+                    active_robot,
+                    plans[upright_plan_key],
+                    render=render,
+                    episode_recorder=episode_recorder,
+                )
+                corrected_segment_pose = _current_doll_poses(dolls)[asset_id]
+                segment_upright_center_drift = float(
+                    np.linalg.norm(
+                        np.asarray(
+                            corrected_segment_pose.position,
+                            dtype=np.float64,
+                        )
+                        - np.asarray(
+                            segment_pose.position,
+                            dtype=np.float64,
+                        )
+                    )
+                )
+                segment_pose = corrected_segment_pose
+                segment_state = _doll_state_report(dolls)[asset_id]
+                segment_tilt = segment_state["upright_tilt_degrees"]
+                segment_center_error = float(
+                    np.linalg.norm(
+                        np.asarray(
+                            segment_pose.position,
+                            dtype=np.float64,
+                        )
+                        - np.asarray(
+                            segment_object_center,
+                            dtype=np.float64,
+                        )
+                    )
+                )
+                print(
+                    "CUROBO_PLACE_UPRIGHT_CORRECTION "
+                    f"asset={asset_id} robot={active_spec.name} "
+                    f"segment={segment_index} "
+                    f"before_tilt_deg="
+                    f"{segment_tilt_before_upright:.6f} "
+                    f"after_tilt_deg={segment_tilt:.6f} "
+                    f"center_drift_m="
+                    f"{segment_upright_center_drift:.6f}",
+                    flush=True,
+                )
+                if (
+                    segment_upright_center_drift
+                    > PIPER_GRASP_CENTER_TOLERANCE_M
+                ):
+                    raise RuntimeError(
+                        f"{asset_id}: {upright_plan_key} displaced the doll "
+                        f"centre by {segment_upright_center_drift:.6f} m"
+                    )
+            print(
+                "CUROBO_PLACE_APPROACH "
+                f"asset={asset_id} robot={active_spec.name} "
+                f"segment={segment_index} "
+                f"support_clearance_m={support_clearance:.6f} "
+                f"mode={segment_mode} "
+                f"center_error_m={segment_center_error:.6f} "
+                f"tilt_deg={segment_tilt:.6f}",
+                flush=True,
+            )
+            if (
+                segment_tilt
+                > PIPER_POST_GRASP_UPRIGHT_TOLERANCE_DEGREES
+            ):
+                raise RuntimeError(
+                    f"{asset_id}: {plan_key} left doll tilt at "
+                    f"{segment_tilt:.6f} degrees"
+                )
+            if segment_center_error > PIPER_GRASP_CENTER_TOLERANCE_M:
+                raise RuntimeError(
+                    f"{asset_id}: {plan_key} missed its staged object centre "
+                    f"by {segment_center_error:.6f} m"
+                )
+            place_segment_modes.append(segment_mode)
+            place_segment_states.append(
+                {
+                    "support_clearance_m": support_clearance,
+                    "mode": segment_mode,
+                    "center_error_m": segment_center_error,
+                    "tilt_before_upright_correction_degrees": (
+                        segment_tilt_before_upright
+                    ),
+                    "upright_tilt_degrees": segment_tilt,
+                    "upright_correction_center_drift_m": (
+                        segment_upright_center_drift
+                    ),
+                }
+            )
+        place_mode = place_segment_modes[-1]
         constrained_place_pose = _current_doll_poses(dolls)[asset_id]
         constrained_place_error = float(
             np.linalg.norm(
@@ -4640,30 +6669,98 @@ def run_curobo_pick_place_smoke(
                 - np.asarray(target_center, dtype=np.float64)
             )
         )
-        constrained_place_tilt = _doll_state_report(dolls)[asset_id][
+        if constrained_place_error > PIPER_CONSTRAINED_PLACE_TOLERANCE_M:
+            constrained_tool_pose = _piper_finger_center_world_pose(
+                active_spec,
+                f"{asset_id}_constrained_place",
+            )
+            constrained_offset = tuple(
+                constrained_place_pose.position[index]
+                - constrained_tool_pose.position[index]
+                for index in range(3)
+            )
+            constrained_correction_goal = PoseSpec(
+                tuple(
+                    planned_place_center[index] - constrained_offset[index]
+                    for index in range(3)
+                ),
+                constrained_tool_pose.quaternion,
+            )
+            plans["place_correction"] = worker.plan_pose(
+                active_robot=active_spec,
+                other_robot=other_spec,
+                current_joint_position=active_robot.get_joint_positions()[:6],
+                other_joint_position=other_robot.get_joint_positions()[:6],
+                world_goal=constrained_correction_goal,
+                doll_poses=_current_doll_poses(dolls),
+                excluded_doll_ids=(asset_id,),
+            )
+            _set_recording_context(
+                episode_recorder,
+                "place",
+                operator=active_spec.name,
+                object_id=asset_id,
+            )
+            executions["place_correction"] = execute_curobo_trajectory(
+                world,
+                active_robot,
+                plans["place_correction"],
+                render=render,
+                episode_recorder=episode_recorder,
+            )
+            constrained_place_pose = _current_doll_poses(dolls)[asset_id]
+            constrained_place_error = float(
+                np.linalg.norm(
+                    np.asarray(
+                        constrained_place_pose.position,
+                        dtype=np.float64,
+                    )
+                    - np.asarray(target_center, dtype=np.float64)
+                )
+            )
+        constrained_place_state = _doll_state_report(dolls)[asset_id]
+        constrained_place_tilt = constrained_place_state[
             "upright_tilt_degrees"
         ]
         if (
             constrained_place_tilt
-            > PIPER_TRANSPORT_UPRIGHT_TOLERANCE_DEGREES
+            > PIPER_POST_GRASP_UPRIGHT_TOLERANCE_DEGREES
         ):
             raise RuntimeError(
                 f"{asset_id}: constrained place tilt is "
                 f"{constrained_place_tilt:.6f} degrees"
             )
-        if constrained_place_error > 0.015:
+        if constrained_place_error > PIPER_CONSTRAINED_PLACE_TOLERANCE_M:
             raise RuntimeError(
                 f"{asset_id}: constrained placement error is "
                 f"{constrained_place_error:.6f} m"
             )
-
-        release_gripper_position = min(
-            PIPER_OPEN_GRIPPER_POSITION,
-            doll_spec.footprint_radius + PICK_RELEASE_FINGER_MARGIN_M,
+        constrained_bottom_error = abs(
+            constrained_place_state["estimated_bottom_z_m"] - TABLE_TOP_Z
         )
+        if constrained_bottom_error > PIPER_CONSTRAINED_PLACE_TOLERANCE_M:
+            raise RuntimeError(
+                f"{asset_id}: constrained placement bottom is "
+                f"{constrained_bottom_error:.6f} m from the tabletop"
+            )
+        print(
+            "CUROBO_RELEASE_STATE "
+            f"asset={asset_id} stage=constrained "
+            f"position={constrained_place_pose.position} "
+            f"error_m={constrained_place_error:.6f} "
+            f"tilt_deg={constrained_place_tilt:.6f} "
+            f"bottom_error_m={constrained_bottom_error:.6f}",
+            flush=True,
+        )
+
+        # Fully clear both fingers while the fixed grasp holds the doll upright
+        # at the small planning standoff.  After detachment, full PhysX
+        # geometry settles onto the tabletop and remains in the collision
+        # world for retreat planning.
+        release_gripper_position = PIPER_OPEN_GRIPPER_POSITION
         _set_recording_context(
             episode_recorder,
-            "partial_open",
+            "open_for_release",
             operator=active_spec.name,
             object_id=asset_id,
         )
@@ -4690,7 +6787,8 @@ def run_curobo_pick_place_smoke(
             <= PIPER_GRIPPER_TOLERANCE_M,
             maximum_steps=240,
             description=(
-                f"{active_spec.name} Piper gripper to clear the placed doll"
+                f"{active_spec.name} Piper gripper to fully clear the "
+                "placed doll"
             ),
             render=render,
             episode_recorder=episode_recorder,
@@ -4744,41 +6842,166 @@ def run_curobo_pick_place_smoke(
                         render and step == PICK_RELEASE_SETTLE_STEPS - 1
                     )
                 )
+        detached_state = _doll_state_report(dolls)[asset_id]
+        print(
+            "CUROBO_RELEASE_STATE "
+            f"asset={asset_id} stage=detached_settle "
+            f"position={tuple(detached_state['position_m'])} "
+            f"tilt_deg={detached_state['upright_tilt_degrees']:.6f}",
+            flush=True,
+        )
 
-        released_tool_position, released_tool_quaternion = _xform_world_pose(
-            f"{active_spec.prim_path}/{PIPER_TOOL_REL_PATH}",
-            f"{active_spec.name}_{asset_id}_pick_released_tool",
+        released_tool_pose = _piper_finger_center_world_pose(
+            active_spec,
+            f"{asset_id}_pick_released",
         )
-        retreat_goal = PoseSpec(
-            (
-                released_tool_position[0],
-                released_tool_position[1],
-                released_tool_position[2] + PIPER_RETREAT_CLEARANCE_M,
-            ),
-            tuple(released_tool_quaternion),
+        post_axis_retreat_state = detached_state
+        post_axis_retreat_error = float(
+            np.linalg.norm(
+                np.asarray(detached_state["position_m"], dtype=np.float64)
+                - np.asarray(target_center, dtype=np.float64)
+            )
         )
-        plans["retreat"] = worker.plan_pose(
-            active_robot=active_spec,
-            other_robot=other_spec,
-            current_joint_position=active_robot.get_joint_positions()[:6],
-            other_joint_position=other_robot.get_joint_positions()[:6],
-            world_goal=retreat_goal,
-            doll_poses=_current_doll_poses(dolls),
-            excluded_doll_ids=(asset_id,),
+        for axis_step, clearance_m in enumerate(
+            PIPER_RELEASE_AXIS_CLEARANCES_M,
+            start=1,
+        ):
+            plan_key = f"release_axis_retreat_{axis_step}"
+            plans[plan_key] = worker.plan_pose(
+                active_robot=active_spec,
+                other_robot=other_spec,
+                current_joint_position=active_robot.get_joint_positions()[:6],
+                other_joint_position=other_robot.get_joint_positions()[:6],
+                world_goal=piper_axis_approach_pose(
+                    released_tool_pose,
+                    clearance_m,
+                ),
+                doll_poses=_current_doll_poses(dolls),
+            )
+            _set_recording_context(
+                episode_recorder,
+                "retreat",
+                operator=active_spec.name,
+                object_id=asset_id,
+            )
+            executions[plan_key] = execute_curobo_trajectory(
+                world,
+                active_robot,
+                plans[plan_key],
+                render=render,
+                episode_recorder=episode_recorder,
+            )
+            post_axis_retreat_state = _doll_state_report(dolls)[asset_id]
+            post_axis_retreat_error = float(
+                np.linalg.norm(
+                    np.asarray(
+                        post_axis_retreat_state["position_m"],
+                        dtype=np.float64,
+                    )
+                    - np.asarray(target_center, dtype=np.float64)
+                )
+            )
+            print(
+                "CUROBO_RELEASE_STATE "
+                f"asset={asset_id} "
+                f"stage=axis_retreat_{axis_step} "
+                f"clearance_m={clearance_m:.3f} "
+                f"error_m={post_axis_retreat_error:.6f} "
+                f"tilt_deg="
+                f"{post_axis_retreat_state['upright_tilt_degrees']:.6f}",
+                flush=True,
+            )
+            if (
+                post_axis_retreat_state["upright_tilt_degrees"]
+                > PIPER_POST_GRASP_UPRIGHT_TOLERANCE_DEGREES
+                or post_axis_retreat_error
+                > PIPER_CONSTRAINED_PLACE_TOLERANCE_M
+            ):
+                raise RuntimeError(
+                    f"{asset_id}: placed doll moved during axis retreat "
+                    f"step {axis_step}; error="
+                    f"{post_axis_retreat_error:.6f} m, tilt="
+                    f"{post_axis_retreat_state['upright_tilt_degrees']:.6f} "
+                    "degrees"
+                )
+
+        post_axis_retreat_clearance = piper_post_axis_retreat_clearance(
+            doll_spec
         )
-        _set_recording_context(
-            episode_recorder,
-            "retreat",
-            operator=active_spec.name,
-            object_id=asset_id,
+        if post_axis_retreat_clearance > 0.0:
+            released_tool_pose = _piper_finger_center_world_pose(
+                active_spec,
+                f"{asset_id}_axis_retreated",
+            )
+            released_tool_position = released_tool_pose.position
+            released_tool_quaternion = released_tool_pose.quaternion
+            retreat_goal = PoseSpec(
+                (
+                    released_tool_position[0],
+                    released_tool_position[1],
+                    released_tool_position[2]
+                    + post_axis_retreat_clearance,
+                ),
+                tuple(released_tool_quaternion),
+            )
+            plans["retreat"] = worker.plan_pose(
+                active_robot=active_spec,
+                other_robot=other_spec,
+                current_joint_position=active_robot.get_joint_positions()[:6],
+                other_joint_position=other_robot.get_joint_positions()[:6],
+                world_goal=retreat_goal,
+                doll_poses=_current_doll_poses(dolls),
+            )
+            _set_recording_context(
+                episode_recorder,
+                "retreat",
+                operator=active_spec.name,
+                object_id=asset_id,
+            )
+            executions["retreat"] = execute_curobo_trajectory(
+                world,
+                active_robot,
+                plans["retreat"],
+                render=render,
+                episode_recorder=episode_recorder,
+            )
+        else:
+            plans["retreat"] = {
+                "skipped": True,
+                "reason": "large_doll_axis_retreat_already_clears_fingers",
+                "success": True,
+            }
+        post_retreat_state = _doll_state_report(dolls)[asset_id]
+        post_retreat_error = float(
+            np.linalg.norm(
+                np.asarray(
+                    post_retreat_state["position_m"],
+                    dtype=np.float64,
+                )
+                - np.asarray(target_center, dtype=np.float64)
+            )
         )
-        executions["retreat"] = execute_curobo_trajectory(
-            world,
-            active_robot,
-            plans["retreat"],
-            render=render,
-            episode_recorder=episode_recorder,
+        print(
+            "CUROBO_RELEASE_STATE "
+            f"asset={asset_id} stage=post_retreat "
+            f"extra_clearance_m={post_axis_retreat_clearance:.3f} "
+            f"position={tuple(post_retreat_state['position_m'])} "
+            f"error_m={post_retreat_error:.6f} "
+            f"tilt_deg="
+            f"{post_retreat_state['upright_tilt_degrees']:.6f}",
+            flush=True,
         )
+        if (
+            post_retreat_state["upright_tilt_degrees"]
+            > PIPER_POST_GRASP_UPRIGHT_TOLERANCE_DEGREES
+            or post_retreat_error > PIPER_CONSTRAINED_PLACE_TOLERANCE_M
+        ):
+            raise RuntimeError(
+                f"{asset_id}: placed doll moved during collision-aware "
+                f"retreat; error={post_retreat_error:.6f} m, "
+                "tilt="
+                f"{post_retreat_state['upright_tilt_degrees']:.6f} degrees"
+            )
         _set_recording_context(
             episode_recorder,
             "open_gripper",
@@ -4834,6 +7057,32 @@ def run_curobo_pick_place_smoke(
             render=render,
             episode_recorder=episode_recorder,
         )
+        post_home_state = _doll_state_report(dolls)[asset_id]
+        post_home_error = float(
+            np.linalg.norm(
+                np.asarray(post_home_state["position_m"], dtype=np.float64)
+                - np.asarray(target_center, dtype=np.float64)
+            )
+        )
+        print(
+            "CUROBO_RELEASE_STATE "
+            f"asset={asset_id} stage=post_home "
+            f"position={tuple(post_home_state['position_m'])} "
+            f"error_m={post_home_error:.6f} "
+            f"tilt_deg={post_home_state['upright_tilt_degrees']:.6f}",
+            flush=True,
+        )
+        if (
+            post_home_state["upright_tilt_degrees"]
+            > PIPER_POST_GRASP_UPRIGHT_TOLERANCE_DEGREES
+            or post_home_error > PIPER_CONSTRAINED_PLACE_TOLERANCE_M
+        ):
+            raise RuntimeError(
+                f"{asset_id}: placed doll moved during home motion; "
+                f"error={post_home_error:.6f} m, "
+                f"tilt={post_home_state['upright_tilt_degrees']:.6f} "
+                "degrees"
+            )
         worker_diagnostics = list(worker.diagnostic_lines)
 
     _set_recording_context(
@@ -4869,32 +7118,80 @@ def run_curobo_pick_place_smoke(
         "planner_seed": planner_seed,
         "initial_doll_pose": asdict(initial_doll_pose),
         "target_center_m": list(target_center),
+        "planned_place_center_m": list(planned_place_center),
         "grasp": {
             "finger_center_m": list(finger_center),
             "contact_point_m": list(closed_contact_point),
             "contact_height_above_center_m": grasp_contact_height,
+            "terminal_axis_clearance_m": terminal_grasp_clearance,
+            "initial_approach_center_error_m": (
+                initial_approach_center_error
+            ),
+            "approach_center_error_m": approach_center_error,
             "center_error_m": grasp_center_error,
+            "lateral_center_error_m": lateral_center_error,
+            "axial_center_error_m": axial_center_error,
+            "closed_doll_displacement_m": closed_doll_displacement,
+            "closed_doll_tilt_degrees": closed_tilt,
             "closed_finger_separation_m": closed_separation,
+            "attachment_gate": attachment_gate,
             "fixed_joint": grasp_joint,
             "curobo_attachment": attachment,
         },
         "transport": {
             "lifted_distance_m": lifted_distance,
             "lift_mode": lift_mode,
+            "lifted_tilt_before_upright_correction_degrees": (
+                lifted_tilt_before_upright
+            ),
             "lifted_upright_tilt_degrees": lifted_tilt,
+            "upright_correction_center_drift_m": upright_center_drift,
+            "upright_correction_deferred_to_preplace": (
+                upright_correction_deferred_to_preplace
+            ),
+            "upright_correction_yaw_offset_rad": (
+                selected_upright_yaw_offset
+            ),
             "attached_tool_to_object_world_offset_m": list(attached_offset),
             "preplace_mode": preplace_mode,
             "preplace_center_error_m": preplace_center_error,
+            "preplace_tilt_before_upright_correction_degrees": (
+                preplace_tilt_before_upright
+            ),
             "preplace_upright_tilt_degrees": preplace_tilt,
+            "preplace_upright_correction_center_drift_m": (
+                preplace_upright_center_drift
+            ),
         },
         "release": {
+            "planned_support_clearance_m": (
+                PIPER_PLANNED_PLACE_SUPPORT_CLEARANCE_M
+            ),
             "table_release_gripper_position_m": release_gripper_position,
             "table_release_steps": table_release_steps,
             "full_open_after_retreat_steps": full_open_steps,
             "place_mode": place_mode,
+            "place_segment_modes": place_segment_modes,
+            "place_segment_states": place_segment_states,
+            "post_axis_extra_retreat_clearance_m": (
+                post_axis_retreat_clearance
+            ),
             "constrained_place_error_m": constrained_place_error,
             "constrained_place_upright_tilt_degrees": (
                 constrained_place_tilt
+            ),
+            "constrained_place_bottom_error_m": constrained_bottom_error,
+            "post_axis_retreat_error_m": post_axis_retreat_error,
+            "post_axis_retreat_upright_tilt_degrees": (
+                post_axis_retreat_state["upright_tilt_degrees"]
+            ),
+            "post_retreat_error_m": post_retreat_error,
+            "post_retreat_upright_tilt_degrees": (
+                post_retreat_state["upright_tilt_degrees"]
+            ),
+            "post_home_error_m": post_home_error,
+            "post_home_upright_tilt_degrees": (
+                post_home_state["upright_tilt_degrees"]
             ),
             "final_place_error_m": final_position_error,
             "final_doll_state": final_doll_state,
@@ -5035,7 +7332,7 @@ def run_full_curobo_sort(
     # Clear objects initially adjacent to future target slots before filling
     # those slots.  This leaves physical finger clearance that is not captured
     # fully by the conservative planning spheres.
-    pick_order = ("00004", "00003", "00002", "00000", "00001")
+    pick_order = MATRYOSHKA_PICK_ORDER
     operations: list[dict[str, Any]] = []
     placed_asset_ids: list[str] = []
     for operation_index, asset_id in enumerate(pick_order, start=1):
@@ -7063,6 +9360,43 @@ def run_hdf5_replay_worker(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def validate_episode_worker_completion(
+    *,
+    mode: str,
+    return_code: int,
+    success_marker_seen: bool,
+    log_path: Path,
+    tail: Sequence[str],
+) -> str:
+    """Require both a clean exit and the mode-specific logical success marker."""
+
+    try:
+        expected_marker = EPISODE_WORKER_SUCCESS_MARKERS[mode]
+    except KeyError as error:
+        raise ValueError(f"Unsupported episode worker mode {mode!r}") from error
+    if return_code != 0:
+        raise RuntimeError(
+            f"{mode} failed with exit code {return_code}; "
+            f"required_marker={expected_marker}; log={log_path}; "
+            f"tail={list(tail[-20:])}"
+        )
+    if not success_marker_seen:
+        error_lines = [
+            line
+            for line in tail
+            if any(
+                token in line
+                for token in ("Traceback", "RuntimeError", "Error", "ERROR")
+            )
+        ]
+        raise RuntimeError(
+            f"{mode} exited with code 0 without required success marker "
+            f"{expected_marker}; log={log_path}; "
+            f"error_tail={error_lines[-5:]}; tail={list(tail[-20:])}"
+        )
+    return expected_marker
+
+
 def _run_episode_worker_process(
     args: argparse.Namespace,
     *,
@@ -7073,6 +9407,10 @@ def _run_episode_worker_process(
 ) -> dict[str, Any]:
     """Run one Isaac worker in a clean process and stream concise progress."""
 
+    try:
+        expected_success_marker = EPISODE_WORKER_SUCCESS_MARKERS[mode]
+    except KeyError as error:
+        raise ValueError(f"Unsupported episode worker mode {mode!r}") from error
     command = [
         sys.executable,
         str(Path(__file__).resolve()),
@@ -7111,6 +9449,7 @@ def _run_episode_worker_process(
         "HDF5_ACTION_REPLAY_OK",
     )
     timed_out = False
+    success_marker_seen = False
     with log_path.open("w", encoding="utf-8") as log_file:
         try:
             while True:
@@ -7127,6 +9466,8 @@ def _run_episode_worker_process(
                         stripped = line.rstrip()
                         tail.append(stripped)
                         del tail[:-80]
+                        if stripped == expected_success_marker:
+                            success_marker_seen = True
                         if stripped.startswith(progress_prefixes):
                             print(stripped, flush=True)
                     elif process.poll() is not None:
@@ -7138,6 +9479,8 @@ def _run_episode_worker_process(
                         for line in remainder.splitlines():
                             tail.append(line)
                             del tail[:-80]
+                            if line.rstrip() == expected_success_marker:
+                                success_marker_seen = True
                     break
         finally:
             selector.close()
@@ -7152,14 +9495,17 @@ def _run_episode_worker_process(
             f"log={log_path}"
         )
     return_code = process.wait()
-    if return_code != 0:
-        raise RuntimeError(
-            f"{mode} failed with exit code {return_code}; "
-            f"log={log_path}; tail={tail[-20:]}"
-        )
+    validated_marker = validate_episode_worker_completion(
+        mode=mode,
+        return_code=return_code,
+        success_marker_seen=success_marker_seen,
+        log_path=log_path,
+        tail=tail,
+    )
     return {
         "mode": mode,
         "return_code": return_code,
+        "success_marker": validated_marker,
         "duration_s": time.monotonic() - start_time,
         "log_path": str(log_path.resolve()),
     }

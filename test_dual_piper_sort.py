@@ -206,6 +206,469 @@ class StaticAssetAndConstantTests(unittest.TestCase):
             subject.CUROBO_ATTACHED_OBJECT_LINK,
             config["collision_link_names"],
         )
+        self.assertEqual(config["tool_frames"], [subject.PIPER_TOOL_LINK])
+        finger_center = config["extra_links"][subject.PIPER_TOOL_LINK]
+        self.assertEqual(
+            finger_center["parent_link_name"],
+            subject.PIPER_URDF_TOOL_LINK,
+        )
+        self.assertEqual(
+            finger_center["fixed_transform"][:3],
+            list(subject.PIPER_FINGER_CENTER_OFFSET_IN_TOOL_M),
+        )
+        self.assertEqual(
+            config["extra_links"][subject.CUROBO_ATTACHED_OBJECT_LINK][
+                "parent_link_name"
+            ],
+            subject.PIPER_TOOL_LINK,
+        )
+        self.assertGreater(
+            subject.CUROBO_ATTACHED_OBJECT_INSET_M,
+            subject.CUROBO_COLLISION_ACTIVATION_DISTANCE_M,
+        )
+        self.assertGreater(
+            subject.CUROBO_CURRENT_STATE_LIMIT_MARGIN_RAD,
+            0.0,
+        )
+        self.assertLess(
+            subject.CUROBO_CURRENT_STATE_LIMIT_MARGIN_RAD,
+            subject.CUROBO_MAX_CURRENT_STATE_PROJECTION_RAD,
+        )
+        self.assertGreaterEqual(
+            subject.CUROBO_ATTACHED_OBJECT_INSET_M
+            - subject.CUROBO_COLLISION_ACTIVATION_DISTANCE_M
+            + 1.0e-12,
+            subject.PIPER_CONSTRAINED_PLACE_TOLERANCE_M,
+        )
+        self.assertGreater(
+            subject.PIPER_PLANNED_PLACE_SUPPORT_CLEARANCE_M,
+            0.0,
+        )
+        self.assertLess(
+            subject.PIPER_PLANNED_PLACE_SUPPORT_CLEARANCE_M,
+            subject.PIPER_CONSTRAINED_PLACE_TOLERANCE_M,
+        )
+        self.assertEqual(
+            subject.piper_planned_place_center((1.0, 2.0, 3.0)),
+            (
+                1.0,
+                2.0,
+                3.0 + subject.PIPER_PLANNED_PLACE_SUPPORT_CLEARANCE_M,
+            ),
+        )
+        self.assertEqual(
+            subject.PIPER_PLACE_APPROACH_CLEARANCES_M[-1],
+            subject.PIPER_PLANNED_PLACE_SUPPORT_CLEARANCE_M,
+        )
+        self.assertTrue(
+            all(
+                first > second
+                for first, second in zip(
+                    subject.PIPER_PLACE_APPROACH_CLEARANCES_M,
+                    subject.PIPER_PLACE_APPROACH_CLEARANCES_M[1:],
+                )
+            )
+        )
+
+    def test_physical_finger_center_uses_negative_tool_x_offset(self) -> None:
+        tool_pose = subject.PoseSpec(
+            (1.0, 2.0, 3.0),
+            subject.IDENTITY_QUATERNION,
+        )
+        finger_pose = subject.piper_finger_center_pose(tool_pose)
+        self.assertEqual(
+            finger_pose.position,
+            (
+                1.0 + subject.PIPER_FINGER_CENTER_BELOW_TOOL_M,
+                2.0,
+                3.0,
+            ),
+        )
+        self.assertLess(subject.PIPER_FINGER_CENTER_BELOW_TOOL_M, 0.0)
+
+    def test_grasp_approach_follows_the_selected_tool_axis(self) -> None:
+        self.assertEqual(
+            subject.PIPER_PREGRASP_CLEARANCE_CANDIDATES_M[0],
+            subject.PIPER_PREGRASP_CLEARANCE_M,
+        )
+        self.assertTrue(
+            all(
+                clearance > subject.PIPER_NEAR_GRASP_CLEARANCE_M
+                for clearance in (
+                    subject.PIPER_PREGRASP_CLEARANCE_CANDIDATES_M
+                )
+            )
+        )
+        self.assertEqual(
+            subject.PIPER_RELEASE_AXIS_CLEARANCES_M,
+            tuple(sorted(subject.PIPER_RELEASE_AXIS_CLEARANCES_M)),
+        )
+        self.assertGreater(
+            subject.PIPER_RELEASE_AXIS_CLEARANCES_M[-1],
+            subject.PIPER_NEAR_GRASP_CLEARANCE_M,
+        )
+        self.assertEqual(
+            subject.PIPER_FINAL_APPROACH_CLEARANCES_M,
+            tuple(
+                sorted(
+                    subject.PIPER_FINAL_APPROACH_CLEARANCES_M,
+                    reverse=True,
+                )
+            ),
+        )
+        self.assertLess(
+            subject.PIPER_FINAL_APPROACH_CLEARANCES_M[0],
+            subject.PIPER_NEAR_GRASP_CLEARANCE_M,
+        )
+        self.assertEqual(
+            subject.PIPER_FINAL_APPROACH_CLEARANCES_M[-1],
+            0.0,
+        )
+        self.assertGreaterEqual(
+            subject.PIPER_GRASP_MIN_DOWNWARD_AXIS_COMPONENT,
+            0.45,
+        )
+        grasp_pose = subject.PoseSpec(
+            (0.2, -0.1, 0.8),
+            subject.normalize_quaternion((0.5, 0.5, 0.5, -0.5)),
+        )
+        pregrasp = subject.piper_axis_approach_pose(grasp_pose, 0.11)
+        axis = subject._quaternion_rotate_vector(
+            grasp_pose.quaternion,
+            (1.0, 0.0, 0.0),
+        )
+        expected = tuple(
+            grasp_pose.position[index] - 0.11 * axis[index]
+            for index in range(3)
+        )
+        for actual, wanted in zip(pregrasp.position, expected):
+            self.assertAlmostEqual(actual, wanted)
+        self.assertEqual(pregrasp.quaternion, grasp_pose.quaternion)
+        with self.assertRaisesRegex(ValueError, "cannot be negative"):
+            subject.piper_axis_approach_pose(grasp_pose, -0.01)
+
+    def test_largest_doll_uses_a_higher_narrower_grasp_band(self) -> None:
+        specs = {
+            spec.asset_id: spec for spec in subject.get_doll_specs()
+        }
+        largest = specs["00000"]
+        next_largest = specs["00001"]
+        self.assertGreaterEqual(
+            2.0 * largest.footprint_radius,
+            subject.PIPER_LARGE_DOLL_DIAMETER_THRESHOLD_M,
+        )
+        self.assertLess(
+            2.0 * next_largest.footprint_radius,
+            subject.PIPER_LARGE_DOLL_DIAMETER_THRESHOLD_M,
+        )
+        self.assertAlmostEqual(
+            subject.piper_grasp_contact_height(largest),
+            0.085,
+        )
+        self.assertAlmostEqual(
+            subject.piper_grasp_contact_height(next_largest),
+            subject.PIPER_NOMINAL_GRASP_HEIGHT_M,
+        )
+        self.assertLessEqual(
+            subject.piper_grasp_contact_height(largest),
+            0.5 * largest.height
+            + subject.PIPER_LARGE_DOLL_CENTER_ABOVE_TOP_M,
+        )
+        self.assertLess(
+            subject.PIPER_APPROACH_MAX_DOLL_DISPLACEMENT_M,
+            subject.PIPER_GRASP_CENTER_TOLERANCE_M,
+        )
+        largest_search = subject.piper_grasp_search_parameters(largest)
+        regular_search = subject.piper_grasp_search_parameters(next_largest)
+        self.assertEqual(
+            largest_search,
+            (
+                subject.PIPER_LARGE_DOLL_MIN_DOWNWARD_AXIS_COMPONENT,
+                subject.PIPER_LARGE_DOLL_GRASP_SEED_CANDIDATES,
+            ),
+        )
+        self.assertEqual(
+            regular_search,
+            (
+                subject.PIPER_GRASP_MIN_DOWNWARD_AXIS_COMPONENT,
+                subject.PIPER_GRASP_SEED_CANDIDATES,
+            ),
+        )
+        self.assertGreaterEqual(largest_search[0], 0.75)
+        self.assertGreater(largest_search[1], regular_search[1])
+        self.assertLessEqual(
+            subject.PIPER_LARGE_DOLL_MAX_CLOSING_AXIS_WORLD_Z,
+            0.10,
+        )
+        self.assertLessEqual(
+            subject.PIPER_REGULAR_DOLL_MAX_CLOSING_AXIS_WORLD_Z,
+            0.50,
+        )
+        self.assertEqual(
+            subject.piper_final_approach_clearances(largest),
+            subject.PIPER_LARGE_DOLL_FINAL_APPROACH_CLEARANCES_M,
+        )
+        self.assertEqual(
+            subject.piper_final_approach_clearances(next_largest),
+            subject.PIPER_FINAL_APPROACH_CLEARANCES_M,
+        )
+        self.assertEqual(
+            subject.piper_preplace_clearance(largest),
+            subject.PIPER_LARGE_DOLL_PREPLACE_CLEARANCE_M,
+        )
+        self.assertEqual(
+            subject.piper_preplace_clearance(next_largest),
+            subject.PIPER_PREPLACE_CLEARANCE_M,
+        )
+        self.assertEqual(
+            subject.piper_post_axis_retreat_clearance(largest),
+            subject.PIPER_LARGE_DOLL_RETREAT_CLEARANCE_M,
+        )
+        self.assertEqual(
+            subject.piper_post_axis_retreat_clearance(next_largest),
+            subject.PIPER_RETREAT_CLEARANCE_M,
+        )
+        self.assertEqual(
+            subject.PIPER_LARGE_DOLL_RETREAT_CLEARANCE_M,
+            0.0,
+        )
+        self.assertLess(
+            subject.PIPER_LARGE_DOLL_PREPLACE_CLEARANCE_M,
+            subject.PIPER_PREPLACE_CLEARANCE_M,
+        )
+        self.assertEqual(
+            subject.PIPER_LARGE_DOLL_PREPLACE_CLEARANCE_M,
+            0.050,
+        )
+        self.assertIn(0.0, subject.PIPER_UPRIGHT_YAW_OFFSETS_RAD)
+        self.assertEqual(
+            subject.PIPER_LARGE_DOLL_FINAL_APPROACH_CLEARANCES_M[-1],
+            0.015,
+        )
+        self.assertEqual(
+            subject.MATRYOSHKA_PICK_ORDER,
+            subject.MATRYOSHKA_SORT_ORDER,
+        )
+
+    def test_wrist_roll_makes_gripper_closing_axis_horizontal(self) -> None:
+        original = subject.normalize_quaternion(
+            (0.6594063368, -0.1017578369, 0.4849352900, 0.5653904758)
+        )
+        original_x = subject._quaternion_rotate_vector(
+            original,
+            (1.0, 0.0, 0.0),
+        )
+        original_y = subject._quaternion_rotate_vector(
+            original,
+            (0.0, 1.0, 0.0),
+        )
+        self.assertGreater(abs(original_y[2]), 0.1)
+        candidates = (
+            subject.piper_horizontal_closing_orientation_candidates(
+                original
+            )
+        )
+        self.assertEqual(len(candidates), 2)
+        for candidate, _ in candidates:
+            candidate_x = subject._quaternion_rotate_vector(
+                candidate,
+                (1.0, 0.0, 0.0),
+            )
+            candidate_y = subject._quaternion_rotate_vector(
+                candidate,
+                (0.0, 1.0, 0.0),
+            )
+            for actual, expected in zip(candidate_x, original_x):
+                self.assertAlmostEqual(actual, expected)
+            self.assertAlmostEqual(candidate_y[2], 0.0)
+
+    def test_attached_object_tilt_ignores_yaw_but_detects_roll(self) -> None:
+        yaw = 1.1
+        yaw_orientation = (
+            math.cos(0.5 * yaw),
+            0.0,
+            0.0,
+            math.sin(0.5 * yaw),
+        )
+        self.assertAlmostEqual(
+            subject.attached_object_upright_tilt_degrees(
+                yaw_orientation,
+                subject.IDENTITY_QUATERNION,
+            ),
+            0.0,
+        )
+        roll = math.radians(3.0)
+        self.assertAlmostEqual(
+            subject.attached_object_upright_tilt_degrees(
+                yaw_orientation,
+                (
+                    math.cos(0.5 * roll),
+                    math.sin(0.5 * roll),
+                    0.0,
+                    0.0,
+                ),
+            ),
+            3.0,
+        )
+        self.assertLess(
+            subject.PIPER_PLANNED_UPRIGHT_TOLERANCE_DEGREES,
+            subject.PIPER_POST_GRASP_UPRIGHT_TOLERANCE_DEGREES,
+        )
+        self.assertLess(
+            subject.PIPER_POST_GRASP_UPRIGHT_TOLERANCE_DEGREES,
+            subject.PIPER_TRANSPORT_UPRIGHT_TOLERANCE_DEGREES,
+        )
+
+    def test_post_grasp_pose_rotates_object_upright_about_its_center(
+        self,
+    ) -> None:
+        yaw = 0.7
+        roll = 0.35
+        object_orientation = subject.quaternion_multiply(
+            (math.cos(yaw / 2.0), 0.0, 0.0, math.sin(yaw / 2.0)),
+            (math.cos(roll / 2.0), math.sin(roll / 2.0), 0.0, 0.0),
+        )
+        tool_pose = subject.PoseSpec(
+            (0.18, -0.12, 0.95),
+            subject.normalize_quaternion((0.63, -0.31, 0.42, 0.57)),
+        )
+        object_pose = subject.PoseSpec(
+            (0.13, -0.08, 0.91),
+            object_orientation,
+        )
+        tool_to_object = subject.pose_relative_to(tool_pose, object_pose)
+        desired_object_orientation = subject.upright_yaw_quaternion(
+            object_pose.quaternion
+        )
+        desired_object_pose = subject.PoseSpec(
+            (0.03, -0.22, 0.92),
+            desired_object_orientation,
+        )
+        corrected_tool = subject.tool_pose_for_attached_object_pose(
+            tool_pose,
+            object_pose,
+            desired_object_pose,
+        )
+        reconstructed_position = tuple(
+            corrected_tool.position[index] + rotated_offset
+            for index, rotated_offset in enumerate(
+                subject._quaternion_rotate_vector(
+                    corrected_tool.quaternion,
+                    tool_to_object.position,
+                )
+            )
+        )
+        reconstructed_orientation = subject.quaternion_multiply(
+            corrected_tool.quaternion,
+            tool_to_object.quaternion,
+        )
+        for actual, wanted in zip(
+            reconstructed_position,
+            desired_object_pose.position,
+        ):
+            self.assertAlmostEqual(actual, wanted)
+        self.assertAlmostEqual(
+            subject.quaternion_angular_error(
+                reconstructed_orientation,
+                desired_object_orientation,
+            ),
+            0.0,
+            places=7,
+        )
+        upright_axis = subject._quaternion_rotate_vector(
+            reconstructed_orientation,
+            (0.0, 0.0, 1.0),
+        )
+        self.assertAlmostEqual(upright_axis[2], 1.0)
+
+    def test_attachment_gate_rejects_the_recorded_air_grasp(self) -> None:
+        self.assertLess(
+            subject.PIPER_GRASP_CORRECTION_TRIGGER_M,
+            subject.PIPER_GRASP_CENTER_TOLERANCE_M,
+        )
+        self.assertLessEqual(
+            subject.CUROBO_FINAL_EXECUTION_TOLERANCE_RAD,
+            0.01,
+        )
+        self.assertLessEqual(
+            subject.CUROBO_GRASP_EXECUTION_TOLERANCE_RAD,
+            0.003,
+        )
+        self.assertGreater(
+            subject.CUROBO_GRASP_SETTLE_MAX_CONTROL_FRAMES,
+            subject.CUROBO_FINAL_SETTLE_MAX_CONTROL_FRAMES,
+        )
+        self.assertLess(
+            subject.PIPER_NEAR_GRASP_ALIGNMENT_TOLERANCE_M,
+            subject.PIPER_GRASP_CENTER_TOLERANCE_M,
+        )
+        self.assertLessEqual(
+            subject.CUROBO_MAX_EXECUTION_ERROR_RAD,
+            0.08,
+        )
+        smallest = next(
+            spec
+            for spec in subject.get_doll_specs()
+            if spec.asset_id == "00004"
+        )
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "physical finger centre missed",
+        ):
+            subject.validate_grasp_before_attach(
+                smallest,
+                center_error_m=0.030085769554170385,
+                finger_separation_m=4.1439720045352594e-05,
+            )
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "without trapping the doll",
+        ):
+            subject.validate_grasp_before_attach(
+                smallest,
+                center_error_m=0.001,
+                finger_separation_m=4.1439720045352594e-05,
+            )
+        gate = subject.validate_grasp_before_attach(
+            smallest,
+            center_error_m=0.001,
+            finger_separation_m=0.012,
+        )
+        self.assertGreater(
+            gate["minimum_captured_separation_m"],
+            subject.PIPER_GRASP_MIN_SEPARATION_M,
+        )
+        medium = next(
+            spec
+            for spec in subject.get_doll_specs()
+            if spec.asset_id == "00002"
+        )
+        medium_gate = subject.validate_grasp_before_attach(
+            medium,
+            center_error_m=0.011135,
+            axial_center_error_m=0.020,
+            finger_separation_m=0.04,
+        )
+        self.assertGreater(
+            medium_gate["center_tolerance_m"],
+            subject.PIPER_GRASP_CENTER_TOLERANCE_M,
+        )
+        self.assertLessEqual(
+            medium_gate["center_tolerance_m"],
+            subject.PIPER_GRASP_MAX_CENTER_TOLERANCE_M,
+        )
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "outside the effective finger length",
+        ):
+            subject.validate_grasp_before_attach(
+                medium,
+                center_error_m=0.001,
+                axial_center_error_m=(
+                    subject.PIPER_GRASP_MAX_AXIAL_ERROR_M + 0.001
+                ),
+                finger_separation_m=0.04,
+            )
 
     def test_dual_arm_assignment_and_sorted_state_contract(self) -> None:
         layout = subject.sample_initial_doll_layout(20260730)
@@ -399,6 +862,43 @@ class StaticAssetAndConstantTests(unittest.TestCase):
             self.assertEqual(
                 rejected["failure_reason"],
                 "intentional rejection test",
+            )
+
+    def test_episode_workers_require_mode_specific_success_markers(
+        self,
+    ) -> None:
+        log_path = Path("/tmp/episode-worker-test.log")
+        for mode, marker in (
+            subject.EPISODE_WORKER_SUCCESS_MARKERS.items()
+        ):
+            self.assertEqual(
+                subject.validate_episode_worker_completion(
+                    mode=mode,
+                    return_code=0,
+                    success_marker_seen=True,
+                    log_path=log_path,
+                    tail=(marker,),
+                ),
+                marker,
+            )
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "without required success marker",
+            ):
+                subject.validate_episode_worker_completion(
+                    mode=mode,
+                    return_code=0,
+                    success_marker_seen=False,
+                    log_path=log_path,
+                    tail=("RuntimeError: simulated worker failure",),
+                )
+        with self.assertRaisesRegex(RuntimeError, "exit code -11"):
+            subject.validate_episode_worker_completion(
+                mode="collect-worker",
+                return_code=-11,
+                success_marker_seen=False,
+                log_path=log_path,
+                tail=("Isaac Sim shutdown crash",),
             )
 
     def test_task_uses_only_the_two_allowed_python_files(self) -> None:
