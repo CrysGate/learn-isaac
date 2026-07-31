@@ -79,3 +79,14 @@ export LD_LIBRARY_PATH=$LD_LIBRARY_PATH:/path/to/isaacsim/exts/isaacsim.ros2.bri
 enable the ROS 2 Bridge Extension
 
 Tools -> Robotics -> ROS 2 OmniGraphs -> Clock
+
+## script to run dual-piper-sort
+```bash
+uv run python dual_piper_sort.py --mode demo --seed 20260731 --planner-seed 1
+uv run python dual_piper_sort.py --mode replay --episode dual_piper_output/episodes/episode_20260730_recording_v1.h5 --headless
+uv run python dual_piper_sort.py --mode validate --episode dual_piper_output/episodes/episode_20260730_recording_v1.h5
+# test:
+uv run python test_dual_piper_sort.py --mode fast
+uv run python test_dual_piper_sort.py --mode integration --headless --episode dual_piper_output/episodes/episode_20260730_recording_v1.h5
+uv run python test_dual_piper_sort.py --mode integration --episode dual_piper_output/episodes/episode_20260730_recording_v1.h5
+```

@@ -347,7 +347,7 @@ class StaticAssetAndConstantTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "cannot be negative"):
             subject.piper_axis_approach_pose(grasp_pose, -0.01)
 
-    def test_largest_doll_uses_a_higher_narrower_grasp_band(self) -> None:
+    def test_largest_doll_uses_a_deeper_grasp_band(self) -> None:
         specs = {
             spec.asset_id: spec for spec in subject.get_doll_specs()
         }
@@ -363,7 +363,7 @@ class StaticAssetAndConstantTests(unittest.TestCase):
         )
         self.assertAlmostEqual(
             subject.piper_grasp_contact_height(largest),
-            0.085,
+            0.065,
         )
         self.assertAlmostEqual(
             subject.piper_grasp_contact_height(next_largest),
@@ -438,12 +438,46 @@ class StaticAssetAndConstantTests(unittest.TestCase):
         )
         self.assertEqual(
             subject.PIPER_LARGE_DOLL_PREPLACE_CLEARANCE_M,
-            0.050,
+            0.040,
+        )
+        self.assertGreater(
+            subject.PIPER_PLACE_CENTER_CORRECTION_MAX_ATTEMPTS,
+            1,
         )
         self.assertIn(0.0, subject.PIPER_UPRIGHT_YAW_OFFSETS_RAD)
         self.assertEqual(
             subject.PIPER_LARGE_DOLL_FINAL_APPROACH_CLEARANCES_M[-1],
-            0.015,
+            0.0,
+        )
+        self.assertEqual(
+            subject.piper_grasp_open_position(largest),
+            subject.PIPER_LARGE_DOLL_OPEN_GRIPPER_POSITION,
+        )
+        self.assertEqual(
+            subject.piper_grasp_open_position(next_largest),
+            subject.PIPER_OPEN_GRIPPER_POSITION,
+        )
+        self.assertGreater(
+            subject.PIPER_LARGE_DOLL_OPEN_GRIPPER_POSITION,
+            subject.PIPER_OPEN_GRIPPER_POSITION,
+        )
+        self.assertEqual(
+            subject.piper_grasp_min_finger_overlap(largest),
+            subject.PIPER_LARGE_DOLL_MIN_FINGER_OVERLAP_M,
+        )
+        self.assertEqual(
+            subject.piper_grasp_min_finger_overlap(next_largest),
+            subject.PIPER_GRASP_MIN_FINGER_OVERLAP_M,
+        )
+        self.assertGreater(
+            subject.PIPER_LARGE_DOLL_MIN_FINGER_OVERLAP_M,
+            subject.PIPER_GRASP_MIN_FINGER_OVERLAP_M,
+        )
+        self.assertGreaterEqual(
+            subject.PIPER_FINGER_FORWARD_REACH_FROM_CENTER_M
+            * subject.PIPER_LARGE_DOLL_MIN_DOWNWARD_AXIS_COMPONENT
+            - subject.PIPER_LARGE_DOLL_CENTER_ABOVE_TOP_M,
+            subject.PIPER_LARGE_DOLL_MIN_FINGER_OVERLAP_M,
         )
         self.assertEqual(
             subject.MATRYOSHKA_PICK_ORDER,
@@ -580,6 +614,84 @@ class StaticAssetAndConstantTests(unittest.TestCase):
             (0.0, 0.0, 1.0),
         )
         self.assertAlmostEqual(upright_axis[2], 1.0)
+
+    def test_preclose_gate_requires_fingers_to_surround_largest_doll(
+        self,
+    ) -> None:
+        largest = next(
+            spec
+            for spec in subject.get_doll_specs()
+            if spec.asset_id == "00000"
+        )
+        downward_component = 0.776741
+        pitch = math.asin(downward_component)
+        grasp_orientation = subject.normalize_quaternion(
+            (math.cos(0.5 * pitch), 0.0, math.sin(0.5 * pitch), 0.0)
+        )
+        doll_pose = subject.PoseSpec((0.0, 0.0, 0.0), (1.0, 0.0, 0.0, 0.0))
+        deep_pose = subject.PoseSpec(
+            (0.0, 0.0, subject.piper_grasp_contact_height(largest)),
+            grasp_orientation,
+        )
+        old_dome_pose = subject.PoseSpec(
+            (
+                0.0,
+                0.0,
+                0.5 * largest.height
+                + 0.020,
+            ),
+            grasp_orientation,
+        )
+        old_overlap = subject.piper_finger_overlap_below_doll_top(
+            largest,
+            old_dome_pose,
+            doll_pose,
+        )
+        deep_overlap = subject.piper_finger_overlap_below_doll_top(
+            largest,
+            deep_pose,
+            doll_pose,
+        )
+        self.assertGreater(old_overlap, subject.PIPER_GRASP_MIN_FINGER_OVERLAP_M)
+        self.assertLess(
+            old_overlap,
+            subject.PIPER_LARGE_DOLL_MIN_FINGER_OVERLAP_M,
+        )
+        self.assertGreaterEqual(
+            deep_overlap,
+            subject.PIPER_LARGE_DOLL_MIN_FINGER_OVERLAP_M,
+        )
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "have not enclosed",
+        ):
+            subject.validate_grasp_before_close(
+                largest,
+                finger_overlap_m=old_overlap,
+                open_finger_separation_m=0.10,
+            )
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "enough clearance to surround",
+        ):
+            subject.validate_grasp_before_close(
+                largest,
+                finger_overlap_m=deep_overlap,
+                open_finger_separation_m=0.08,
+            )
+        gate = subject.validate_grasp_before_close(
+            largest,
+            finger_overlap_m=deep_overlap,
+            open_finger_separation_m=0.10,
+        )
+        self.assertEqual(
+            gate["minimum_finger_overlap_m"],
+            subject.PIPER_LARGE_DOLL_MIN_FINGER_OVERLAP_M,
+        )
+        self.assertGreater(
+            gate["minimum_open_separation_m"],
+            0.08,
+        )
 
     def test_attachment_gate_rejects_the_recorded_air_grasp(self) -> None:
         self.assertLess(

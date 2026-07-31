@@ -272,6 +272,14 @@ PIPER_FINGER_CENTER_OFFSET_IN_TOOL_M: Final = (
     0.0,
     0.0,
 )
+# The collision finger spans tool-local X=-0.076913..+0.000413 m.  Relative
+# to the virtual centre at X=-0.040 m, conservatively treat the forward edge
+# as 40 mm.  A grasp is not physically capturable until that edge has passed
+# the doll's top plane by a useful amount.
+PIPER_FINGER_FORWARD_REACH_FROM_CENTER_M: Final = 0.040
+PIPER_GRASP_MIN_FINGER_OVERLAP_M: Final = 0.010
+PIPER_LARGE_DOLL_MIN_FINGER_OVERLAP_M: Final = 0.025
+PIPER_GRASP_OPEN_DIAMETER_MARGIN_M: Final = 0.010
 PIPER_GRASP_TOOL_HEIGHT_ABOVE_TABLE_M: Final = 0.082
 PIPER_GRASP_CENTER_TOLERANCE_M: Final = 0.008
 PIPER_GRASP_MAX_CENTER_TOLERANCE_M: Final = 0.012
@@ -285,7 +293,8 @@ PIPER_GRASP_MIN_DOWNWARD_AXIS_COMPONENT: Final = 0.45
 PIPER_NOMINAL_GRASP_HEIGHT_M: Final = 0.035
 PIPER_LARGE_DOLL_DIAMETER_THRESHOLD_M: Final = 0.070
 PIPER_LARGE_DOLL_GRASP_HEIGHT_M: Final = 0.085
-PIPER_LARGE_DOLL_CENTER_ABOVE_TOP_M: Final = 0.020
+PIPER_LARGE_DOLL_CENTER_ABOVE_TOP_M: Final = 0.0
+PIPER_LARGE_DOLL_OPEN_GRIPPER_POSITION: Final = 0.050
 PIPER_LARGE_DOLL_MIN_DOWNWARD_AXIS_COMPONENT: Final = 0.75
 PIPER_REGULAR_DOLL_MAX_CLOSING_AXIS_WORLD_Z: Final = 0.50
 PIPER_LARGE_DOLL_MAX_CLOSING_AXIS_WORLD_Z: Final = 0.10
@@ -302,7 +311,8 @@ PIPER_FINAL_APPROACH_CLEARANCES_M: Final = (
 PIPER_LARGE_DOLL_FINAL_APPROACH_CLEARANCES_M: Final = (
     0.030,
     0.020,
-    0.015,
+    0.010,
+    0.0,
 )
 PIPER_GRASP_SEED_CANDIDATES: Final = 6
 PIPER_PREGRASP_CLEARANCE_CANDIDATES_M: Final = (
@@ -313,7 +323,7 @@ PIPER_PREGRASP_CLEARANCE_CANDIDATES_M: Final = (
 )
 PIPER_LIFT_CLEARANCE_M: Final = 0.130
 PIPER_PREPLACE_CLEARANCE_M: Final = 0.120
-PIPER_LARGE_DOLL_PREPLACE_CLEARANCE_M: Final = 0.050
+PIPER_LARGE_DOLL_PREPLACE_CLEARANCE_M: Final = 0.040
 PIPER_RETREAT_CLEARANCE_M: Final = 0.130
 PIPER_LARGE_DOLL_RETREAT_CLEARANCE_M: Final = 0.0
 PIPER_RELEASE_AXIS_CLEARANCES_M: Final = (0.020, 0.040, 0.060)
@@ -338,6 +348,7 @@ PIPER_PLACE_APPROACH_CLEARANCES_M: Final = (
     0.015,
     PIPER_PLANNED_PLACE_SUPPORT_CLEARANCE_M,
 )
+PIPER_PLACE_CENTER_CORRECTION_MAX_ATTEMPTS: Final = 4
 
 
 @dataclass(frozen=True)
@@ -683,8 +694,56 @@ def piper_grasp_search_parameters(doll_spec: DollSpec) -> tuple[float, int]:
     )
 
 
+def piper_grasp_open_position(doll_spec: DollSpec) -> float:
+    """Open wide enough to insert both fingers around the selected doll."""
+
+    diameter = 2.0 * doll_spec.footprint_radius
+    if diameter < PIPER_LARGE_DOLL_DIAMETER_THRESHOLD_M:
+        return PIPER_OPEN_GRIPPER_POSITION
+    return PIPER_LARGE_DOLL_OPEN_GRIPPER_POSITION
+
+
+def piper_grasp_min_finger_overlap(doll_spec: DollSpec) -> float:
+    """Require the largest doll to be enclosed well below its top cap."""
+
+    diameter = 2.0 * doll_spec.footprint_radius
+    if diameter < PIPER_LARGE_DOLL_DIAMETER_THRESHOLD_M:
+        return PIPER_GRASP_MIN_FINGER_OVERLAP_M
+    return PIPER_LARGE_DOLL_MIN_FINGER_OVERLAP_M
+
+
+def piper_finger_overlap_below_doll_top(
+    doll_spec: DollSpec,
+    finger_center_pose: PoseSpec,
+    doll_pose: PoseSpec,
+) -> float:
+    """Return how far the physical finger edge extends below the doll top."""
+
+    finger_axis = _quaternion_rotate_vector(
+        finger_center_pose.quaternion,
+        (1.0, 0.0, 0.0),
+    )
+    doll_up = _quaternion_rotate_vector(
+        doll_pose.quaternion,
+        (0.0, 0.0, 1.0),
+    )
+    forward_edge = tuple(
+        finger_center_pose.position[index]
+        + PIPER_FINGER_FORWARD_REACH_FROM_CENTER_M * finger_axis[index]
+        for index in range(3)
+    )
+    doll_top = tuple(
+        doll_pose.position[index] + 0.5 * doll_spec.height * doll_up[index]
+        for index in range(3)
+    )
+    return sum(
+        (doll_top[index] - forward_edge[index]) * doll_up[index]
+        for index in range(3)
+    )
+
+
 def piper_final_approach_clearances(doll_spec: DollSpec) -> tuple[float, ...]:
-    """Stop a large doll's long fingertips before they enter its wide waist."""
+    """Insert open fingers in small collision-observed axial increments."""
 
     diameter = 2.0 * doll_spec.footprint_radius
     if diameter < PIPER_LARGE_DOLL_DIAMETER_THRESHOLD_M:
@@ -4769,6 +4828,45 @@ def _current_doll_poses(dolls: dict[str, Any]) -> dict[str, PoseSpec]:
     }
 
 
+def validate_grasp_before_close(
+    doll_spec: DollSpec,
+    *,
+    finger_overlap_m: float,
+    open_finger_separation_m: float,
+) -> dict[str, float]:
+    """Require real finger depth and aperture before starting closure."""
+
+    if not math.isfinite(finger_overlap_m) or not math.isfinite(
+        open_finger_separation_m
+    ):
+        raise RuntimeError(
+            f"{doll_spec.asset_id}: non-finite pre-close grasp measurement"
+        )
+    minimum_finger_overlap = piper_grasp_min_finger_overlap(doll_spec)
+    if finger_overlap_m < minimum_finger_overlap:
+        raise RuntimeError(
+            f"{doll_spec.asset_id}: physical fingertips have not enclosed "
+            "the doll before closing; "
+            f"overlap={finger_overlap_m:.6f} m, "
+            f"required>={minimum_finger_overlap:.6f} m"
+        )
+    minimum_open_separation = (
+        2.0 * doll_spec.footprint_radius
+        + PIPER_GRASP_OPEN_DIAMETER_MARGIN_M
+    )
+    if open_finger_separation_m < minimum_open_separation:
+        raise RuntimeError(
+            f"{doll_spec.asset_id}: open fingers do not provide enough "
+            "clearance to surround the doll; "
+            f"separation={open_finger_separation_m:.6f} m, "
+            f"required>={minimum_open_separation:.6f} m"
+        )
+    return {
+        "minimum_finger_overlap_m": minimum_finger_overlap,
+        "minimum_open_separation_m": minimum_open_separation,
+    }
+
+
 def validate_grasp_before_attach(
     doll_spec: DollSpec,
     *,
@@ -4860,6 +4958,7 @@ def run_curobo_pick_place_smoke(
     specs_by_id = {spec.asset_id: spec for spec in get_doll_specs()}
     doll_spec = specs_by_id[asset_id]
     grasp_contact_height = piper_grasp_contact_height(doll_spec)
+    grasp_open_position = piper_grasp_open_position(doll_spec)
     preplace_clearance = piper_preplace_clearance(doll_spec)
     target_by_id = {
         placement.asset_id: placement
@@ -5280,6 +5379,7 @@ def run_curobo_pick_place_smoke(
             ),
             "failures": grasp_search_failures,
         }
+        plans["grasp_open_position_m"] = grasp_open_position
         print(
             "CUROBO_GRASP_PLAN "
             f"asset={asset_id} robot={active_spec.name} "
@@ -5293,6 +5393,56 @@ def run_curobo_pick_place_smoke(
             f"pregrasp_clearance_m={selected_pregrasp_clearance:.6f}",
             flush=True,
         )
+        grasp_open_steps = 0
+        if not math.isclose(
+            grasp_open_position,
+            PIPER_OPEN_GRIPPER_POSITION,
+            abs_tol=1.0e-12,
+        ):
+            _set_recording_context(
+                episode_recorder,
+                "open_for_grasp",
+                operator=active_spec.name,
+                object_id=asset_id,
+            )
+            if episode_recorder is not None:
+                episode_recorder.set_gripper_action(
+                    active_robot,
+                    grasp_open_position,
+                )
+            _command_position(
+                active_robot,
+                (grasp_open_position,),
+                (6,),
+            )
+            grasp_open_steps = _step_control_until(
+                world,
+                lambda: float(
+                    np.max(
+                        np.abs(
+                            active_robot.get_joint_positions()[6:8]
+                            - grasp_open_position
+                        )
+                    )
+                )
+                <= PIPER_GRIPPER_TOLERANCE_M,
+                maximum_steps=240,
+                description=(
+                    f"{active_spec.name} Piper gripper to surround "
+                    f"{asset_id}"
+                ),
+                render=render,
+                episode_recorder=episode_recorder,
+            )
+            print(
+                "CUROBO_GRASP_OPEN "
+                f"asset={asset_id} robot={active_spec.name} "
+                f"command_m={grasp_open_position:.6f} "
+                f"separation_m="
+                f"{_finger_separation(active_spec, 'grasp_open'):.6f} "
+                f"physics_steps={grasp_open_steps}",
+                flush=True,
+            )
         _set_recording_context(
             episode_recorder,
             "pregrasp",
@@ -5638,6 +5788,32 @@ def run_curobo_pick_place_smoke(
                 f"doll_displacement={approach_displacement:.6f} m, "
                 f"doll_tilt={approach_tilt:.6f} degrees"
             )
+
+        preclose_finger_overlap = piper_finger_overlap_below_doll_top(
+            doll_spec,
+            approach_finger_pose,
+            approach_doll_pose,
+        )
+        preclose_open_separation = _finger_separation(
+            active_spec,
+            "preclose_open",
+        )
+        preclose_gate = validate_grasp_before_close(
+            doll_spec,
+            finger_overlap_m=preclose_finger_overlap,
+            open_finger_separation_m=preclose_open_separation,
+        )
+        print(
+            "CUROBO_GRASP_CONTAINMENT "
+            f"asset={asset_id} robot={active_spec.name} "
+            f"finger_overlap_m={preclose_finger_overlap:.6f} "
+            f"open_separation_m={preclose_open_separation:.6f} "
+            f"required_overlap_m="
+            f"{preclose_gate['minimum_finger_overlap_m']:.6f} "
+            f"required_separation_m="
+            f"{preclose_gate['minimum_open_separation_m']:.6f}",
+            flush=True,
+        )
 
         _set_recording_context(
             episode_recorder,
@@ -6623,6 +6799,82 @@ def run_curobo_pick_place_smoke(
                         f"{asset_id}: {upright_plan_key} displaced the doll "
                         f"centre by {segment_upright_center_drift:.6f} m"
                     )
+            segment_center_correction_attempts = 0
+            while (
+                segment_center_error > PIPER_GRASP_CENTER_TOLERANCE_M
+                and segment_center_correction_attempts
+                < PIPER_PLACE_CENTER_CORRECTION_MAX_ATTEMPTS
+            ):
+                segment_center_correction_attempts += 1
+                segment_tool_pose = _piper_finger_center_world_pose(
+                    active_spec,
+                    f"{asset_id}_{plan_key}_before_center_correction_"
+                    f"{segment_center_correction_attempts}",
+                )
+                center_correction_goal = tool_pose_for_attached_object_pose(
+                    segment_tool_pose,
+                    segment_pose,
+                    PoseSpec(
+                        segment_object_center,
+                        segment_pose.quaternion,
+                    ),
+                )
+                center_plan_key = (
+                    f"{plan_key}_center_correction_"
+                    f"{segment_center_correction_attempts}"
+                )
+                plans[center_plan_key] = worker.plan_pose(
+                    active_robot=active_spec,
+                    other_robot=other_spec,
+                    current_joint_position=(
+                        active_robot.get_joint_positions()[:6]
+                    ),
+                    other_joint_position=other_robot.get_joint_positions()[:6],
+                    world_goal=center_correction_goal,
+                    doll_poses=_current_doll_poses(dolls),
+                    excluded_doll_ids=(asset_id,),
+                )
+                _set_recording_context(
+                    episode_recorder,
+                    "place_center_correction",
+                    operator=active_spec.name,
+                    object_id=asset_id,
+                )
+                executions[center_plan_key] = execute_curobo_trajectory(
+                    world,
+                    active_robot,
+                    plans[center_plan_key],
+                    render=render,
+                    episode_recorder=episode_recorder,
+                    final_tolerance_rad=CUROBO_GRASP_EXECUTION_TOLERANCE_RAD,
+                    final_settle_max_control_frames=(
+                        CUROBO_GRASP_SETTLE_MAX_CONTROL_FRAMES
+                    ),
+                )
+                segment_pose = _current_doll_poses(dolls)[asset_id]
+                segment_state = _doll_state_report(dolls)[asset_id]
+                segment_center_error = float(
+                    np.linalg.norm(
+                        np.asarray(
+                            segment_pose.position,
+                            dtype=np.float64,
+                        )
+                        - np.asarray(
+                            segment_object_center,
+                            dtype=np.float64,
+                        )
+                    )
+                )
+                segment_tilt = segment_state["upright_tilt_degrees"]
+                print(
+                    "CUROBO_PLACE_CENTER_CORRECTION "
+                    f"asset={asset_id} robot={active_spec.name} "
+                    f"segment={segment_index} "
+                    f"attempt={segment_center_correction_attempts} "
+                    f"center_error_m={segment_center_error:.6f} "
+                    f"tilt_deg={segment_tilt:.6f}",
+                    flush=True,
+                )
             print(
                 "CUROBO_PLACE_APPROACH "
                 f"asset={asset_id} robot={active_spec.name} "
@@ -6658,6 +6910,9 @@ def run_curobo_pick_place_smoke(
                     "upright_tilt_degrees": segment_tilt,
                     "upright_correction_center_drift_m": (
                         segment_upright_center_drift
+                    ),
+                    "center_correction_attempts": (
+                        segment_center_correction_attempts
                     ),
                 }
             )
@@ -7124,6 +7379,13 @@ def run_curobo_pick_place_smoke(
             "contact_point_m": list(closed_contact_point),
             "contact_height_above_center_m": grasp_contact_height,
             "terminal_axis_clearance_m": terminal_grasp_clearance,
+            "open_gripper_position_m": grasp_open_position,
+            "open_gripper_physics_steps": grasp_open_steps,
+            "preclose_finger_overlap_m": preclose_finger_overlap,
+            "preclose_open_finger_separation_m": (
+                preclose_open_separation
+            ),
+            "preclose_gate": preclose_gate,
             "initial_approach_center_error_m": (
                 initial_approach_center_error
             ),
