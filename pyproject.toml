@@ -3,12 +3,12 @@ name = "learn-isaac"
 version = "0.1.0"
 description = "Learn Isaac"
 readme = "README.md"
-requires-python = ">=3.11,<3.12"
+requires-python = ">=3.12,<3.13"
 dependencies = [
-    "isaacsim[all,extscache]==5.1.0",
-    "torch==2.7.0",
-    "torchaudio==2.7.0",
-    "torchvision==0.22.0",
+    "isaacsim[all,extscache]==6.0.1.0",
+    "torch==2.11.0",
+    "torchaudio==2.11.0",
+    "torchvision==0.26.0",
     "modelscope",
     "isaaclab",
     "isaaclab-assets",
@@ -31,6 +31,10 @@ isaaclab-mimic = { path = "third_parties/IsaacLab/source/isaaclab_mimic", editab
 isaaclab-rl = { path = "third_parties/IsaacLab/source/isaaclab_rl", editable = true }
 isaaclab-tasks = { path = "third_parties/IsaacLab/source/isaaclab_tasks", editable = true }
 nvidia-curobo = { path = "third_parties/curobo", editable = true }
+
+[tool.uv]
+index-strategy = "unsafe-first-match"
+prerelease = "allow"
 
 [[tool.uv.index]]
 name = "pytorch-cu128"
