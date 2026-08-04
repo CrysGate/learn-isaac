@@ -50,7 +50,9 @@ isaaclab-visualizers = { path = "third_parties/IsaacLab/source/isaaclab_visualiz
 index-strategy = "unsafe-best-match"
 prerelease = "allow"
 override-dependencies = [
+    "pin==4.0.0",
     "numpy==2.3.1",
+    "pin-pink==4.2.0",
     "coverage==7.4.4",
     "torch==2.10.0",
     "torchaudio==2.10.0",
