@@ -1,0 +1,54 @@
+room:
+  usd_path: Assets/Room/Simple_Room_nolight/simple_room_nolight.usd
+
+ground:
+  position_m: [0.0, 0.0, -0.05]
+  size_m: [7.0, 7.0, 0.1]
+  material_path: Assets/Material/material_0564/Wood_Tiles_Fineline.mdl
+  static_friction: 0.8
+  dynamic_friction: 0.8
+  restitution: 0.0
+
+table:
+  position_m: [0.0, -0.05, 0.74]
+  size_m: [1.4, 1.1, 0.05]
+  material_path: Assets/Material/material_0122/Mahogany_Planks.mdl
+  static_friction: 0.8
+  dynamic_friction: 0.8
+  restitution: 0.0
+
+# Robot and camera-stand heights follow the table top automatically.
+robot_mounts:
+  left:
+    position_xy_m: [-0.3, -0.45]
+    orientation_xyzw: [0.0, 0.0, 0.70710678, 0.70710678]
+  right:
+    position_xy_m: [0.3, -0.45]
+    orientation_xyzw: [0.0, 0.0, 0.70710678, 0.70710678]
+
+camera:
+  stand_usd_path: Assets/Object/RoboDojo/Geometry/camera_stand/00000/object.usd
+  stand_position_xy_m: [0.0, -0.47]
+  stand_orientation_xyzw: [-0.70710678, 0.0, 0.0, 0.70710678]
+  sensor_local_position_m: [0.0, -0.543, 0.06]
+  sensor_local_orientation_xyzw: [0.8660254, 0.0, 0.0, 0.5]
+  convention: opengl
+  width: 640
+  height: 480
+  update_period_s: 0.03333333333333333
+  data_types: [rgb, distance_to_image_plane]
+  focal_length_mm: 1.93
+  horizontal_aperture_mm: 2.65
+  clipping_range_m: [0.1, 6.0]
+
+lighting:
+  texture_path: Assets/Background/brown_photostudio_02_4k.hdr
+  texture_format: latlong
+  intensity: 1000.0
+  visible_in_primary_ray: true
+
+runtime:
+  num_envs: 11
+  env_spacing_m: 10.0
+  replicate_physics: true
+  clone_in_fabric: false

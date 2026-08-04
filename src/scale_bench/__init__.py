@@ -1,0 +1,2 @@
+"""Scale-aware manipulation benchmark."""
+
