@@ -6,17 +6,24 @@ readme = "README.md"
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "isaacsim[all,extscache]==6.0.1.0",
-    "torch==2.11.0",
-    "torchaudio==2.11.0",
-    "torchvision==0.26.0",
+    "torch==2.10.0",
+    "torchaudio==2.10.0",
+    "torchvision==0.25.0",
     "modelscope",
     "isaaclab",
     "isaaclab-assets",
     "isaaclab-contrib",
+    "isaaclab-experimental",
     "isaaclab-mimic",
-    "isaaclab-rl",
+    "isaaclab-newton[all]",
+    "isaaclab-ov",
+    "isaaclab-ovphysx",
+    "isaaclab-physx[newton]",
+    "isaaclab-ppisp",
+    "isaaclab-rl[rsl-rl]",
     "isaaclab-tasks",
-    "nvidia-curobo[cu12]",
+    "isaaclab-tasks-experimental",
+    "isaaclab-visualizers",
 ]
 
 [tool.uv.sources]
@@ -27,14 +34,29 @@ isaacsim = { index = "nvidia" }
 isaaclab = { path = "third_parties/IsaacLab/source/isaaclab", editable = true }
 isaaclab-assets = { path = "third_parties/IsaacLab/source/isaaclab_assets", editable = true }
 isaaclab-contrib = { path = "third_parties/IsaacLab/source/isaaclab_contrib", editable = true }
+isaaclab-experimental = { path = "third_parties/IsaacLab/source/isaaclab_experimental", editable = true }
 isaaclab-mimic = { path = "third_parties/IsaacLab/source/isaaclab_mimic", editable = true }
+isaaclab-newton = { path = "third_parties/IsaacLab/source/isaaclab_newton", editable = true }
+isaaclab-ov = { path = "third_parties/IsaacLab/source/isaaclab_ov", editable = true }
+isaaclab-ovphysx = { path = "third_parties/IsaacLab/source/isaaclab_ovphysx", editable = true }
+isaaclab-physx = { path = "third_parties/IsaacLab/source/isaaclab_physx", editable = true }
+isaaclab-ppisp = { path = "third_parties/IsaacLab/source/isaaclab_ppisp", editable = true }
 isaaclab-rl = { path = "third_parties/IsaacLab/source/isaaclab_rl", editable = true }
 isaaclab-tasks = { path = "third_parties/IsaacLab/source/isaaclab_tasks", editable = true }
-nvidia-curobo = { path = "third_parties/curobo", editable = true }
+isaaclab-tasks-experimental = { path = "third_parties/IsaacLab/source/isaaclab_tasks_experimental", editable = true }
+isaaclab-visualizers = { path = "third_parties/IsaacLab/source/isaaclab_visualizers", editable = true }
 
 [tool.uv]
-index-strategy = "unsafe-first-match"
+index-strategy = "unsafe-best-match"
 prerelease = "allow"
+override-dependencies = [
+    "numpy==2.3.1",
+    "coverage==7.4.4",
+    "torch==2.10.0",
+    "torchaudio==2.10.0",
+    "torchvision==0.25.0",
+]
+package = false
 
 [[tool.uv.index]]
 name = "pytorch-cu128"
