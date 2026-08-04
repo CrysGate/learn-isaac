@@ -1,5 +1,6 @@
 room:
   usd_path: Assets/Room/Simple_Room_nolight/simple_room_nolight.usd
+  scale: 0.5
 
 ground:
   position_m: [0.0, 0.0, -0.05]
@@ -49,6 +50,6 @@ lighting:
 
 runtime:
   num_envs: 11
-  env_spacing_m: 10.0
+  env_spacing_m: 5.0
   replicate_physics: true
   clone_in_fabric: false

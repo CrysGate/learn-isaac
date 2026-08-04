@@ -40,9 +40,13 @@ def _asset_path(value: str | None) -> str | None:
 
 
 def _room_cfg(spec: dict[str, Any]) -> AssetBaseCfg:
+    scale = float(spec.get("scale", 0.5))
     return AssetBaseCfg(
         prim_path="{ENV_REGEX_NS}/Room",
-        spawn=sim_utils.UsdFileCfg(usd_path=_asset_path(spec["usd_path"])),
+        spawn=sim_utils.UsdFileCfg(
+            usd_path=_asset_path(spec["usd_path"]),
+            scale=(scale, scale, scale),
+        ),
     )
 
 
