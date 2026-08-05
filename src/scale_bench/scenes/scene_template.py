@@ -87,16 +87,20 @@ def _camera_stand_cfg(table_top_z_m: float, spec: dict[str, Any]) -> AssetBaseCf
 
 
 def _camera_cfg(spec: dict[str, Any]) -> CameraCfg:
+    width = int(spec["width"])
+    height = int(spec["height"])
     return CameraCfg(
         prim_path="{ENV_REGEX_NS}/CameraStand/D435Sensor",
         update_period=spec["update_period_s"],
-        width=spec["width"],
-        height=spec["height"],
+        width=width,
+        height=height,
         data_types=list(spec["data_types"]),
-        spawn=sim_utils.PinholeCameraCfg(
-            focal_length=spec["focal_length_mm"],
-            horizontal_aperture=spec["horizontal_aperture_mm"],
+        spawn=sim_utils.PinholeCameraCfg.from_intrinsic_matrix(
+            intrinsic_matrix=list(spec["intrinsic_matrix_px"]),
+            width=width,
+            height=height,
             clipping_range=tuple(spec["clipping_range_m"]),
+            focal_length=spec["focal_length_mm"],
         ),
         offset=CameraCfg.OffsetCfg(
             pos=tuple(spec["sensor_local_position_m"]),
