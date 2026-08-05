@@ -60,8 +60,10 @@ def _surface_cfg(prim_path: str, spec: dict[str, Any]) -> AssetBaseCfg:
         spawn=UvCuboidCfg(
             size=tuple(spec["size_m"]),
             uv_scale=tuple(spec.get("uv_scale", (1.0, 1.0))),
-            collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=True),
-            physics_material=sim_utils.RigidBodyMaterialCfg(
+            collision_props=sim_utils.PhysxCollisionPropertiesCfg(
+                collision_enabled=True
+            ),
+            physics_material=sim_utils.PhysxRigidBodyMaterialCfg(
                 static_friction=spec["static_friction"],
                 dynamic_friction=spec["dynamic_friction"],
                 restitution=spec["restitution"],

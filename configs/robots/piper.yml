@@ -1,0 +1,54 @@
+name: piper
+usd_path: Assets/Robots/piper/Piper.usd
+urdf_path: Assets/Robots/piper/piper_description/urdf/piper.urdf
+fixed_base: true
+disable_gravity: false
+self_collisions: false
+
+initial_joint_positions:
+  joint1: 0.0
+  joint2: 0.0
+  joint3: 0.0
+  joint4: 0.0
+  joint5: 0.0
+  joint6: 0.0
+  gripper_joint: 0.05
+  joint8: 0.05
+
+kinematics:
+  base_body: base_link
+  arm_joint_names: [joint1, joint2, joint3, joint4, joint5, joint6]
+  ee_body: link6
+  tcp:
+    # The authored gripper_center is at the distal finger plane. This offset
+    # moves the benchmark TCP to the physical centre of the fingers.
+    parent_frame: gripper_center
+    position_m: [-0.04, 0.0, 0.0]
+    orientation_xyzw: [0.0, 0.0, 0.0, 1.0]
+
+actuators:
+  arm:
+    joint_names: [joint1, joint2, joint3, joint4, joint5, joint6]
+    # null preserves the drive gains authored in the USD.
+    stiffness: null
+    damping: null
+    effort_limit_sim: null
+    velocity_limit_sim: null
+  gripper:
+    joint_names: [gripper_joint, joint8]
+    stiffness: null
+    damping: null
+    effort_limit_sim: null
+    velocity_limit_sim: null
+
+gripper:
+  joint_names: [gripper_joint, joint8]
+  # joint8 mimics the master gripper_joint in the robot model.
+  command_joint_names: [gripper_joint]
+  finger_body_names: [link7, link8]
+  min_aperture_m: 0.0
+  max_aperture_m: 0.1
+  closed_positions:
+    gripper_joint: 0.0
+  open_positions:
+    gripper_joint: 0.05
