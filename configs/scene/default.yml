@@ -28,7 +28,7 @@ robot_mounts:
 
 camera:
   model: Intel RealSense D435
-  stand_usd_path: Assets/Object/RoboDojo/Geometry/camera_stand/00000/object.usd
+  stand_usd_path: Assets/Object/Geometry/camera_stand/00000/object.usd
   stand_position_xy_m: [0.0, -0.47]
   stand_orientation_xyzw: [-0.70710678, 0.0, 0.0, 0.70710678]
   sensor_local_position_m: [0.0, -0.543, 0.06]
