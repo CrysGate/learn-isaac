@@ -1,0 +1,247 @@
+# ScaleBench
+
+[English](README.md) | [简体中文](README.zh-CN.md)
+
+ScaleBench 是一组配置优先的 Isaac Lab 基础组件，用于构建尺度相关的双臂操作场景。
+
+项目将机器人语义和场景参数保存在 YAML 中，在边界处严格校验机器人配置，再将其编译为原生 Isaac Lab 配置对象。当前实现聚焦于可复用的机器人与场景构建，还不是一套完整的任务、策略或评测流水线。
+
+## 已实现能力
+
+- **类型化机器人配置**：从 YAML 加载机器人，校验关节、TCP、执行器和平行夹爪，并生成一份全新的 `ArticulationCfg`。
+- **可复用双臂场景**：组合房间、带纹理的地面和桌面、两台可独立配置的机器人、顶视 RGB-D 相机及环境光。
+- **纹理正确的程序化表面**：`UvCuboidCfg` 会写入 face-varying UV，使 MDL 材质能在长方体表面正确平铺。
+- **可直接运行的场景预览**：既可以在 Isaac Sim 中打开默认场景，也可以执行短时间无界面冒烟验证。
+
+> [!NOTE]
+> `src/scale_bench` 目前只提供配置与场景基础层。任务、episode 调度、数据记录和 benchmark 报告尚未在该包中实现。
+
+## 架构
+
+```text
+configs/robots/*.yml
+        │
+        ▼
+  RobotProfile ── 校验 ──► ArticulationCfg ───────────┐
+                                                      │
+configs/scene/*.yml ──────────────────────────────────┼─► DualArmTabletopSceneCfg
+                                                      │
+  UvCuboidCfg ── 带纹理的地面和桌面 ──────────────────┘
+                                                              │
+                                                              ▼
+                                                    Isaac Lab InteractiveScene
+```
+
+这一层边界有意保持精简：机器人特有信息放在 robot profile 中，场景特有信息放在 scene preset 中，下游代码只接收标准 Isaac Lab 配置对象。
+
+## 环境要求
+
+`pyproject.toml` 和 `uv.lock` 中的依赖配置面向以下环境：
+
+- Python 3.12
+- Isaac Sim 6.0.1
+- PyTorch 2.10，使用 CUDA 12.8 wheels
+- 使用 [`uv`](https://docs.astral.sh/uv/) 管理依赖
+
+Isaac Lab 以本地 editable dependency 的形式从 `third_parties/IsaacLab` 加载；当前工作区已验证兼容的 checkout 是 `release/3.0.0-beta2`。机器还需要满足 Isaac Sim 对 GPU、驱动和操作系统的要求。本项目不会安装系统级 NVIDIA 驱动。
+
+## 安装
+
+克隆仓库，并将指定版本的 Isaac Lab 放到 `third_parties/IsaacLab`：
+
+```bash
+git clone https://github.com/CrysGate/learn-isaac.git
+cd learn-isaac
+
+mkdir -p third_parties
+git clone --branch release/3.0.0-beta2 --depth 1 \
+  https://github.com/isaac-sim/IsaacLab.git \
+  third_parties/IsaacLab
+
+uv sync --frozen
+```
+
+默认配置还要求项目资产包位于 `Assets/`。如果你的 checkout 中不包含这些资产，请补充以下文件，以及它们引用的纹理和其他 USD 依赖：
+
+```text
+Assets/
+├── Background/brown_photostudio_02_4k.hdr
+├── Material/material_0122/Mahogany_Planks.mdl
+├── Material/material_0564/Wood_Tiles_Fineline.mdl
+├── Object/Geometry/camera_stand/00000/object.usd
+├── Robots/piper/Piper.usd
+├── Robots/piper/piper_description/urdf/piper.urdf
+└── Room/Simple_Room_nolight/simple_room_nolight.usd
+```
+
+配置中的相对路径统一从仓库根目录解析，因此请保持资产目录结构不变。
+
+## 快速开始
+
+在 Isaac Sim 中打开默认双 Piper 场景：
+
+```bash
+uv run python scripts/preview_scene.py
+```
+
+执行两步无界面冒烟验证：
+
+```bash
+uv run python scripts/preview_scene.py --viz none --max-steps 2
+```
+
+无需修改 Python 代码即可替换左右机器人或场景配置：
+
+```bash
+uv run python scripts/preview_scene.py \
+  --config configs/scene/default.yml \
+  --left-robot-config configs/robots/piper.yml \
+  --right-robot-config configs/robots/piper.yml \
+  --device cuda:0
+```
+
+常用预览参数：
+
+| 参数 | 作用 |
+|---|---|
+| `--config PATH` | 选择场景 YAML。 |
+| `--left-robot-config PATH` | 选择左臂 robot profile。 |
+| `--right-robot-config PATH` | 选择右臂 robot profile。 |
+| `--device VALUE` | 选择 `cpu`、`cuda` 或 `cuda:0` 等具体设备。 |
+| `--viz none` | 关闭 visualizer，以无界面方式运行。 |
+| `--max-steps N` | 在指定仿真步数后退出。 |
+
+运行 `uv run python scripts/preview_scene.py --help` 可以查看 Isaac Lab launcher 的全部参数。
+
+## 核心 API
+
+### Robot profile
+
+[`RobotProfile`](src/scale_bench/robots/robot_profile.py) 是 `configs/robots/*.yml` 与 Isaac Lab 之间的类型化边界：
+
+```python
+from scale_bench.robots import RobotProfile
+
+profile = RobotProfile.load("configs/robots/piper.yml")
+robot_cfg = profile.build_articulation_cfg(
+    prim_path="{ENV_REGEX_NS}/Robot",
+)
+```
+
+只加载和校验 profile 不需要启动仿真器；调用 `build_articulation_cfg()` 前则应先启动 Isaac Lab `AppLauncher`。仓库中的 [`preview_scene.py`](scripts/preview_scene.py) 展示了正确的启动和 import 顺序。
+
+`RobotProfile.load()` 会：
+
+- 从仓库根目录解析相对路径；
+- 拒绝未知字段和非有限数值；
+- 要求机械臂、夹爪和执行器中的关节名唯一；
+- 确保初始位置恰好覆盖所有已声明关节；
+- 检查执行器覆盖关系，并禁止不同执行器组重复控制同一关节；
+- 校验 TCP 单位四元数和平行夹爪约定；
+- 检查本地 USD 和可选 URDF 资产是否存在。
+
+`build_articulation_cfg()` 每次都会返回一份新的 Isaac Lab `ArticulationCfg`。当前支持 implicit actuator 和 parallel-jaw gripper。
+
+### 场景模板
+
+[`create_dual_arm_tabletop_scene_cfg()`](src/scale_bench/scenes/scene_template.py) 将两个 `ArticulationCfg` 和场景 preset 组合起来：
+
+```python
+from scale_bench.robots import RobotProfile
+from scale_bench.scenes import create_dual_arm_tabletop_scene_cfg
+
+left = RobotProfile.load("configs/robots/piper.yml")
+right = RobotProfile.load("configs/robots/piper.yml")
+
+scene_cfg = create_dual_arm_tabletop_scene_cfg(
+    left_robot_cfg=left.build_articulation_cfg(),
+    right_robot_cfg=right.build_articulation_cfg(),
+    config_path="configs/scene/default.yml",
+    num_envs=1,
+)
+```
+
+这段代码应在 `AppLauncher` 完成 Isaac Sim 初始化后运行。
+
+场景包含：
+
+- USD 房间和 dome light；
+- 启用碰撞并带纹理的地面与桌面；
+- 左右两套独立机器人安装位；
+- 相机支架和 D435 风格 RGB-D 传感器；
+- 可配置的环境数量、间距、物理复制和 Fabric cloning。
+
+机器人底座和相机支架会根据计算得到的桌面高度放置，因此修改桌子高度后，安装在桌面上的资产仍会自动对齐。
+
+### UV 长方体
+
+[`UvCuboidCfg`](src/scale_bench/scenes/uv_cuboid.py) 在 Isaac Lab `CuboidCfg` 的基础上增加了 `uv_scale`。它先把几何和物理创建交给 Isaac Lab，再为六个表面写入 24 个 face-varying `st` 值，每个表面四个，从而得到可预测的材质平铺效果。
+
+## 配置方法
+
+### 添加机器人
+
+1. 复制 [`configs/robots/piper.yml`](configs/robots/piper.yml)。
+2. 修改资产路径、初始关节状态、运动学 frame、TCP、执行器组和夹爪语义。
+3. 四元数使用 `xyzw` 顺序，距离使用米。
+4. 不启动 Isaac Sim，直接校验 profile：
+
+   ```bash
+   PYTHONPATH=src uv run python -c \
+     'from scale_bench.robots import RobotProfile; p = RobotProfile.load("configs/robots/my_robot.yml"); print(p.name)'
+   ```
+
+5. 使用 `--left-robot-config` 或 `--right-robot-config` 在场景中预览机器人。
+
+不要在场景代码中添加基于机器人名称的分支。如果新机器人需要尚不支持的执行器或末端执行器类型，应显式扩展 profile 模型。
+
+### 自定义场景
+
+复制 [`configs/scene/default.yml`](configs/scene/default.yml)，然后修改对应部分：
+
+| 配置段 | 控制内容 |
+|---|---|
+| `room` | 房间 USD 和统一缩放。 |
+| `ground`、`table` | 位姿、尺寸、材质、摩擦、恢复系数和 UV 平铺。 |
+| `robot_mounts` | 左右机器人底座相对于桌面的位姿。 |
+| `camera` | 支架位姿、传感器变换、图像尺寸、内参、裁剪范围和输出类型。 |
+| `lighting` | HDR 环境纹理和光照强度。 |
+| `runtime` | 环境数量、间距、物理复制和 Fabric cloning。 |
+
+场景 YAML 会按路径在进程内缓存。修改场景配置后，请重启预览进程。
+
+## 仓库结构
+
+```text
+src/scale_bench/
+├── robots/
+│   └── robot_profile.py    # YAML schema、校验、ArticulationCfg 构建
+└── scenes/
+    ├── scene_template.py   # 双臂桌面场景编译
+    └── uv_cuboid.py        # 带 face-varying UV 的长方体 spawner
+
+configs/
+├── robots/piper.yml        # 参考机器人 profile
+└── scene/default.yml       # 参考场景 preset
+
+scripts/preview_scene.py    # 交互预览和无界面冒烟验证入口
+```
+
+项目使用 `src` 布局，但没有作为 package 安装（`tool.uv.package = false`）。仓库自带的预览脚本会把 `src` 加入 `sys.path`；运行你自己的独立脚本时，请设置 `PYTHONPATH=src`，或者显式添加该目录。
+
+## 常见问题
+
+- **出现 `Robot asset does not exist`**：检查 robot YAML 中的路径，并确认 `Assets/` 资产包完整。
+- **找不到本地 Isaac Lab 依赖**：运行 `uv sync` 前确认 `third_parties/IsaacLab/source/...` 已存在。
+- **自定义脚本出现 `No module named scale_bench`**：从仓库根目录使用 `PYTHONPATH=src` 启动。
+- **多个环境的房间互相重叠**：增大 `runtime.env_spacing_m`，尤其是在修改房间缩放之后。
+
+## 延伸阅读
+
+- [Robot profile 约定](docs/robot_profiles.md)
+- [场景模板说明](docs/scene_template.md)
+- [Benchmark 架构方向](docs/benchmark_architecture.md)——这是设计目标，其中部分组件尚未实现
+
+## 许可证
+
+本项目使用 [MIT License](LICENSE)。
