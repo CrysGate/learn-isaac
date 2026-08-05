@@ -40,7 +40,7 @@ camera:
   data_types: [rgb, distance_to_image_plane]
   focal_length_mm: 1.93
   intrinsic_source: aligned_to_color
-  intrinsic_matrix_px: [604.970947265625, 0.0, 329.11669921875, 0.0, 604.2153930664062, 252.21356201171875, 0.0, 0.0, 1.0]
+  intrinsic_matrix_px: [604.5, 0.0, 320, 0.0, 604.5, 240, 0.0, 0.0, 1.0]
   distortion_model: plumb_bob
   distortion_coefficients: [0.0, 0.0, 0.0, 0.0, 0.0]
   clipping_range_m: [0.105, 10.0]
