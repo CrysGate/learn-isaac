@@ -24,6 +24,7 @@ dependencies = [
     "isaaclab-tasks",
     "isaaclab-tasks-experimental",
     "isaaclab-visualizers",
+    "pyyaml",
 ]
 
 [tool.uv.sources]

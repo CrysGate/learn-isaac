@@ -54,7 +54,19 @@ def piper_cfg() -> ArticulationCfg:
 
 
 def main() -> None:
-    sim = sim_utils.SimulationContext(sim_utils.SimulationCfg(device=args.device))
+    sim = sim_utils.SimulationContext(
+        sim_utils.SimulationCfg(
+            device=args.device,
+            render=sim_utils.RenderCfg(
+                enable_translucency=True,
+                enable_reflections=True,
+                enable_global_illumination=True,
+                antialiasing_mode="DLAA",
+                dlss_mode=2,
+                rendering_mode="quality",
+            ),
+        )
+    )
     sim.set_camera_view((2.6, 2.2, 2.2), (0.0, 0.0, 0.8))
 
     robot = piper_cfg()

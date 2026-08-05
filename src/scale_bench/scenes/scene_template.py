@@ -14,6 +14,8 @@ from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sensors import CameraCfg
 from isaaclab.utils.configclass import configclass
 
+from .uv_cuboid import UvCuboidCfg
+
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_SCENE_CONFIG_PATH = REPOSITORY_ROOT / "configs/scene/default.yml"
@@ -55,8 +57,9 @@ def _surface_cfg(prim_path: str, spec: dict[str, Any]) -> AssetBaseCfg:
     return AssetBaseCfg(
         prim_path=prim_path,
         init_state=AssetBaseCfg.InitialStateCfg(pos=tuple(spec["position_m"])),
-        spawn=sim_utils.CuboidCfg(
+        spawn=UvCuboidCfg(
             size=tuple(spec["size_m"]),
+            uv_scale=tuple(spec.get("uv_scale", (1.0, 1.0))),
             collision_props=sim_utils.CollisionPropertiesCfg(collision_enabled=True),
             physics_material=sim_utils.RigidBodyMaterialCfg(
                 static_friction=spec["static_friction"],
