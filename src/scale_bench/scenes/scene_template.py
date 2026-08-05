@@ -115,9 +115,7 @@ def _light_cfg(spec: dict[str, Any]) -> AssetBaseCfg:
         prim_path="/World/EnvironmentLight",
         spawn=sim_utils.DomeLightCfg(
             texture_file=_asset_path(spec["texture_path"]),
-            texture_format=spec["texture_format"],
             intensity=spec["intensity"],
-            visible_in_primary_ray=spec["visible_in_primary_ray"],
         ),
     )
 

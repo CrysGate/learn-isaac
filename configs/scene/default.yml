@@ -47,9 +47,7 @@ camera:
 
 lighting:
   texture_path: Assets/Background/brown_photostudio_02_4k.hdr
-  texture_format: latlong
   intensity: 1000.0
-  visible_in_primary_ray: true
 
 runtime:
   num_envs: 1
