@@ -4,11 +4,12 @@
 
 Configuration-first Isaac Lab building blocks for scale-aware, dual-arm manipulation scenes.
 
-ScaleBench keeps robot semantics and scene parameters in YAML, validates robot profiles at the boundary, and compiles them into native Isaac Lab configuration objects. The current implementation focuses on reusable robot and scene construction rather than a complete task, policy, or evaluation pipeline.
+ScaleBench keeps robot semantics, camera parameters, and scene parameters in YAML, validates profiles at the boundary, and compiles them into native Isaac Lab configuration objects. The current implementation focuses on reusable robot and scene construction rather than a complete task, policy, or evaluation pipeline.
 
 ## What is implemented
 
 - **Typed robot profiles** — load a robot from YAML, validate its joints, TCP, actuators, and parallel-jaw gripper, then build a fresh `ArticulationCfg`.
+- **Reusable camera profiles** — keep camera optics and output parameters separate from scene-local sensor poses and build a fresh `CameraCfg`.
 - **A reusable dual-arm scene** — compose a room, textured ground and table, two independently configured robots, an overhead RGB-D camera, and environment lighting.
 - **Texture-correct procedural surfaces** — `UvCuboidCfg` authors face-varying UV coordinates so MDL materials tile correctly on cuboids.
 - **A runnable scene preview** — launch the default scene in Isaac Sim or run a short headless smoke test.
@@ -25,6 +26,8 @@ configs/robots/*.yml
   RobotProfile ── validation ──► ArticulationCfg ─────┐
                                                       │
 configs/scene/*.yml ──────────────────────────────────┼─► DualArmTabletopSceneCfg
+                                                      │
+configs/cameras/*.yml ──► CameraProfile ──► CameraCfg ┤
                                                       │
   UvCuboidCfg ── textured ground and table ───────────┘
                                                               │
@@ -142,6 +145,18 @@ Loading and validating a profile does not require a running simulator. Start Isa
 
 `build_articulation_cfg()` returns a new Isaac Lab `ArticulationCfg` on every call. It currently supports implicit actuators and parallel-jaw grippers.
 
+### Camera profiles
+
+[`CameraProfile`](src/scale_bench/sensors/camera_profile.py) validates reusable camera optics and output settings independently of Isaac Sim:
+
+```python
+from scale_bench.sensors import CameraProfile
+
+profile = CameraProfile.load("configs/cameras/d435.yml")
+```
+
+The profile owns image dimensions, update period, data types, pinhole intrinsics, distortion metadata, focal length, and clipping range. Scene presets only reference a profile and define the stand and sensor poses. `build_camera_cfg()` creates a fresh Isaac Lab `CameraCfg` for a supplied prim path and local pose.
+
 ### Scene template
 
 [`create_dual_arm_tabletop_scene_cfg()`](src/scale_bench/scenes/scene_template.py) combines two `ArticulationCfg` objects with the scene preset:
@@ -204,7 +219,7 @@ Copy [`configs/scene/default.yml`](configs/scene/default.yml) and edit the relev
 | `room` | Room USD and uniform scale. |
 | `ground`, `table` | Pose, dimensions, material, friction, restitution, and UV tiling. |
 | `robot_mounts` | Left and right base poses relative to the table top. |
-| `camera` | Stand pose, sensor transform, image size, intrinsics, clipping range, and output types. |
+| `camera` | Camera profile reference, stand pose, and sensor transform. |
 | `lighting` | HDR environment texture and intensity. |
 | `runtime` | Environment count, spacing, physics replication, and Fabric cloning. |
 
@@ -216,13 +231,16 @@ Scene YAML files are cached per process. Restart the preview process after editi
 src/scale_bench/
 ├── robots/
 │   └── robot_profile.py    # YAML schema, validation, ArticulationCfg builder
-└── scenes/
-    ├── scene_template.py   # dual-arm tabletop scene compiler
-    └── uv_cuboid.py        # cuboid spawner with face-varying UVs
+├── scenes/
+│   ├── scene_template.py   # dual-arm tabletop scene compiler
+│   └── uv_cuboid.py        # cuboid spawner with face-varying UVs
+└── sensors/
+    └── camera_profile.py   # YAML schema, validation, CameraCfg builder
 
 configs/
+├── cameras/d435.yml        # reusable camera profile
 ├── robots/piper.yml        # reference robot profile
-└── scene/default.yml       # reference scene preset
+└── scene/default.yml       # scene-local poses and environment settings
 
 scripts/preview_scene.py    # interactive preview and headless smoke entry point
 ```

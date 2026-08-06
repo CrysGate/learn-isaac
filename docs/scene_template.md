@@ -2,12 +2,14 @@
 
 `DualArmTabletopSceneCfg` 是当前 `scale_bench` 已实现的场景拓扑：在每个环境中组合房间、地面、桌面、两台机器人、相机支架和顶视 RGB-D 相机，并使用一盏全局环境光。
 
-场景实现位于 [`src/scale_bench/scenes/scene_template.py`](../src/scale_bench/scenes/scene_template.py)，默认配置位于 [`configs/scene/default.yml`](../configs/scene/default.yml)。
+场景实现位于 [`src/scale_bench/scenes/scene_template.py`](../src/scale_bench/scenes/scene_template.py)，默认场景配置位于 [`configs/scene/default.yml`](../configs/scene/default.yml)，默认相机参数位于 [`configs/cameras/d435.yml`](../configs/cameras/d435.yml)。
 
 ```text
 RobotProfile YAML ──► left/right ArticulationCfg ─────┐
                                                       │
 Scene YAML ───────────────────────────────────────────┼─► DualArmTabletopSceneCfg
+                                                      │
+CameraProfile YAML ──► CameraProfile ──► CameraCfg ───┤
                                                       │
 UvCuboidCfg ──► textured ground/table ────────────────┘
                                                               │
@@ -25,7 +27,7 @@ UvCuboidCfg ──► textured ground/table ────────────
 | `camera_stand` | `{ENV_REGEX_NS}/CameraStand` | 放置在桌面高度上的相机支架 USD。 |
 | `left_robot` | `{ENV_REGEX_NS}/LeftRobot` | 左侧 `ArticulationCfg` 的挂载副本。 |
 | `right_robot` | `{ENV_REGEX_NS}/RightRobot` | 右侧 `ArticulationCfg` 的挂载副本。 |
-| `overhead_camera` | `{ENV_REGEX_NS}/CameraStand/D435Sensor` | Pinhole RGB-D 相机。 |
+| `overhead_camera` | `{ENV_REGEX_NS}/CameraStand/OverheadCamera` | Pinhole RGB-D 相机。 |
 | `environment_light` | `/World/EnvironmentLight` | 使用 HDR 纹理的全局 dome light。 |
 
 左右机器人配置会先复制再设置 prim path 和安装位姿，传入的原始 `ArticulationCfg` 不会被修改。因此左右两侧可以使用不同的 robot profile。
@@ -147,35 +149,45 @@ table_top_z = table.position_m[2] + table.size_m[2] / 2
 
 ### `camera`
 
-相机配置分为三部分：
+场景 YAML 只负责引用相机 profile，并描述支架和传感器在当前场景中的安装关系：
 
-- 支架资产及相对于桌面的安装位姿；
-- 传感器相对于支架的局部位置和四元数；
-- 图像尺寸、输出类型、内参、焦距和裁剪范围。
-
-相机支架的 Z 坐标同样自动使用 `table_top_z`。默认传感器输出 `rgb` 和 `distance_to_image_plane`。
-
-当前构建函数实际读取：
-
-```text
-stand_usd_path
-stand_position_xy_m
-stand_orientation_xyzw
-width, height, update_period_s, data_types
-intrinsic_matrix_px, focal_length_mm, clipping_range_m
-sensor_local_position_m, sensor_local_orientation_xyzw, convention
+```yaml
+camera:
+  profile_path: configs/cameras/d435.yml
+  stand_usd_path: Assets/Object/Geometry/camera_stand/00000/object.usd
+  stand_position_xy_m: [0.0, -0.47]
+  stand_orientation_xyzw: [-0.70710678, 0.0, 0.0, 0.70710678]
+  sensor_local_position_m: [0.0, -0.543, 0.06]
+  sensor_local_orientation_xyzw: [0.8660254, 0.0, 0.0, 0.5]
+  convention: opengl
 ```
 
-以下字段目前只是 YAML 中的说明性元数据，尚未被 `_camera_cfg()` 使用：
+- `profile_path` 引用一份可由多个相机复用的参数配置。
+- 支架的 XY 和四元数由场景指定，Z 坐标自动使用 `table_top_z`。
+- `sensor_local_*` 是传感器相对于支架的局部位姿，四元数顺序为 `xyzw`。
+- `convention` 定义四元数采用的相机坐标轴约定：`opengl` 为 `-Z` 向前、`+Y` 向上，`ros` 为 `+Z` 向前、`-Y` 向上，`world` 为 `+X` 向前、`+Z` 向上。
 
-```text
-model
-intrinsic_source
-distortion_model
-distortion_coefficients
+### 相机 profile YAML
+
+相机型号自身的光学和输出参数保存在独立 YAML 中：
+
+```yaml
+model: Intel RealSense D435
+width: 640
+height: 480
+update_period_s: 0.03333333333333333
+data_types: [rgb, distance_to_image_plane]
+focal_length_mm: 1.93
+intrinsic_source: aligned_to_color
+intrinsic_matrix_px: [604.5, 0.0, 320.0, 0.0, 604.5, 240.0, 0.0, 0.0, 1.0]
+distortion_model: plumb_bob
+distortion_coefficients: [0.0, 0.0, 0.0, 0.0, 0.0]
+clipping_range_m: [0.105, 10.0]
 ```
 
-因此当前相机不会根据 distortion 字段模拟镜头畸变。
+[`CameraProfile`](../src/scale_bench/sensors/camera_profile.py) 会拒绝未知字段、非有限数值、重复的 `data_types`、无效针孔内参和顺序错误的裁剪平面。加载后的 profile 不可修改，每次调用 `build_camera_cfg()` 都会生成新的 Isaac Lab `CameraCfg`。
+
+`model`、`intrinsic_source`、`distortion_model` 和 `distortion_coefficients` 当前作为标定元数据保存；Isaac Lab 场景使用针孔模型，不会根据 distortion 字段模拟镜头畸变。
 
 ### `lighting`
 
@@ -195,10 +207,11 @@ runtime:
 
 ## 路径、缓存与错误行为
 
-- 场景配置路径和其中的本地资产相对路径都从仓库根目录解析。
+- 场景配置、相机 profile 和本地资产的相对路径都从仓库根目录解析。
 - 包含 `://` 的资产路径会作为 URI 原样传给 Isaac Lab。
-- 同一路径的 YAML 会在进程内缓存；编辑配置后应重启预览进程才能重新加载。
-- 场景 YAML 当前使用普通映射读取，没有类似 `RobotProfile` 的 Pydantic schema。缺失字段或类型错误会在构建对应配置时直接报错。
+- 场景 YAML 会按路径在进程内缓存；编辑场景 preset 后应重启预览进程。
+- 场景 YAML 当前使用普通映射读取，缺失字段或类型错误会在构建对应配置时直接报错。
+- 相机 YAML 使用严格的 Pydantic schema；加载失败时会以 `ValueError` 报告 profile 路径和具体校验错误。
 - 默认 preset 依赖 `Assets/` 中的房间、材质、相机支架和 HDR 文件，以及这些资产的传递依赖。
 
 ## `UvCuboidCfg`

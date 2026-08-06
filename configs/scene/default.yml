@@ -27,23 +27,13 @@ robot_mounts:
     orientation_xyzw: [0.0, 0.0, 0.70710678, 0.70710678]
 
 camera:
-  model: Intel RealSense D435
+  profile_path: configs/cameras/d435.yml
   stand_usd_path: Assets/Object/Geometry/camera_stand/00000/object.usd
   stand_position_xy_m: [0.0, -0.47]
   stand_orientation_xyzw: [-0.70710678, 0.0, 0.0, 0.70710678]
   sensor_local_position_m: [0.0, -0.543, 0.06]
   sensor_local_orientation_xyzw: [0.8660254, 0.0, 0.0, 0.5]
   convention: opengl
-  width: 640
-  height: 480
-  update_period_s: 0.03333333333333333
-  data_types: [rgb, distance_to_image_plane]
-  focal_length_mm: 1.93
-  intrinsic_source: aligned_to_color
-  intrinsic_matrix_px: [604.5, 0.0, 320, 0.0, 604.5, 240, 0.0, 0.0, 1.0]
-  distortion_model: plumb_bob
-  distortion_coefficients: [0.0, 0.0, 0.0, 0.0, 0.0]
-  clipping_range_m: [0.105, 10.0]
 
 lighting:
   texture_path: Assets/Background/brown_photostudio_02_4k.hdr

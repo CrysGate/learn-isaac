@@ -14,6 +14,8 @@ from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sensors import CameraCfg
 from isaaclab.utils.configclass import configclass
 
+from scale_bench.sensors import CameraProfile
+
 from .uv_cuboid import UvCuboidCfg
 
 
@@ -89,26 +91,12 @@ def _camera_stand_cfg(table_top_z_m: float, spec: dict[str, Any]) -> AssetBaseCf
 
 
 def _camera_cfg(spec: dict[str, Any]) -> CameraCfg:
-    width = int(spec["width"])
-    height = int(spec["height"])
-    return CameraCfg(
-        prim_path="{ENV_REGEX_NS}/CameraStand/D435Sensor",
-        update_period=spec["update_period_s"],
-        width=width,
-        height=height,
-        data_types=list(spec["data_types"]),
-        spawn=sim_utils.PinholeCameraCfg.from_intrinsic_matrix(
-            intrinsic_matrix=list(spec["intrinsic_matrix_px"]),
-            width=width,
-            height=height,
-            clipping_range=tuple(spec["clipping_range_m"]),
-            focal_length=spec["focal_length_mm"],
-        ),
-        offset=CameraCfg.OffsetCfg(
-            pos=tuple(spec["sensor_local_position_m"]),
-            rot=tuple(spec["sensor_local_orientation_xyzw"]),
-            convention=spec["convention"],
-        ),
+    profile = CameraProfile.load(spec["profile_path"])
+    return profile.build_camera_cfg(
+        prim_path="{ENV_REGEX_NS}/CameraStand/OverheadCamera",
+        position_m=tuple(spec["sensor_local_position_m"]),
+        orientation_xyzw=tuple(spec["sensor_local_orientation_xyzw"]),
+        convention=spec["convention"],
     )
 
 
@@ -157,7 +145,7 @@ def create_dual_arm_tabletop_scene_cfg(
     num_envs: int | None = None,
     env_spacing_m: float | None = None,
 ) -> DualArmTabletopSceneCfg:
-    """Create the scene from one YAML file."""
+    """Create the scene from a preset and its referenced camera profile."""
 
     config = _load_scene_config(config_path)
     table = config["table"]

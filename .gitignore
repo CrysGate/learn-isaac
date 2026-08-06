@@ -225,3 +225,8 @@ third_parties/
 
 # Generated dual-Piper episodes, previews, and diagnostics
 dual_piper_output/
+
+# docs
+docs/learn.md
+docs/plan.md
+

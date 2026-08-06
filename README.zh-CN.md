@@ -4,11 +4,12 @@
 
 ScaleBench 是一组配置优先的 Isaac Lab 基础组件，用于构建尺度相关的双臂操作场景。
 
-项目将机器人语义和场景参数保存在 YAML 中，在边界处严格校验机器人配置，再将其编译为原生 Isaac Lab 配置对象。当前实现聚焦于可复用的机器人与场景构建，还不是一套完整的任务、策略或评测流水线。
+项目将机器人语义、相机参数和场景参数保存在 YAML 中，在边界处严格校验各类 profile，再将其编译为原生 Isaac Lab 配置对象。当前实现聚焦于可复用的机器人与场景构建，还不是一套完整的任务、策略或评测流水线。
 
 ## 已实现能力
 
 - **类型化机器人配置**：从 YAML 加载机器人，校验关节、TCP、执行器和平行夹爪，并生成一份全新的 `ArticulationCfg`。
+- **可复用相机配置**：将相机光学与输出参数和场景内的传感器位姿分离，并生成一份全新的 `CameraCfg`。
 - **可复用双臂场景**：组合房间、带纹理的地面和桌面、两台可独立配置的机器人、顶视 RGB-D 相机及环境光。
 - **纹理正确的程序化表面**：`UvCuboidCfg` 会写入 face-varying UV，使 MDL 材质能在长方体表面正确平铺。
 - **可直接运行的场景预览**：既可以在 Isaac Sim 中打开默认场景，也可以执行短时间无界面冒烟验证。
@@ -25,6 +26,8 @@ configs/robots/*.yml
   RobotProfile ── 校验 ──► ArticulationCfg ───────────┐
                                                       │
 configs/scene/*.yml ──────────────────────────────────┼─► DualArmTabletopSceneCfg
+                                                      │
+configs/cameras/*.yml ──► CameraProfile ──► CameraCfg ┤
                                                       │
   UvCuboidCfg ── 带纹理的地面和桌面 ──────────────────┘
                                                               │
@@ -142,6 +145,18 @@ robot_cfg = profile.build_articulation_cfg(
 
 `build_articulation_cfg()` 每次都会返回一份新的 Isaac Lab `ArticulationCfg`。当前支持 implicit actuator 和 parallel-jaw gripper。
 
+### 相机 profile
+
+[`CameraProfile`](src/scale_bench/sensors/camera_profile.py) 可以在不启动 Isaac Sim 的情况下校验可复用的相机光学和输出参数：
+
+```python
+from scale_bench.sensors import CameraProfile
+
+profile = CameraProfile.load("configs/cameras/d435.yml")
+```
+
+相机 profile 负责图像尺寸、更新周期、数据类型、针孔内参、畸变元数据、焦距和裁剪范围。场景 preset 只引用 profile，并定义支架和传感器位姿。`build_camera_cfg()` 根据传入的 prim path 和局部位姿创建一份新的 Isaac Lab `CameraCfg`。
+
 ### 场景模板
 
 [`create_dual_arm_tabletop_scene_cfg()`](src/scale_bench/scenes/scene_template.py) 将两个 `ArticulationCfg` 和场景 preset 组合起来：
@@ -204,7 +219,7 @@ scene_cfg = create_dual_arm_tabletop_scene_cfg(
 | `room` | 房间 USD 和统一缩放。 |
 | `ground`、`table` | 位姿、尺寸、材质、摩擦、恢复系数和 UV 平铺。 |
 | `robot_mounts` | 左右机器人底座相对于桌面的位姿。 |
-| `camera` | 支架位姿、传感器变换、图像尺寸、内参、裁剪范围和输出类型。 |
+| `camera` | 相机 profile 引用、支架位姿和传感器变换。 |
 | `lighting` | HDR 环境纹理和光照强度。 |
 | `runtime` | 环境数量、间距、物理复制和 Fabric cloning。 |
 
@@ -216,13 +231,16 @@ scene_cfg = create_dual_arm_tabletop_scene_cfg(
 src/scale_bench/
 ├── robots/
 │   └── robot_profile.py    # YAML schema、校验、ArticulationCfg 构建
-└── scenes/
-    ├── scene_template.py   # 双臂桌面场景编译
-    └── uv_cuboid.py        # 带 face-varying UV 的长方体 spawner
+├── scenes/
+│   ├── scene_template.py   # 双臂桌面场景编译
+│   └── uv_cuboid.py        # 带 face-varying UV 的长方体 spawner
+└── sensors/
+    └── camera_profile.py   # YAML schema、校验、CameraCfg 构建
 
 configs/
+├── cameras/d435.yml        # 可复用相机 profile
 ├── robots/piper.yml        # 参考机器人 profile
-└── scene/default.yml       # 参考场景 preset
+└── scene/default.yml       # 场景内位姿和环境配置
 
 scripts/preview_scene.py    # 交互预览和无界面冒烟验证入口
 ```
