@@ -2,13 +2,13 @@
 
 `DualArmTabletopSceneCfg` 是当前 `scale_bench` 已实现的场景拓扑：在每个环境中组合房间、地面、桌面、两台带挂载相机的机器人、相机支架和顶视 RGB-D 相机，并使用一盏全局环境光。默认 Piper 场景一共创建三台相机。
 
-场景实现位于 [`src/scale_bench/scenes/scene_template.py`](../src/scale_bench/scenes/scene_template.py)，默认场景配置位于 [`configs/scene/default.yml`](../configs/scene/default.yml)，默认相机参数位于 [`configs/cameras/d435.yml`](../configs/cameras/d435.yml)。
+场景编译实现位于 [`src/scale_bench/scenes/scene_template.py`](../src/scale_bench/scenes/scene_template.py)，场景 YAML schema 位于 [`src/scale_bench/scenes/scene_config.py`](../src/scale_bench/scenes/scene_config.py)。默认场景配置位于 [`configs/scene/default.yml`](../configs/scene/default.yml)，默认相机参数位于 [`configs/cameras/d435.yml`](../configs/cameras/d435.yml)。
 
 ```text
 RobotProfile YAML ──► left/right ArticulationCfg ─────┐
                   └─► left/right robot CameraCfg ─────┤
                                                       │
-Scene YAML ───────────────────────────────────────────┼─► DualArmTabletopSceneCfg
+Scene YAML ──► SceneConfig ───────────────────────────┼─► DualArmTabletopSceneCfg
                                                       │
 CameraProfile YAML ──► CameraProfile ──► CameraCfg ───┤
                                                       │
@@ -59,7 +59,11 @@ uv run python scripts/preview_scene.py \
   --device cuda:0
 ```
 
-`preview_scene.py` 默认启用相机和 Kit visualizer。使用 `--viz none` 可以关闭 visualizer；`--max-steps` 必须是正整数。运行以下命令可以查看完整 launcher 参数：
+`preview_scene.py` 默认启用相机和 Kit visualizer。使用 `--viz none` 可以关闭 visualizer；`--max-steps` 必须是正整数。
+
+Kit 预览默认绘制绿色的任务物体放置区域，以及三台相机的彩色视锥。浮动的 `Scene overlays` 面板可分别开关 `Placement area` 和 `Camera frustums`；腕部相机运动时视锥会同步更新。视锥显示长度可通过正数参数 `--camera-frustum-length-m` 调整。使用 `--headless` 或 `--viz none` 时不会创建这些预览元素。
+
+运行以下命令可以查看完整 launcher 参数：
 
 ```bash
 uv run python scripts/preview_scene.py --help
@@ -129,6 +133,25 @@ table:
 - `material_path` 可以为 `null`，此时不创建视觉材质。
 - `uv_scale` 可省略，默认 `[1.0, 1.0]`。
 - 碰撞始终启用，摩擦和恢复系数写入 rigid-body physics material。
+
+### `task_object_placement_area`
+
+```yaml
+task_object_placement_area:
+  x_range_m: [-0.65, 0.65]
+  y_range_m: [-0.30, 0.45]
+```
+
+该字段定义环境局部坐标系 XY 平面上的任务物体放置范围。默认区域位于机械臂前方至桌面远端，并在桌边保留 5 cm 边距；物体的 Z 坐标由任务根据桌面顶面高度确定。
+
+```python
+from scale_bench.scenes import SceneConfig
+
+scene_config = SceneConfig.load("configs/scene/default.yml")
+area = scene_config.task_object_placement_area
+```
+
+`SceneConfig` 会拒绝未知顶层字段、非有限边界值和上下界颠倒的区域。后续增加场景级配置时，在该 schema 中添加对应字段即可。
 
 ### `robot_mounts`
 
@@ -224,7 +247,7 @@ runtime:
 - 场景配置、机器人 profile、相机 profile 和本地资产的相对路径都从仓库根目录解析。
 - 包含 `://` 的资产路径会作为 URI 原样传给 Isaac Lab。
 - 场景 YAML 会按路径在进程内缓存；编辑场景 preset 后应重启预览进程。
-- 场景 YAML 当前使用普通映射读取，缺失字段或类型错误会在构建对应配置时直接报错。
+- 场景 YAML 的顶层结构和放置区域由 `SceneConfig` 校验；各资产段的具体字段在构建对应 Isaac Lab 配置时读取。
 - 相机 YAML 使用严格的 Pydantic schema；加载失败时会以 `ValueError` 报告 profile 路径和具体校验错误。
 - 默认 preset 依赖 `Assets/` 中的房间、材质、相机支架和 HDR 文件，以及这些资产的传递依赖。
 

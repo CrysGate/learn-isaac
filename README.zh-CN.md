@@ -10,9 +10,10 @@ ScaleBench 是一组配置优先的 Isaac Lab 基础组件，用于构建尺度�
 
 - **类型化机器人配置**：校验关节、TCP、执行器、平行夹爪和可选机器人相机，并生成全新的 Isaac Lab 配置。
 - **可复用相机配置**：将相机光学与输出参数和场景、机器人内部的传感器位姿分离。
+- **类型化场景元数据**：校验场景 preset 顶层结构，并公开环境局部坐标系中的任务物体放置范围。
 - **可复用双臂场景**：组合房间、带纹理的地面和桌面、两台带腕部相机的机器人、顶视 RGB-D 相机及环境光。
 - **纹理正确的程序化表面**：`UvCuboidCfg` 会写入 face-varying UV，使 MDL 材质能在长方体表面正确平铺。
-- **可直接运行的场景预览**：既可以在 Isaac Sim 中打开默认场景，也可以执行短时间无界面冒烟验证。
+- **可直接运行的场景预览**：既可以在 Isaac Sim 中查看放置区域与相机视锥，也可以执行短时间无界面冒烟验证。
 
 > [!NOTE]
 > `src/scale_bench` 目前只提供配置与场景基础层。任务、episode 调度、数据记录和 benchmark 报告尚未在该包中实现。
@@ -26,7 +27,7 @@ configs/robots/*.yml
   RobotProfile ── 校验 ──► ArticulationCfg ───────────┤
                 └───────► robot CameraCfg ────────────┤
                                                       │
-configs/scene/*.yml ──────────────────────────────────┼─► DualArmTabletopSceneCfg
+configs/scene/*.yml ──► SceneConfig ──────────────────┼─► DualArmTabletopSceneCfg
                                                       │
 configs/cameras/*.yml ──► CameraProfile ──► CameraCfg ┤
                                                       │
@@ -114,6 +115,7 @@ uv run python scripts/preview_scene.py \
 | `--device VALUE` | 选择 `cpu`、`cuda` 或 `cuda:0` 等具体设备。 |
 | `--viz none` | 关闭 visualizer，以无界面方式运行。 |
 | `--max-steps N` | 在指定仿真步数后退出。 |
+| `--camera-frustum-length-m M` | 设置预览中相机视锥的显示长度，单位为米。 |
 
 运行 `uv run python scripts/preview_scene.py --help` 可以查看 Isaac Lab launcher 的全部参数。
 
@@ -183,6 +185,16 @@ scene_cfg = create_dual_arm_tabletop_scene_cfg(
 
 这段代码应在 `AppLauncher` 完成 Isaac Sim 初始化后运行。
 
+`SceneConfig` 会校验场景顶层结构，以及 `task_object_placement_area` 中有限且顺序正确的 XY 边界。任务构建器和可视化工具可以复用它的 `table_top_z_m` 属性与放置区域元数据，无需重复计算场景几何。
+
+```python
+from scale_bench.scenes import SceneConfig
+
+scene_metadata = SceneConfig.load("configs/scene/default.yml")
+placement_area = scene_metadata.task_object_placement_area
+table_top_z_m = scene_metadata.table_top_z_m
+```
+
 场景包含：
 
 - USD 房间和 dome light；
@@ -224,6 +236,7 @@ scene_cfg = create_dual_arm_tabletop_scene_cfg(
 |---|---|
 | `room` | 房间 USD 和统一缩放。 |
 | `ground`、`table` | 位姿、尺寸、材质、摩擦、恢复系数和 UV 平铺。 |
+| `task_object_placement_area` | 环境局部 XY 平面上的任务物体放置范围。 |
 | `robot_mounts` | 左右机器人底座相对于桌面的位姿。 |
 | `camera` | 相机 profile 引用、支架位姿和传感器变换。 |
 | `lighting` | HDR 环境纹理和光照强度。 |
@@ -238,6 +251,7 @@ src/scale_bench/
 ├── robots/
 │   └── robot_profile.py    # 机器人 schema 及 articulation/camera 构建
 ├── scenes/
+│   ├── scene_config.py     # 场景 YAML 与放置区域 schema
 │   ├── scene_template.py   # 双臂桌面场景编译
 │   └── uv_cuboid.py        # 带 face-varying UV 的长方体 spawner
 └── sensors/

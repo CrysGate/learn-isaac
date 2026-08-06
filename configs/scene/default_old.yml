@@ -18,6 +18,10 @@ table:
   dynamic_friction: 0.8
   restitution: 0.0
 
+task_object_placement_area:
+  x_range_m: [-0.65, 0.65]
+  y_range_m: [-0.20, 0.45]
+
 robot_mounts:
   left:
     position_xy_m: [-0.3, -0.45]

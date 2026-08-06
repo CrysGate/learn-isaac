@@ -28,20 +28,159 @@ parser.add_argument(
     default=None,
     help="Exit after this many simulation steps; useful for headless smoke tests.",
 )
+parser.add_argument(
+    "--camera-frustum-length-m",
+    type=float,
+    default=0.75,
+    help="Visual length of camera frustums in metres.",
+)
 AppLauncher.add_app_launcher_args(parser)
 parser.set_defaults(visualizer=["kit"], enable_cameras=True)
 args = parser.parse_args()
 if args.max_steps is not None and args.max_steps <= 0:
     parser.error("--max-steps must be positive")
+if args.camera_frustum_length_m <= 0.0:
+    parser.error("--camera-frustum-length-m must be positive")
+
+preview_overlays_enabled = not args.headless and "kit" in (args.visualizer or ())
+camera_frustum_length_m = args.camera_frustum_length_m
 
 app_launcher = AppLauncher(args)
 simulation_app = app_launcher.app
 
 import isaaclab.sim as sim_utils
+import omni.ui
 from isaaclab.scene import InteractiveScene
+from isaacsim.util.debug_draw import _debug_draw
+from pxr import Gf
 
 from scale_bench.robots import RobotProfile
-from scale_bench.scenes import create_dual_arm_tabletop_scene_cfg
+from scale_bench.scenes import SceneConfig, create_dual_arm_tabletop_scene_cfg
+
+
+Point = tuple[float, float, float]
+Line = tuple[Point, Point]
+Color = tuple[float, float, float, float]
+
+
+def _camera_frustum_lines(camera, length_m: float) -> list[Line]:
+    """Build world-space frustum lines from an Isaac Lab camera sensor."""
+
+    height, width = camera.data.image_shape
+    lines: list[Line] = []
+    for position, quaternion, intrinsic in zip(
+        camera.data.pos_w.torch.tolist(),
+        camera.data.quat_w_world.torch.tolist(),
+        camera.data.intrinsic_matrices.torch.tolist(),
+        strict=True,
+    ):
+        fx, fy = intrinsic[0][0], intrinsic[1][1]
+        cx, cy = intrinsic[0][2], intrinsic[1][2]
+        rotation = Gf.Quatd(quaternion[3], Gf.Vec3d(*quaternion[:3]))
+
+        corners: list[Point] = []
+        for u, v in ((0.0, 0.0), (width, 0.0), (width, height), (0.0, height)):
+            local_corner = Gf.Vec3d(
+                length_m,
+                -(u - cx) * length_m / fx,
+                -(v - cy) * length_m / fy,
+            )
+            offset = rotation.Transform(local_corner)
+            corners.append(tuple(position[index] + offset[index] for index in range(3)))
+
+        origin = tuple(position)
+        lines.extend((origin, corner) for corner in corners)
+        lines.extend((corners[index], corners[(index + 1) % 4]) for index in range(4))
+    return lines
+
+
+class ScenePreviewOverlay:
+    """Draw optional placement-area and camera-frustum overlays."""
+
+    CAMERA_COLORS: dict[str, Color] = {
+        "left_robot_camera": (0.0, 0.75, 1.0, 1.0),
+        "right_robot_camera": (1.0, 0.35, 0.75, 1.0),
+        "overhead_camera": (1.0, 0.75, 0.0, 1.0),
+    }
+
+    def __init__(
+        self,
+        scene: InteractiveScene,
+        scene_config: SceneConfig,
+        frustum_length_m: float,
+    ) -> None:
+        self._scene = scene
+        self._scene_config = scene_config
+        self._frustum_length_m = frustum_length_m
+        self._draw = _debug_draw.acquire_debug_draw_interface()
+        self._area_model = omni.ui.SimpleBoolModel(True)
+        self._frustum_model = omni.ui.SimpleBoolModel(True)
+
+        self._window = omni.ui.Window("Scene overlays", width=280, height=90)
+        with self._window.frame:
+            with omni.ui.VStack(spacing=4):
+                with omni.ui.HStack(height=24):
+                    omni.ui.Label("Placement area")
+                    omni.ui.CheckBox(model=self._area_model, width=24)
+                with omni.ui.HStack(height=24):
+                    omni.ui.Label("Camera frustums")
+                    omni.ui.CheckBox(model=self._frustum_model, width=24)
+
+    def draw(self) -> None:
+        """Redraw enabled overlays using the latest scene state."""
+
+        self._draw.clear_lines()
+        groups: list[tuple[list[Line], Color, float]] = []
+
+        if self._area_model.as_bool:
+            area = self._scene_config.task_object_placement_area
+            z_m = self._scene_config.table_top_z_m + 0.003
+            area_lines: list[Line] = []
+            for origin in self._scene.env_origins.tolist():
+                corners = [
+                    (origin[0] + x_m, origin[1] + y_m, origin[2] + z_m)
+                    for x_m, y_m in (
+                        (area.x_range_m[0], area.y_range_m[0]),
+                        (area.x_range_m[1], area.y_range_m[0]),
+                        (area.x_range_m[1], area.y_range_m[1]),
+                        (area.x_range_m[0], area.y_range_m[1]),
+                    )
+                ]
+                area_lines.extend(
+                    (corners[index], corners[(index + 1) % 4])
+                    for index in range(4)
+                )
+            groups.append((area_lines, (0.2, 1.0, 0.2, 1.0), 4.0))
+
+        if self._frustum_model.as_bool:
+            for camera_name, color in self.CAMERA_COLORS.items():
+                camera = self._scene.sensors.get(camera_name)
+                if camera is not None:
+                    groups.append(
+                        (
+                            _camera_frustum_lines(camera, self._frustum_length_m),
+                            color,
+                            2.0,
+                        )
+                    )
+
+        styled_lines = [
+            (line, color, width)
+            for lines, color, width in groups
+            for line in lines
+        ]
+        if styled_lines:
+            self._draw.draw_lines(
+                [line[0] for line, _, _ in styled_lines],
+                [line[1] for line, _, _ in styled_lines],
+                [color for _, color, _ in styled_lines],
+                [width for _, _, width in styled_lines],
+            )
+
+    def close(self) -> None:
+        self._draw.clear_lines()
+        _debug_draw.release_debug_draw_interface(self._draw)
+        self._window.visible = False
 
 
 def main() -> None:
@@ -85,6 +224,16 @@ def main() -> None:
             full_data=True,
         )
 
+    overlay = (
+        ScenePreviewOverlay(
+            scene,
+            SceneConfig.load(args.config),
+            camera_frustum_length_m,
+        )
+        if preview_overlays_enabled
+        else None
+    )
+
     print(
         f"Scene loaded from {args.config} with "
         f"{left_profile.name} (left) and {right_profile.name} (right). "
@@ -92,13 +241,19 @@ def main() -> None:
     )
 
     step_count = 0
-    while simulation_app.is_running():
-        scene.write_data_to_sim()
-        sim.step()
-        scene.update(sim.get_physics_dt())
-        step_count += 1
-        if args.max_steps is not None and step_count >= args.max_steps:
-            break
+    try:
+        while simulation_app.is_running():
+            scene.write_data_to_sim()
+            sim.step()
+            scene.update(sim.get_physics_dt())
+            if overlay is not None:
+                overlay.draw()
+            step_count += 1
+            if args.max_steps is not None and step_count >= args.max_steps:
+                break
+    finally:
+        if overlay is not None:
+            overlay.close()
 
 
 if __name__ == "__main__":

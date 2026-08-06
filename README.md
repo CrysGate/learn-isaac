@@ -10,9 +10,10 @@ ScaleBench keeps robot semantics, camera parameters, and scene parameters in YAM
 
 - **Typed robot profiles** — validate joints, TCP, actuators, gripper, and an optional robot-mounted camera, then build fresh Isaac Lab configs.
 - **Reusable camera profiles** — keep camera optics and output parameters separate from scene- and robot-local sensor poses.
+- **Typed scene metadata** — validate the scene preset boundary and expose task-object placement bounds in environment-local coordinates.
 - **A reusable dual-arm scene** — compose a room, textured ground and table, two independently configured robots with wrist cameras, an overhead RGB-D camera, and environment lighting.
 - **Texture-correct procedural surfaces** — `UvCuboidCfg` authors face-varying UV coordinates so MDL materials tile correctly on cuboids.
-- **A runnable scene preview** — launch the default scene in Isaac Sim or run a short headless smoke test.
+- **A runnable scene preview** — launch the default scene with placement-area and camera-frustum overlays, or run a short headless smoke test.
 
 > [!NOTE]
 > The code under `src/scale_bench` currently provides the configuration and scene foundation. Tasks, episode orchestration, recording, and benchmark reporting are not implemented in this package yet.
@@ -26,7 +27,7 @@ configs/robots/*.yml
   RobotProfile ── validation ──► ArticulationCfg ─────┤
                 └──────────────► robot CameraCfg ─────┤
                                                       │
-configs/scene/*.yml ──────────────────────────────────┼─► DualArmTabletopSceneCfg
+configs/scene/*.yml ──► SceneConfig ──────────────────┼─► DualArmTabletopSceneCfg
                                                       │
 configs/cameras/*.yml ──► CameraProfile ──► CameraCfg ┤
                                                       │
@@ -114,6 +115,7 @@ Useful preview options:
 | `--device VALUE` | Choose `cpu`, `cuda`, or a device such as `cuda:0`. |
 | `--viz none` | Disable visualizers for headless execution. |
 | `--max-steps N` | Exit after a bounded number of simulation steps. |
+| `--camera-frustum-length-m M` | Set the displayed camera-frustum length in metres. |
 
 Run `uv run python scripts/preview_scene.py --help` for all Isaac Lab launcher options.
 
@@ -183,6 +185,16 @@ scene_cfg = create_dual_arm_tabletop_scene_cfg(
 
 This snippet is intended to run after `AppLauncher` has initialized Isaac Sim.
 
+`SceneConfig` validates the top-level scene structure and the finite, ordered XY bounds in `task_object_placement_area`. Its `table_top_z_m` property and placement-area metadata can be reused by task builders and visualization tools without duplicating scene geometry calculations.
+
+```python
+from scale_bench.scenes import SceneConfig
+
+scene_metadata = SceneConfig.load("configs/scene/default.yml")
+placement_area = scene_metadata.task_object_placement_area
+table_top_z_m = scene_metadata.table_top_z_m
+```
+
 The scene contains:
 
 - a USD room and dome light;
@@ -224,6 +236,7 @@ Copy [`configs/scene/default.yml`](configs/scene/default.yml) and edit the relev
 |---|---|
 | `room` | Room USD and uniform scale. |
 | `ground`, `table` | Pose, dimensions, material, friction, restitution, and UV tiling. |
+| `task_object_placement_area` | Task-object XY placement bounds in the environment-local frame. |
 | `robot_mounts` | Left and right base poses relative to the table top. |
 | `camera` | Camera profile reference, stand pose, and sensor transform. |
 | `lighting` | HDR environment texture and intensity. |
@@ -238,6 +251,7 @@ src/scale_bench/
 ├── robots/
 │   └── robot_profile.py    # robot schema and articulation/camera builders
 ├── scenes/
+│   ├── scene_config.py     # typed scene YAML and placement bounds
 │   ├── scene_template.py   # dual-arm tabletop scene compiler
 │   └── uv_cuboid.py        # cuboid spawner with face-varying UVs
 └── sensors/

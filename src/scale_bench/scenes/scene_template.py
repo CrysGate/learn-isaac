@@ -3,12 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import MISSING
-from functools import cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import isaaclab.sim as sim_utils
-import yaml
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sensors import CameraCfg
@@ -16,6 +14,7 @@ from isaaclab.utils.configclass import configclass
 
 from scale_bench.sensors import CameraProfile
 
+from .scene_config import DEFAULT_SCENE_CONFIG_PATH, SceneConfig
 from .uv_cuboid import UvCuboidCfg
 
 if TYPE_CHECKING:
@@ -23,20 +22,6 @@ if TYPE_CHECKING:
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
-DEFAULT_SCENE_CONFIG_PATH = REPOSITORY_ROOT / "configs/scene/default.yml"
-
-
-@cache
-def _load_scene_config(config_path: str | Path) -> dict[str, Any]:
-    path = Path(config_path)
-    if not path.is_absolute():
-        path = REPOSITORY_ROOT / path
-
-    with path.open(encoding="utf-8") as config_file:
-        config = yaml.safe_load(config_file)
-    if not isinstance(config, dict):
-        raise ValueError(f"Scene config must be a mapping: {path}")
-    return config
 
 
 def _asset_path(value: str | None) -> str | None:
@@ -160,19 +145,19 @@ def create_dual_arm_tabletop_scene_cfg(
     left_robot_cfg = left_robot_profile.build_articulation_cfg()
     right_robot_cfg = right_robot_profile.build_articulation_cfg()
 
-    config = _load_scene_config(config_path)
-    table = config["table"]
-    runtime = config["runtime"]
-    camera = config["camera"]
-    table_top_z_m = table["position_m"][2] + table["size_m"][2] / 2.0
+    config = SceneConfig.load(config_path)
+    table = config.table
+    runtime = config.runtime
+    camera = config.camera
+    table_top_z_m = config.table_top_z_m
 
     scene_cfg = DualArmTabletopSceneCfg(
         num_envs=runtime["num_envs"] if num_envs is None else num_envs,
         env_spacing=runtime["env_spacing_m"] if env_spacing_m is None else env_spacing_m,
         replicate_physics=runtime["replicate_physics"],
         clone_in_fabric=runtime["clone_in_fabric"],
-        room=_room_cfg(config["room"]),
-        ground=_surface_cfg("{ENV_REGEX_NS}/Ground", config["ground"]),
+        room=_room_cfg(config.room),
+        ground=_surface_cfg("{ENV_REGEX_NS}/Ground", config.ground),
         table=_surface_cfg("{ENV_REGEX_NS}/Table", table),
         camera_stand=_camera_stand_cfg(table_top_z_m, camera),
         left_robot_camera=(
@@ -186,18 +171,18 @@ def create_dual_arm_tabletop_scene_cfg(
             )
         ),
         overhead_camera=_camera_cfg(camera),
-        environment_light=_light_cfg(config["lighting"]),
+        environment_light=_light_cfg(config.lighting),
     )
     scene_cfg.left_robot = _mounted_robot_cfg(
         left_robot_cfg,
         "{ENV_REGEX_NS}/LeftRobot",
-        config["robot_mounts"]["left"],
+        config.robot_mounts["left"],
         table_top_z_m,
     )
     scene_cfg.right_robot = _mounted_robot_cfg(
         right_robot_cfg,
         "{ENV_REGEX_NS}/RightRobot",
-        config["robot_mounts"]["right"],
+        config.robot_mounts["right"],
         table_top_z_m,
     )
     return scene_cfg
