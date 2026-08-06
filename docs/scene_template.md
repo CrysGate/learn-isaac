@@ -90,15 +90,13 @@ scene = InteractiveScene(scene_cfg)
 
 | 参数 | 必需 | 作用 |
 |---|---:|---|
-| `left_robot_profile` | 条件必需 | 左侧 `RobotProfile`；用于生成 articulation 和机器人相机。 |
-| `right_robot_profile` | 条件必需 | 右侧 `RobotProfile`；用于生成 articulation 和机器人相机。 |
-| `left_robot_cfg` | 条件必需 | 兼容已有调用的左侧 `ArticulationCfg`；未提供 profile 时不会创建机器人相机。 |
-| `right_robot_cfg` | 条件必需 | 兼容已有调用的右侧 `ArticulationCfg`；未提供 profile 时不会创建机器人相机。 |
+| `left_robot_profile` | 是 | 左侧 `RobotProfile`；用于生成 articulation 和机器人相机。 |
+| `right_robot_profile` | 是 | 右侧 `RobotProfile`；用于生成 articulation 和机器人相机。 |
 | `config_path` | 否 | 场景 YAML；默认是 `configs/scene/default.yml`。 |
 | `num_envs` | 否 | 覆盖 YAML 中的 `runtime.num_envs`。 |
 | `env_spacing_m` | 否 | 覆盖 YAML 中的 `runtime.env_spacing_m`。 |
 
-每一侧必须提供 profile 或 articulation cfg。优先传 profile 才能让场景从机器人配置构建挂载相机；同时传入两者时，场景使用显式 articulation cfg，并使用 profile 构建相机。`replicate_physics` 和 `clone_in_fabric` 当前始终读取 YAML 的 `runtime` 配置。
+左右两侧都必须提供 robot profile。场景会分别从 profile 构建 articulation 和挂载相机。`replicate_physics` 和 `clone_in_fabric` 当前始终读取 YAML 的 `runtime` 配置。
 
 ## 场景 YAML
 
@@ -170,11 +168,11 @@ table_top_z = table.position_m[2] + table.size_m[2] / 2
 ```yaml
 camera:
   profile_path: configs/cameras/d435.yml
-  stand_usd_path: Assets/Object/Geometry/camera_stand/00000/object.usd
+  stand_usd_path: Assets/Object/Geometry/camera_stand_aloha/aloha_front_camera_stand_realsense_d435.usd
   stand_position_xy_m: [0.0, -0.47]
-  stand_orientation_xyzw: [-0.70710678, 0.0, 0.0, 0.70710678]
-  sensor_local_position_m: [0.0, -0.543, 0.06]
-  sensor_local_orientation_xyzw: [0.8660254, 0.0, 0.0, 0.5]
+  stand_orientation_xyzw: [0.0, 0.0, 0.70710678, 0.70710678]
+  sensor_local_position_m: [0.06376095, 0.0003435, 0.55816412]
+  sensor_local_orientation_xyzw: [0.26866805, -0.26866791, -0.65407767, 0.65407754]
   convention: opengl
 ```
 

@@ -72,7 +72,7 @@ Assets/
 ├── Background/brown_photostudio_02_4k.hdr
 ├── Material/material_0122/Mahogany_Planks.mdl
 ├── Material/material_0564/Wood_Tiles_Fineline.mdl
-├── Object/Geometry/camera_stand/00000/object.usd
+├── Object/Geometry/camera_stand_aloha/aloha_front_camera_stand_realsense_d435.usd
 ├── Robots/piper/Piper.usd
 ├── Robots/piper/piper_description/urdf/piper.urdf
 └── Room/Simple_Room_nolight/simple_room_nolight.usd

@@ -217,7 +217,7 @@ URDF、TCP、末端 body 和 finger body 当前不会直接写入 `ArticulationC
      --max-steps 2
    ```
 
-仓库中的 [`tests/test_robot_profile.py`](../tests/test_robot_profile.py) 覆盖 Piper 相机挂载、引用 profile、USD helper 和左右场景相机配置；实际渲染仍应通过场景冒烟测试验证。
+仓库目前还没有自动化的 robot profile 契约测试。新增机器人时，至少应验证 profile 加载、相机 profile 引用、USD 挂载 frame，以及左右场景相机的 prim path；实际渲染仍应通过场景冒烟测试验证。
 
 ## 当前支持边界
 
