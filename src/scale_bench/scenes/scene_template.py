@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import MISSING
 from functools import cache
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import isaaclab.sim as sim_utils
 import yaml
@@ -17,6 +17,9 @@ from isaaclab.utils.configclass import configclass
 from scale_bench.sensors import CameraProfile
 
 from .uv_cuboid import UvCuboidCfg
+
+if TYPE_CHECKING:
+    from scale_bench.robots import RobotProfile
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
@@ -112,7 +115,7 @@ def _light_cfg(spec: dict[str, Any]) -> AssetBaseCfg:
 
 @configclass
 class DualArmTabletopSceneCfg(InteractiveSceneCfg):
-    """Room, table, two robot mounts, and one overhead RGB-D camera."""
+    """Room, table, two camera-equipped robots, and one overhead camera."""
 
     room: AssetBaseCfg = MISSING
     ground: AssetBaseCfg = MISSING
@@ -120,6 +123,8 @@ class DualArmTabletopSceneCfg(InteractiveSceneCfg):
     camera_stand: AssetBaseCfg = MISSING
     left_robot: ArticulationCfg = MISSING
     right_robot: ArticulationCfg = MISSING
+    left_robot_camera: CameraCfg = MISSING
+    right_robot_camera: CameraCfg = MISSING
     overhead_camera: CameraCfg = MISSING
     environment_light: AssetBaseCfg = MISSING
 
@@ -139,13 +144,21 @@ def _mounted_robot_cfg(
 
 def create_dual_arm_tabletop_scene_cfg(
     *,
-    left_robot_cfg: ArticulationCfg,
-    right_robot_cfg: ArticulationCfg,
+    left_robot_profile: RobotProfile,
+    right_robot_profile: RobotProfile,
     config_path: str | Path = DEFAULT_SCENE_CONFIG_PATH,
     num_envs: int | None = None,
     env_spacing_m: float | None = None,
 ) -> DualArmTabletopSceneCfg:
-    """Create the scene from a preset and its referenced camera profile."""
+    """Create the scene from robot profiles/configs and a scene preset."""
+
+    if left_robot_profile is None:
+        raise ValueError("left_robot_profile is required")
+    if right_robot_profile is None:
+        raise ValueError("right_robot_profile is required")
+
+    left_robot_cfg = left_robot_profile.build_articulation_cfg()
+    right_robot_cfg = right_robot_profile.build_articulation_cfg()
 
     config = _load_scene_config(config_path)
     table = config["table"]
@@ -162,6 +175,16 @@ def create_dual_arm_tabletop_scene_cfg(
         ground=_surface_cfg("{ENV_REGEX_NS}/Ground", config["ground"]),
         table=_surface_cfg("{ENV_REGEX_NS}/Table", table),
         camera_stand=_camera_stand_cfg(table_top_z_m, camera),
+        left_robot_camera=(
+            left_robot_profile.build_camera_cfg(
+                robot_prim_path="{ENV_REGEX_NS}/LeftRobot"
+            )
+        ),
+        right_robot_camera=(
+            right_robot_profile.build_camera_cfg(
+                robot_prim_path="{ENV_REGEX_NS}/RightRobot"
+            )
+        ),
         overhead_camera=_camera_cfg(camera),
         environment_light=_light_cfg(config["lighting"]),
     )

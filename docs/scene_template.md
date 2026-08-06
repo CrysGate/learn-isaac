@@ -1,11 +1,12 @@
 # 双臂桌面场景模板
 
-`DualArmTabletopSceneCfg` 是当前 `scale_bench` 已实现的场景拓扑：在每个环境中组合房间、地面、桌面、两台机器人、相机支架和顶视 RGB-D 相机，并使用一盏全局环境光。
+`DualArmTabletopSceneCfg` 是当前 `scale_bench` 已实现的场景拓扑：在每个环境中组合房间、地面、桌面、两台带挂载相机的机器人、相机支架和顶视 RGB-D 相机，并使用一盏全局环境光。默认 Piper 场景一共创建三台相机。
 
 场景实现位于 [`src/scale_bench/scenes/scene_template.py`](../src/scale_bench/scenes/scene_template.py)，默认场景配置位于 [`configs/scene/default.yml`](../configs/scene/default.yml)，默认相机参数位于 [`configs/cameras/d435.yml`](../configs/cameras/d435.yml)。
 
 ```text
 RobotProfile YAML ──► left/right ArticulationCfg ─────┐
+                  └─► left/right robot CameraCfg ─────┤
                                                       │
 Scene YAML ───────────────────────────────────────────┼─► DualArmTabletopSceneCfg
                                                       │
@@ -27,6 +28,8 @@ UvCuboidCfg ──► textured ground/table ────────────
 | `camera_stand` | `{ENV_REGEX_NS}/CameraStand` | 放置在桌面高度上的相机支架 USD。 |
 | `left_robot` | `{ENV_REGEX_NS}/LeftRobot` | 左侧 `ArticulationCfg` 的挂载副本。 |
 | `right_robot` | `{ENV_REGEX_NS}/RightRobot` | 右侧 `ArticulationCfg` 的挂载副本。 |
+| `left_robot_camera` | `{ENV_REGEX_NS}/LeftRobot/link6/camera/D435Sensor` | 随左机器人腕部运动的 RGB-D 相机。 |
+| `right_robot_camera` | `{ENV_REGEX_NS}/RightRobot/link6/camera/D435Sensor` | 随右机器人腕部运动的 RGB-D 相机。 |
 | `overhead_camera` | `{ENV_REGEX_NS}/CameraStand/OverheadCamera` | Pinhole RGB-D 相机。 |
 | `environment_light` | `/World/EnvironmentLight` | 使用 HDR 纹理的全局 dome light。 |
 
@@ -76,8 +79,8 @@ left = RobotProfile.load("configs/robots/piper.yml")
 right = RobotProfile.load("configs/robots/piper.yml")
 
 scene_cfg = create_dual_arm_tabletop_scene_cfg(
-    left_robot_cfg=left.build_articulation_cfg(),
-    right_robot_cfg=right.build_articulation_cfg(),
+    left_robot_profile=left,
+    right_robot_profile=right,
     config_path="configs/scene/default.yml",
 )
 scene = InteractiveScene(scene_cfg)
@@ -87,13 +90,15 @@ scene = InteractiveScene(scene_cfg)
 
 | 参数 | 必需 | 作用 |
 |---|---:|---|
-| `left_robot_cfg` | 是 | 左侧机器人 `ArticulationCfg`。 |
-| `right_robot_cfg` | 是 | 右侧机器人 `ArticulationCfg`。 |
+| `left_robot_profile` | 条件必需 | 左侧 `RobotProfile`；用于生成 articulation 和机器人相机。 |
+| `right_robot_profile` | 条件必需 | 右侧 `RobotProfile`；用于生成 articulation 和机器人相机。 |
+| `left_robot_cfg` | 条件必需 | 兼容已有调用的左侧 `ArticulationCfg`；未提供 profile 时不会创建机器人相机。 |
+| `right_robot_cfg` | 条件必需 | 兼容已有调用的右侧 `ArticulationCfg`；未提供 profile 时不会创建机器人相机。 |
 | `config_path` | 否 | 场景 YAML；默认是 `configs/scene/default.yml`。 |
 | `num_envs` | 否 | 覆盖 YAML 中的 `runtime.num_envs`。 |
 | `env_spacing_m` | 否 | 覆盖 YAML 中的 `runtime.env_spacing_m`。 |
 
-`replicate_physics` 和 `clone_in_fabric` 当前始终读取 YAML 的 `runtime` 配置。
+每一侧必须提供 profile 或 articulation cfg。优先传 profile 才能让场景从机器人配置构建挂载相机；同时传入两者时，场景使用显式 articulation cfg，并使用 profile 构建相机。`replicate_physics` 和 `clone_in_fabric` 当前始终读取 YAML 的 `runtime` 配置。
 
 ## 场景 YAML
 
@@ -146,6 +151,17 @@ table_top_z = table.position_m[2] + table.size_m[2] / 2
 ```
 
 机器人底座使用 YAML 中的 `position_xy_m` 和 `orientation_xyzw`，Z 坐标自动设置为 `table_top_z`。修改桌面高度后不需要手动同步机器人高度。
+
+### 机器人相机
+
+机器人相机不写在 scene YAML 中。相机型号、输出与内参来自 `configs/cameras/*.yml`，相对于机器人 frame 的安装关系来自 `configs/robots/*.yml`。场景工厂只为左右机器人补上各自的根路径：
+
+```text
+{ENV_REGEX_NS}/LeftRobot  + link6/camera/D435Sensor
+{ENV_REGEX_NS}/RightRobot + link6/camera/D435Sensor
+```
+
+传感器作为各自机器人腕部 prim 的子节点生成，因此会跟随机械臂运动。Isaac Lab 场景会先创建 articulation，再创建传感器。
 
 ### `camera`
 
@@ -207,7 +223,7 @@ runtime:
 
 ## 路径、缓存与错误行为
 
-- 场景配置、相机 profile 和本地资产的相对路径都从仓库根目录解析。
+- 场景配置、机器人 profile、相机 profile 和本地资产的相对路径都从仓库根目录解析。
 - 包含 `://` 的资产路径会作为 URI 原样传给 Isaac Lab。
 - 场景 YAML 会按路径在进程内缓存；编辑场景 preset 后应重启预览进程。
 - 场景 YAML 当前使用普通映射读取，缺失字段或类型错误会在构建对应配置时直接报错。

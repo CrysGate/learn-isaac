@@ -8,9 +8,9 @@ ScaleBench 是一组配置优先的 Isaac Lab 基础组件，用于构建尺度�
 
 ## 已实现能力
 
-- **类型化机器人配置**：从 YAML 加载机器人，校验关节、TCP、执行器和平行夹爪，并生成一份全新的 `ArticulationCfg`。
-- **可复用相机配置**：将相机光学与输出参数和场景内的传感器位姿分离，并生成一份全新的 `CameraCfg`。
-- **可复用双臂场景**：组合房间、带纹理的地面和桌面、两台可独立配置的机器人、顶视 RGB-D 相机及环境光。
+- **类型化机器人配置**：校验关节、TCP、执行器、平行夹爪和可选机器人相机，并生成全新的 Isaac Lab 配置。
+- **可复用相机配置**：将相机光学与输出参数和场景、机器人内部的传感器位姿分离。
+- **可复用双臂场景**：组合房间、带纹理的地面和桌面、两台带腕部相机的机器人、顶视 RGB-D 相机及环境光。
 - **纹理正确的程序化表面**：`UvCuboidCfg` 会写入 face-varying UV，使 MDL 材质能在长方体表面正确平铺。
 - **可直接运行的场景预览**：既可以在 Isaac Sim 中打开默认场景，也可以执行短时间无界面冒烟验证。
 
@@ -23,7 +23,8 @@ ScaleBench 是一组配置优先的 Isaac Lab 基础组件，用于构建尺度�
 configs/robots/*.yml
         │
         ▼
-  RobotProfile ── 校验 ──► ArticulationCfg ───────────┐
+  RobotProfile ── 校验 ──► ArticulationCfg ───────────┤
+                └───────► robot CameraCfg ────────────┤
                                                       │
 configs/scene/*.yml ──────────────────────────────────┼─► DualArmTabletopSceneCfg
                                                       │
@@ -129,6 +130,9 @@ profile = RobotProfile.load("configs/robots/piper.yml")
 robot_cfg = profile.build_articulation_cfg(
     prim_path="{ENV_REGEX_NS}/Robot",
 )
+camera_cfg = profile.build_camera_cfg(
+    robot_prim_path="{ENV_REGEX_NS}/Robot",
+)
 ```
 
 只加载和校验 profile 不需要启动仿真器；调用 `build_articulation_cfg()` 前则应先启动 Isaac Lab `AppLauncher`。仓库中的 [`preview_scene.py`](scripts/preview_scene.py) 展示了正确的启动和 import 顺序。
@@ -140,10 +144,11 @@ robot_cfg = profile.build_articulation_cfg(
 - 要求机械臂、夹爪和执行器中的关节名唯一；
 - 确保初始位置恰好覆盖所有已声明关节；
 - 检查执行器覆盖关系，并禁止不同执行器组重复控制同一关节；
-- 校验 TCP 单位四元数和平行夹爪约定；
+- 校验 TCP、平行夹爪和可选相机安装约定；
+- 加载并校验机器人引用的相机 profile；
 - 检查本地 USD 和可选 URDF 资产是否存在。
 
-`build_articulation_cfg()` 每次都会返回一份新的 Isaac Lab `ArticulationCfg`。当前支持 implicit actuator 和 parallel-jaw gripper。
+`build_articulation_cfg()` 每次都会返回一份新的 Isaac Lab `ArticulationCfg`。`build_camera_cfg()` 会在给定机器人根节点下创建相机；未配置相机时返回 `None`。当前机器人实现支持 implicit actuator、parallel-jaw gripper 和一台挂载相机。
 
 ### 相机 profile
 
@@ -155,11 +160,11 @@ from scale_bench.sensors import CameraProfile
 profile = CameraProfile.load("configs/cameras/d435.yml")
 ```
 
-相机 profile 负责图像尺寸、更新周期、数据类型、针孔内参、畸变元数据、焦距和裁剪范围。场景 preset 只引用 profile，并定义支架和传感器位姿。`build_camera_cfg()` 根据传入的 prim path 和局部位姿创建一份新的 Isaac Lab `CameraCfg`。
+相机 profile 负责图像尺寸、更新周期、数据类型、针孔内参、畸变元数据、焦距和裁剪范围。场景与机器人 profile 引用它，并分别保有自身资产内部的安装位姿。左右 Piper 腕部相机和顶视相机复用同一份 D435 profile。
 
 ### 场景模板
 
-[`create_dual_arm_tabletop_scene_cfg()`](src/scale_bench/scenes/scene_template.py) 将两个 `ArticulationCfg` 和场景 preset 组合起来：
+[`create_dual_arm_tabletop_scene_cfg()`](src/scale_bench/scenes/scene_template.py) 将两个机器人 profile 和场景 preset 组合起来：
 
 ```python
 from scale_bench.robots import RobotProfile
@@ -169,8 +174,8 @@ left = RobotProfile.load("configs/robots/piper.yml")
 right = RobotProfile.load("configs/robots/piper.yml")
 
 scene_cfg = create_dual_arm_tabletop_scene_cfg(
-    left_robot_cfg=left.build_articulation_cfg(),
-    right_robot_cfg=right.build_articulation_cfg(),
+    left_robot_profile=left,
+    right_robot_profile=right,
     config_path="configs/scene/default.yml",
     num_envs=1,
 )
@@ -183,7 +188,8 @@ scene_cfg = create_dual_arm_tabletop_scene_cfg(
 - USD 房间和 dome light；
 - 启用碰撞并带纹理的地面与桌面；
 - 左右两套独立机器人安装位；
-- 相机支架和 D435 风格 RGB-D 传感器；
+- 左右机器人各自挂载的 D435 风格 RGB-D 传感器；
+- 相机支架和顶视 D435 风格 RGB-D 传感器；
 - 可配置的环境数量、间距、物理复制和 Fabric cloning。
 
 机器人底座和相机支架会根据计算得到的桌面高度放置，因此修改桌子高度后，安装在桌面上的资产仍会自动对齐。
@@ -197,7 +203,7 @@ scene_cfg = create_dual_arm_tabletop_scene_cfg(
 ### 添加机器人
 
 1. 复制 [`configs/robots/piper.yml`](configs/robots/piper.yml)。
-2. 修改资产路径、初始关节状态、运动学 frame、TCP、执行器组和夹爪语义。
+2. 修改资产路径、初始关节状态、运动学 frame、TCP、执行器组、夹爪语义和可选相机安装关系。
 3. 四元数使用 `xyzw` 顺序，距离使用米。
 4. 不启动 Isaac Sim，直接校验 profile：
 
@@ -230,7 +236,7 @@ scene_cfg = create_dual_arm_tabletop_scene_cfg(
 ```text
 src/scale_bench/
 ├── robots/
-│   └── robot_profile.py    # YAML schema、校验、ArticulationCfg 构建
+│   └── robot_profile.py    # 机器人 schema 及 articulation/camera 构建
 ├── scenes/
 │   ├── scene_template.py   # 双臂桌面场景编译
 │   └── uv_cuboid.py        # 带 face-varying UV 的长方体 spawner

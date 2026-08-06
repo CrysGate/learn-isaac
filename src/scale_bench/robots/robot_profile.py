@@ -5,13 +5,16 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Self, TypeAlias
+from typing import TYPE_CHECKING, Annotated, Literal, Self, TypeAlias
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from scale_bench.sensors import CameraProfile
+
 if TYPE_CHECKING:
     from isaaclab.assets import ArticulationCfg
+    from isaaclab.sensors import CameraCfg
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
@@ -20,6 +23,8 @@ FiniteFloat = Annotated[float, Field(allow_inf_nan=False)]
 NonNegativeFloat = Annotated[float, Field(ge=0.0, allow_inf_nan=False)]
 PositiveFloat = Annotated[float, Field(gt=0.0, allow_inf_nan=False)]
 Name = Annotated[str, Field(min_length=1)]
+RelativePrimPath = Annotated[str, Field(pattern=r"^[A-Za-z_][A-Za-z0-9_]*(/[A-Za-z_][A-Za-z0-9_]*)*$")]
+PrimName = Annotated[str, Field(pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")]
 JointNames = Annotated[tuple[Name, ...], Field(min_length=1)]
 ActuatorValue: TypeAlias = (
     NonNegativeFloat | dict[str, NonNegativeFloat] | None
@@ -33,6 +38,14 @@ class _ProfileModel(BaseModel):
 def _require_unique(names: tuple[str, ...], label: str) -> None:
     if len(names) != len(set(names)):
         raise ValueError(f"{label} contains duplicate names")
+
+
+def _require_unit_quaternion(
+    orientation_xyzw: tuple[float, float, float, float],
+) -> None:
+    norm = math.sqrt(sum(value * value for value in orientation_xyzw))
+    if not math.isclose(norm, 1.0, abs_tol=1.0e-6):
+        raise ValueError("orientation_xyzw must be a unit quaternion")
 
 
 class TcpProfile(_ProfileModel):
@@ -49,9 +62,28 @@ class TcpProfile(_ProfileModel):
 
     @model_validator(mode="after")
     def _validate_quaternion(self) -> Self:
-        norm = math.sqrt(sum(value * value for value in self.orientation_xyzw))
-        if not math.isclose(norm, 1.0, abs_tol=1.0e-6):
-            raise ValueError("orientation_xyzw must be a unit quaternion")
+        _require_unit_quaternion(self.orientation_xyzw)
+        return self
+
+
+class MountedCameraProfile(_ProfileModel):
+    """Camera model and pose relative to an authored robot prim."""
+
+    profile_path: Name
+    parent_prim_path: RelativePrimPath
+    sensor_prim_name: PrimName
+    position_m: tuple[FiniteFloat, FiniteFloat, FiniteFloat] = (0.0, 0.0, 0.0)
+    orientation_xyzw: tuple[
+        FiniteFloat,
+        FiniteFloat,
+        FiniteFloat,
+        FiniteFloat,
+    ] = (0.0, 0.0, 0.0, 1.0)
+    convention: Literal["opengl", "ros", "world"] = "opengl"
+
+    @model_validator(mode="after")
+    def _validate_quaternion(self) -> Self:
+        _require_unit_quaternion(self.orientation_xyzw)
         return self
 
 
@@ -124,6 +156,7 @@ class RobotProfile(_ProfileModel):
     kinematics: KinematicsProfile
     actuators: dict[str, ImplicitActuatorProfile]
     gripper: ParallelJawGripperProfile
+    camera: MountedCameraProfile | None = None
 
     @model_validator(mode="after")
     def _validate_joint_contract(self) -> Self:
@@ -177,6 +210,8 @@ class RobotProfile(_ProfileModel):
             resolved = profile._resolve_asset_path(asset_path)
             if not Path(resolved).is_file():
                 raise ValueError(f"Robot asset does not exist: {resolved}")
+        if profile.camera is not None:
+            CameraProfile.load(profile.camera.profile_path)
         return profile
 
     @staticmethod
@@ -243,6 +278,27 @@ class RobotProfile(_ProfileModel):
         if prim_path is not None:
             cfg.prim_path = prim_path
         return cfg
+
+    def build_camera_cfg(self, *, robot_prim_path: str) -> CameraCfg | None:
+        """Build the camera mounted below ``robot_prim_path``, when configured."""
+
+        if self.camera is None:
+            return None
+        root_prim_path = robot_prim_path.rstrip("/")
+        if not root_prim_path:
+            raise ValueError("robot_prim_path must not be empty")
+
+        mount = self.camera
+        profile = CameraProfile.load(mount.profile_path)
+        return profile.build_camera_cfg(
+            prim_path=(
+                f"{root_prim_path}/{mount.parent_prim_path}/"
+                f"{mount.sensor_prim_name}"
+            ),
+            position_m=mount.position_m,
+            orientation_xyzw=mount.orientation_xyzw,
+            convention=mount.convention,
+        )
 
 
 __all__ = ["RobotProfile"]

@@ -64,8 +64,8 @@ def main() -> None:
     right_profile = RobotProfile.load(args.right_robot_config)
     scene = InteractiveScene(
         create_dual_arm_tabletop_scene_cfg(
-            left_robot_cfg=left_profile.build_articulation_cfg(),
-            right_robot_cfg=right_profile.build_articulation_cfg(),
+            left_robot_profile=left_profile,
+            right_robot_profile=right_profile,
             config_path=args.config,
         )
     )

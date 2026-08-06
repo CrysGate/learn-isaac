@@ -8,9 +8,9 @@ ScaleBench keeps robot semantics, camera parameters, and scene parameters in YAM
 
 ## What is implemented
 
-- **Typed robot profiles** — load a robot from YAML, validate its joints, TCP, actuators, and parallel-jaw gripper, then build a fresh `ArticulationCfg`.
-- **Reusable camera profiles** — keep camera optics and output parameters separate from scene-local sensor poses and build a fresh `CameraCfg`.
-- **A reusable dual-arm scene** — compose a room, textured ground and table, two independently configured robots, an overhead RGB-D camera, and environment lighting.
+- **Typed robot profiles** — validate joints, TCP, actuators, gripper, and an optional robot-mounted camera, then build fresh Isaac Lab configs.
+- **Reusable camera profiles** — keep camera optics and output parameters separate from scene- and robot-local sensor poses.
+- **A reusable dual-arm scene** — compose a room, textured ground and table, two independently configured robots with wrist cameras, an overhead RGB-D camera, and environment lighting.
 - **Texture-correct procedural surfaces** — `UvCuboidCfg` authors face-varying UV coordinates so MDL materials tile correctly on cuboids.
 - **A runnable scene preview** — launch the default scene in Isaac Sim or run a short headless smoke test.
 
@@ -23,7 +23,8 @@ ScaleBench keeps robot semantics, camera parameters, and scene parameters in YAM
 configs/robots/*.yml
         │
         ▼
-  RobotProfile ── validation ──► ArticulationCfg ─────┐
+  RobotProfile ── validation ──► ArticulationCfg ─────┤
+                └──────────────► robot CameraCfg ─────┤
                                                       │
 configs/scene/*.yml ──────────────────────────────────┼─► DualArmTabletopSceneCfg
                                                       │
@@ -129,6 +130,9 @@ profile = RobotProfile.load("configs/robots/piper.yml")
 robot_cfg = profile.build_articulation_cfg(
     prim_path="{ENV_REGEX_NS}/Robot",
 )
+camera_cfg = profile.build_camera_cfg(
+    robot_prim_path="{ENV_REGEX_NS}/Robot",
+)
 ```
 
 Loading and validating a profile does not require a running simulator. Start Isaac Lab's `AppLauncher` before calling `build_articulation_cfg()`; the included [`preview_scene.py`](scripts/preview_scene.py) shows the required startup and import order.
@@ -140,10 +144,11 @@ Loading and validating a profile does not require a running simulator. Start Isa
 - requires unique arm, gripper, and actuator joint names;
 - verifies that initial positions exactly cover all declared joints;
 - verifies actuator coverage and prevents overlapping actuator groups;
-- validates the TCP unit quaternion and parallel-jaw gripper contract;
+- validates the TCP, parallel-jaw gripper, and optional camera-mount contract;
+- loads and validates the referenced camera profile;
 - checks that local USD and optional URDF assets exist.
 
-`build_articulation_cfg()` returns a new Isaac Lab `ArticulationCfg` on every call. It currently supports implicit actuators and parallel-jaw grippers.
+`build_articulation_cfg()` returns a new Isaac Lab `ArticulationCfg` on every call. `build_camera_cfg()` returns a camera below the supplied robot root, or `None` when the robot has no camera. The current robot implementation supports implicit actuators, parallel-jaw grippers, and one mounted camera.
 
 ### Camera profiles
 
@@ -155,11 +160,11 @@ from scale_bench.sensors import CameraProfile
 profile = CameraProfile.load("configs/cameras/d435.yml")
 ```
 
-The profile owns image dimensions, update period, data types, pinhole intrinsics, distortion metadata, focal length, and clipping range. Scene presets only reference a profile and define the stand and sensor poses. `build_camera_cfg()` creates a fresh Isaac Lab `CameraCfg` for a supplied prim path and local pose.
+The profile owns image dimensions, update period, data types, pinhole intrinsics, distortion metadata, focal length, and clipping range. Scene and robot profiles reference it while keeping installation poses local to their owning asset. The D435 profile is reused by both Piper wrist cameras and the overhead camera.
 
 ### Scene template
 
-[`create_dual_arm_tabletop_scene_cfg()`](src/scale_bench/scenes/scene_template.py) combines two `ArticulationCfg` objects with the scene preset:
+[`create_dual_arm_tabletop_scene_cfg()`](src/scale_bench/scenes/scene_template.py) combines two robot profiles with the scene preset:
 
 ```python
 from scale_bench.robots import RobotProfile
@@ -169,8 +174,8 @@ left = RobotProfile.load("configs/robots/piper.yml")
 right = RobotProfile.load("configs/robots/piper.yml")
 
 scene_cfg = create_dual_arm_tabletop_scene_cfg(
-    left_robot_cfg=left.build_articulation_cfg(),
-    right_robot_cfg=right.build_articulation_cfg(),
+    left_robot_profile=left,
+    right_robot_profile=right,
     config_path="configs/scene/default.yml",
     num_envs=1,
 )
@@ -183,7 +188,8 @@ The scene contains:
 - a USD room and dome light;
 - collision-enabled, textured ground and table surfaces;
 - independent left and right robot mounts;
-- a camera stand and D435-style RGB-D sensor;
+- left and right robot-mounted D435-style RGB-D sensors;
+- a camera stand and overhead D435-style RGB-D sensor;
 - configurable environment count, spacing, physics replication, and Fabric cloning.
 
 Robot bases and the camera stand are positioned relative to the computed table-top height. Changing the table height therefore keeps mounted assets aligned automatically.
@@ -197,7 +203,7 @@ Robot bases and the camera stand are positioned relative to the computed table-t
 ### Adding a robot
 
 1. Copy [`configs/robots/piper.yml`](configs/robots/piper.yml).
-2. Update the asset paths, initial joint state, kinematic frames, TCP, actuator groups, and gripper semantics.
+2. Update the asset paths, initial joint state, kinematic frames, TCP, actuator groups, gripper semantics, and optional camera mount.
 3. Keep quaternions in `xyzw` order and distances in metres.
 4. Validate the profile without launching Isaac Sim:
 
@@ -230,7 +236,7 @@ Scene YAML files are cached per process. Restart the preview process after editi
 ```text
 src/scale_bench/
 ├── robots/
-│   └── robot_profile.py    # YAML schema, validation, ArticulationCfg builder
+│   └── robot_profile.py    # robot schema and articulation/camera builders
 ├── scenes/
 │   ├── scene_template.py   # dual-arm tabletop scene compiler
 │   └── uv_cuboid.py        # cuboid spawner with face-varying UVs

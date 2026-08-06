@@ -1,6 +1,6 @@
 # RobotProfile
 
-`RobotProfile` 是机器人 YAML 与 Isaac Lab `ArticulationCfg` 之间的类型化边界。它负责保存机器人资产、初始状态、运动学语义、执行器和夹爪约定，并在创建仿真对象前集中完成校验。
+`RobotProfile` 是机器人 YAML 与 Isaac Lab `ArticulationCfg`、机器人挂载 `CameraCfg` 之间的类型化边界。它负责保存机器人资产、初始状态、运动学语义、执行器、夹爪和相机安装约定，并在创建仿真对象前集中完成校验。
 
 ```text
 configs/robots/*.yml
@@ -8,11 +8,12 @@ configs/robots/*.yml
         ▼
 RobotProfile.load() ──► Pydantic 校验 ──► RobotProfile
                                                 │
-                                                ▼
-                              build_articulation_cfg()
-                                                │
-                                                ▼
-                                  Isaac Lab ArticulationCfg
+                         ┌──────────────────────┴─────────────────────┐
+                         ▼                                            ▼
+           build_articulation_cfg()                     build_camera_cfg()
+                         │                                            │
+                         ▼                                            ▼
+             Isaac Lab ArticulationCfg                    Isaac Lab CameraCfg
 ```
 
 当前参考配置是 [`configs/robots/piper.yml`](../configs/robots/piper.yml)，实现位于 [`src/scale_bench/robots/robot_profile.py`](../src/scale_bench/robots/robot_profile.py)。
@@ -67,6 +68,7 @@ robot_cfg = profile.build_articulation_cfg(
 | `kinematics` | 是 | 机械臂关节顺序、基座、末端和 TCP 语义。 |
 | `actuators` | 是 | 一个或多个 implicit actuator 组。 |
 | `gripper` | 是 | 平行夹爪状态和命令语义。 |
+| `camera` | 否 | 相机参数 profile 引用及相对机器人资产的安装位姿。 |
 
 所有相对文件路径都从仓库根目录解析。包含 `://` 的路径会作为远端或 Omniverse URI 原样保留，不进行本地文件存在性检查。
 
@@ -126,6 +128,36 @@ gripper:
 
 `joint_names` 描述完整夹爪状态，`command_joint_names` 只包含需要直接下发命令的关节，因此可以表达 mimic 或被动关节。开合位置映射必须恰好覆盖所有命令关节。
 
+### `camera`
+
+机器人相机的光学参数继续复用独立 `CameraProfile`，robot profile 只保存安装关系：
+
+```yaml
+camera:
+  profile_path: configs/cameras/d435.yml
+  parent_prim_path: link6/camera
+  sensor_prim_name: D435Sensor
+  position_m: [0.0, 0.0, 0.0]
+  orientation_xyzw: [1.0, 0.0, 0.0, 0.0]
+  convention: opengl
+```
+
+- `parent_prim_path` 是相对于机器人根 prim 的路径，必须指向机器人 USD 中已存在的安装 frame。
+- `sensor_prim_name` 是在该 frame 下创建的 USD Camera prim 名称。
+- `position_m` 和 `orientation_xyzw` 是相机相对于父 frame 的局部位姿；四元数必须归一化。
+- `convention` 只能是 `opengl`、`ros` 或 `world`。
+- Piper 的 `link6/camera` 已由资产放置在腕部实际相机安装位，局部绕 X 轴旋转 180 度后符合 USD/OpenGL 相机轴约定。
+
+加载机器人 profile 时会立即加载并校验 `profile_path`。在 Isaac Lab 配置阶段，可按机器人根路径构建传感器：
+
+```python
+camera_cfg = profile.build_camera_cfg(
+    robot_prim_path="{ENV_REGEX_NS}/Robot",
+)
+```
+
+未配置 `camera` 时该方法返回 `None`。
+
 ## 校验约定
 
 `RobotProfile.load()` 会拒绝以下配置：
@@ -140,7 +172,9 @@ gripper:
 - 夹爪命令关节不是夹爪状态关节的子集；
 - `open_positions` 或 `closed_positions` 的键与命令关节不完全一致；
 - 两个 finger body 相同，或最大开口不大于最小开口；
-- TCP 四元数不是单位四元数；
+- TCP 或相机四元数不是单位四元数；
+- 相机父 prim 路径不是合法相对路径，传感器 prim 名不合法，或坐标约定不受支持；
+- 相机引用的 camera profile 无法加载或未通过校验；
 - 本地 USD 或 URDF 文件不存在。
 
 YAML 读取和 schema 校验错误会包装为带 profile 路径的 `ValueError`；本地资产检查错误会在 `ValueError` 中给出解析后的资产路径。
@@ -157,11 +191,15 @@ YAML 读取和 schema 校验错误会包装为带 profile 路径的 `ValueError`
 
 URDF、TCP、末端 body 和 finger body 当前不会直接写入 `ArticulationCfg`；它们是后续控制器、观测和评测所需的机器人语义。
 
+## 生成的 `CameraCfg`
+
+`build_camera_cfg()` 将机器人根路径、`parent_prim_path` 和 `sensor_prim_name` 拼成完整 prim path，再复用 camera profile 的分辨率、输出类型、针孔内参和裁剪范围，最后写入机器人 YAML 中的局部位姿。场景模板分别传入 `LeftRobot` 与 `RightRobot` 根路径，因此同一份 Piper profile 会生成两台独立、随各自腕部运动的相机。
+
 ## 新增机器人
 
 1. 复制 [`configs/robots/piper.yml`](../configs/robots/piper.yml)。
 2. 从 USD/URDF 核对准确的 joint、body 和 frame 名称。
-3. 修改资产路径、初始状态、运动学、actuator 与夹爪字段。
+3. 修改资产路径、初始状态、运动学、actuator、夹爪与可选相机安装字段。
 4. 运行不启动仿真器的 profile 校验：
 
    ```bash
@@ -179,7 +217,7 @@ URDF、TCP、末端 body 和 finger body 当前不会直接写入 `ArticulationC
      --max-steps 2
    ```
 
-目前仓库没有独立的 `RobotProfile` pytest 测试文件，上述 schema 加载和场景冒烟测试是现有验证入口。
+仓库中的 [`tests/test_robot_profile.py`](../tests/test_robot_profile.py) 覆盖 Piper 相机挂载、引用 profile、USD helper 和左右场景相机配置；实际渲染仍应通过场景冒烟测试验证。
 
 ## 当前支持边界
 
