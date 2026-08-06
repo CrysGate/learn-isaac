@@ -1,5 +1,5 @@
 """Reusable sensor profiles."""
 
-from .camera_profile import CameraProfile
+from .camera_profile import CameraConvention, CameraProfile
 
-__all__ = ["CameraProfile"]
+__all__ = ["CameraConvention", "CameraProfile"]

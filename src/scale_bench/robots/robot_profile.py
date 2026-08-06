@@ -5,12 +5,12 @@ from __future__ import annotations
 import math
 from collections.abc import Mapping
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Literal, Self, TypeAlias
+from typing import TYPE_CHECKING, Annotated, Self, TypeAlias
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
-from scale_bench.sensors import CameraProfile
+from scale_bench.sensors import CameraConvention, CameraProfile
 
 if TYPE_CHECKING:
     from isaaclab.assets import ArticulationCfg
@@ -23,7 +23,10 @@ FiniteFloat = Annotated[float, Field(allow_inf_nan=False)]
 NonNegativeFloat = Annotated[float, Field(ge=0.0, allow_inf_nan=False)]
 PositiveFloat = Annotated[float, Field(gt=0.0, allow_inf_nan=False)]
 Name = Annotated[str, Field(min_length=1)]
-RelativePrimPath = Annotated[str, Field(pattern=r"^[A-Za-z_][A-Za-z0-9_]*(/[A-Za-z_][A-Za-z0-9_]*)*$")]
+RelativePrimPath = Annotated[
+    str,
+    Field(pattern=r"^[A-Za-z_][A-Za-z0-9_]*(/[A-Za-z_][A-Za-z0-9_]*)*$"),
+]
 PrimName = Annotated[str, Field(pattern=r"^[A-Za-z_][A-Za-z0-9_]*$")]
 JointNames = Annotated[tuple[Name, ...], Field(min_length=1)]
 ActuatorValue: TypeAlias = (
@@ -79,7 +82,7 @@ class MountedCameraProfile(_ProfileModel):
         FiniteFloat,
         FiniteFloat,
     ] = (0.0, 0.0, 0.0, 1.0)
-    convention: Literal["opengl", "ros", "world"] = "opengl"
+    convention: CameraConvention = "opengl"
 
     @model_validator(mode="after")
     def _validate_quaternion(self) -> Self:
@@ -202,7 +205,9 @@ class RobotProfile(_ProfileModel):
             document = yaml.safe_load(path.read_text(encoding="utf-8"))
             profile = cls.model_validate(document)
         except (OSError, yaml.YAMLError, ValidationError) as error:
-            raise ValueError(f"Could not load robot profile {path}:\n{error}") from error
+            raise ValueError(
+                f"Could not load robot profile {path}:\n{error}"
+            ) from error
 
         for asset_path in (profile.usd_path, profile.urdf_path):
             if asset_path is None or "://" in asset_path:

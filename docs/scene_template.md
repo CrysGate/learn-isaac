@@ -151,7 +151,7 @@ scene_config = SceneConfig.load("configs/scene/default.yml")
 area = scene_config.task_object_placement_area
 ```
 
-`SceneConfig` 会拒绝未知顶层字段、非有限边界值和上下界颠倒的区域。后续增加场景级配置时，在该 schema 中添加对应字段即可。
+`SceneConfig` 会校验全部嵌套区块，拒绝未知字段、无效尺寸和材质参数、非单位四元数、非法相机坐标约定，以及非有限或上下界颠倒的放置区域。后续增加场景级配置时，应在对应的具名模型中添加字段。
 
 ### `robot_mounts`
 
@@ -247,7 +247,7 @@ runtime:
 - 场景配置、机器人 profile、相机 profile 和本地资产的相对路径都从仓库根目录解析。
 - 包含 `://` 的资产路径会作为 URI 原样传给 Isaac Lab。
 - 场景 YAML 会按路径在进程内缓存；编辑场景 preset 后应重启预览进程。
-- 场景 YAML 的顶层结构和放置区域由 `SceneConfig` 校验；各资产段的具体字段在构建对应 Isaac Lab 配置时读取。
+- 场景 YAML 的所有区块和放置区域都由 `SceneConfig` 的具名嵌套模型校验；构建 Isaac Lab 配置时只读取已经验证的属性。
 - 相机 YAML 使用严格的 Pydantic schema；加载失败时会以 `ValueError` 报告 profile 路径和具体校验错误。
 - 默认 preset 依赖 `Assets/` 中的房间、材质、相机支架和 HDR 文件，以及这些资产的传递依赖。
 

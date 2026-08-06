@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Self
+from typing import TYPE_CHECKING, Annotated, Literal, Self, TypeAlias
 
 import yaml
 from pydantic import (
@@ -24,6 +24,7 @@ FiniteFloat = Annotated[float, Field(allow_inf_nan=False)]
 PositiveFloat = Annotated[float, Field(gt=0.0, allow_inf_nan=False)]
 PositiveInt = Annotated[int, Field(gt=0)]
 Name = Annotated[str, Field(min_length=1)]
+CameraConvention: TypeAlias = Literal["opengl", "ros", "world"]
 
 
 class CameraProfile(BaseModel):
@@ -101,7 +102,7 @@ class CameraProfile(BaseModel):
         prim_path: str,
         position_m: tuple[float, float, float],
         orientation_xyzw: tuple[float, float, float, float],
-        convention: str,
+        convention: CameraConvention,
     ) -> CameraCfg:
         """Build a fresh ``CameraCfg`` at the supplied scene-local pose."""
 
@@ -129,4 +130,4 @@ class CameraProfile(BaseModel):
         )
 
 
-__all__ = ["CameraProfile"]
+__all__ = ["CameraConvention", "CameraProfile"]
