@@ -1,7 +1,5 @@
 # ScaleBench 开发计划
 
-> 当前已实现接口与边界以 [`docs/benchmark_architecture.md`](docs/benchmark_architecture.md) 为准。本文记录已完成阶段和后续开发顺序，不把尚未实现的模块描述为现有能力。
-
 ## 当前状态
 
 ### 第一步：配置驱动的公共场景（已完成）
@@ -68,7 +66,9 @@ env
     └── RecorderManager
 ```
 
-### 第四步：Action Profile
+### 第四步：统一的seed管理，当前修改了num_envs之后每个场景的layout都是完全一样的，需要实现多个num_envs有不同的layout布局，即先正常克隆场景，在sim.reset之后为每个env单独生成layout,再通过write_root_pose_to_sim_index()写入各物体的位置
+
+### 第五步：Action Profile
 
 Action 同时依赖机器人语义和 policy 控制方式。计划支持：
 
@@ -78,13 +78,13 @@ Action 同时依赖机器人语义和 policy 控制方式。计划支持：
 
 控制关节、末端 link、TCP 和夹爪语义应来自 `RobotProfile`，不在 Task 或 policy 适配代码中按机器人名称分支。
 
-### 第五步：Observation 数据边界
+### 第六步：Observation 数据边界
 
 - Policy Observation 只公开 policy 被允许使用的传感器和状态；
 - Evaluator 可以读取 Scene 仿真真值；
 - 两者使用明确分层的数据接口，避免评测真值泄漏给 policy。
 
-### 第六步：Task 运行时逻辑与 Evaluator
+### 第七步：Task 运行时逻辑与 Evaluator
 
 在 Env 边界稳定后，再为任务增加：
 
@@ -96,7 +96,7 @@ Action 同时依赖机器人语义和 policy 控制方式。计划支持：
 
 这些能力不应塞入当前只负责配置期资产和布局的 `TaskDefinition`，除非后续接口设计证明它们属于同一个稳定抽象。
 
-### 第七步：Episode Runner 与 Recorder
+### 第八步：Episode Runner 与 Recorder
 
 Runner 统一执行：
 
