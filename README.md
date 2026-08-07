@@ -11,6 +11,7 @@ ScaleBench keeps robot semantics, camera, scene, and task parameters in YAML, va
 - **Typed robot profiles** — validate joints, TCP, actuators, gripper, and an optional robot-mounted camera, then build fresh Isaac Lab configs.
 - **Reusable camera profiles** — keep camera optics and output parameters separate from scene- and robot-local sensor poses.
 - **Typed scene metadata** — validate every scene-preset section through dedicated nested models and expose task-object placement bounds in environment-local coordinates.
+- **Typed simulation presets** — validate the few timing, gravity, rendering, and manipulation-stability settings that define benchmark behavior, while inheriting other Isaac Lab defaults.
 - **A reusable dual-arm scene** — compose a room, textured ground and table, two independently configured robots with wrist cameras, an overhead RGB-D camera, and environment lighting.
 - **A small task contract and first task** — add task-owned assets directly to a common scene from a deterministic seed or a reusable layout file; `SortDollsBySize` is the first robot-independent example.
 - **Texture-correct procedural surfaces** — `UvCuboidCfg` authors face-varying UV coordinates so MDL materials tile correctly on cuboids.
@@ -117,6 +118,7 @@ Use different robot or scene profiles without changing Python code:
 ```bash
 uv run python scripts/preview_scene.py \
   --config configs/scene/default.yml \
+  --sim-config configs/sim/default.yml \
   --left-robot-config configs/robots/piper.yml \
   --right-robot-config configs/robots/piper.yml \
   --device cuda:0
@@ -127,6 +129,7 @@ Useful preview options:
 | Option | Purpose |
 |---|---|
 | `--config PATH` | Select the scene YAML. |
+| `--sim-config PATH` | Select simulation, rendering, and PhysX parameters. |
 | `--task TASK_ID` | Add a task's assets to the common scene (currently `sort_dolls_by_size`). |
 | `--seed N` | Generate a deterministic task layout; defaults to zero. |
 | `--layout PATH` | Load task asset poses from an exported layout JSON file. |
@@ -141,6 +144,19 @@ Useful preview options:
 Run `uv run python scripts/preview_scene.py --help` for all Isaac Lab launcher options.
 
 ## Core API
+
+### Simulation presets
+
+[`SimConfig`](src/scale_bench/sim/simulation_config.py) validates `configs/sim/*.yml` without launching Isaac Sim. After `AppLauncher` starts, it builds a fresh native config for the environment or a standalone preview:
+
+```python
+from scale_bench.sim import SimConfig
+
+sim_profile = SimConfig.load("configs/sim/default.yml")
+simulation_cfg = sim_profile.build_simulation_cfg(device="cuda:0")
+```
+
+The default preset runs physics at 120 Hz and renders every four steps at 30 Hz. It deliberately exposes only parameters that affect benchmark timing, gravity, observation quality, or manipulation stability. Materials, Fabric, logging, solver iterations, and GPU buffers inherit the installed Isaac Lab defaults. Unknown fields and invalid timing or device values are rejected at load time. Scene cloning parameters such as `num_envs` remain in the scene preset.
 
 ### Robot profiles
 
@@ -288,6 +304,10 @@ Copy [`configs/scene/default.yml`](configs/scene/default.yml) and edit the relev
 
 Scene YAML files are cached per process. Restart the preview process after editing a scene preset.
 
+### Customizing the simulation
+
+Copy [`configs/sim/default.yml`](configs/sim/default.yml) to create a simulation preset. Timing and gravity are top-level settings; `render` selects observation quality, and `physx` contains the one manipulation-specific override currently justified by runtime behavior. Everything else follows Isaac Lab defaults and should only become public configuration after a benchmark requirement demonstrates that it must vary. Use `--sim-config` to select the preset and `--device` for a temporary machine-specific override.
+
 ### Validating changes
 
 Run the automated contract and layout tests without launching an interactive simulator:
@@ -302,6 +322,8 @@ The tests cover the public Task API, deterministic placement, bounds and spacing
 
 ```text
 src/scale_bench/
+├── sim/
+│   └── simulation_config.py # simulation YAML and SimulationCfg builder
 ├── robots/
 │   └── robot_profile.py    # robot schema and articulation/camera builders
 ├── scenes/
@@ -318,6 +340,7 @@ configs/
 ├── cameras/d435.yml        # reusable camera profile
 ├── robots/piper.yml        # reference robot profile
 ├── scene/default.yml       # scene-local poses and environment settings
+├── sim/default.yml         # simulation, rendering, and PhysX settings
 └── tasks/sort_dolls_by_size.yml
 
 scripts/preview_scene.py    # interactive preview and headless smoke entry point

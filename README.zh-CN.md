@@ -11,6 +11,7 @@ ScaleBench 是一组配置优先的 Isaac Lab 基础组件，用于构建尺度�
 - **类型化机器人配置**：校验关节、TCP、执行器、平行夹爪和可选机器人相机，并生成全新的 Isaac Lab 配置。
 - **可复用相机配置**：将相机光学与输出参数和场景、机器人内部的传感器位姿分离。
 - **类型化场景元数据**：校验场景 preset 的每个嵌套区块，并公开环境局部坐标系中的任务物体放置范围。
+- **类型化仿真 preset**：只校验会定义 benchmark 行为的时间步、重力、渲染和操作稳定性参数，其余设置继承 Isaac Lab 默认值。
 - **可复用双臂场景**：组合房间、带纹理的地面和桌面、两台带腕部相机的机器人、顶视 RGB-D 相机及环境光。
 - **精简的 Task 接口与首个任务**：通过确定性 seed 或可复用 layout 文件，直接向公共场景添加任务资产；`SortDollsBySize` 是第一个与机器人型号无关的案例。
 - **纹理正确的程序化表面**：`UvCuboidCfg` 会写入 face-varying UV，使 MDL 材质能在长方体表面正确平铺。
@@ -117,6 +118,7 @@ uv run python scripts/preview_scene.py --viz none --max-steps 2
 ```bash
 uv run python scripts/preview_scene.py \
   --config configs/scene/default.yml \
+  --sim-config configs/sim/default.yml \
   --left-robot-config configs/robots/piper.yml \
   --right-robot-config configs/robots/piper.yml \
   --device cuda:0
@@ -127,6 +129,7 @@ uv run python scripts/preview_scene.py \
 | 参数 | 作用 |
 |---|---|
 | `--config PATH` | 选择场景 YAML。 |
+| `--sim-config PATH` | 选择仿真、渲染和 PhysX 参数。 |
 | `--task TASK_ID` | 在公共场景上添加任务资产（目前支持 `sort_dolls_by_size`）。 |
 | `--seed N` | 确定性生成任务布局；默认使用零。 |
 | `--layout PATH` | 从已导出的 layout JSON 加载任务资产位姿。 |
@@ -141,6 +144,19 @@ uv run python scripts/preview_scene.py \
 运行 `uv run python scripts/preview_scene.py --help` 可以查看 Isaac Lab launcher 的全部参数。
 
 ## 核心 API
+
+### 仿真 preset
+
+[`SimConfig`](src/scale_bench/sim/simulation_config.py) 可以在不启动 Isaac Sim 的情况下校验 `configs/sim/*.yml`。`AppLauncher` 启动后，可为环境或独立预览构建一份全新的原生配置：
+
+```python
+from scale_bench.sim import SimConfig
+
+sim_profile = SimConfig.load("configs/sim/default.yml")
+simulation_cfg = sim_profile.build_simulation_cfg(device="cuda:0")
+```
+
+默认 preset 以 120 Hz 运行 physics，每四步渲染一次，即 30 Hz。它只公开影响 benchmark 时间尺度、重力、观测质量或操作稳定性的参数；材质、Fabric、日志、solver iteration 和 GPU buffer 均继承当前安装的 Isaac Lab 默认值。未知字段、非法时间参数和无效 device 会在加载时被拒绝。`num_envs` 等场景克隆参数仍保留在 scene preset 中。
 
 ### Robot profile
 
@@ -288,6 +304,10 @@ target_order = task.target_order_small_to_large
 
 场景 YAML 会按路径在进程内缓存。修改场景配置后，请重启预览进程。
 
+### 自定义仿真
+
+复制 [`configs/sim/default.yml`](configs/sim/default.yml) 即可创建仿真 preset。时间步与重力位于顶层，`render` 选择观测质量，`physx` 只保留当前由运行行为证明有必要的一个操作稳定性覆盖项。其他参数跟随 Isaac Lab 默认值；只有 benchmark 需求证明某项必须变化时，才应把它提升为公共配置。使用 `--sim-config` 选择 preset，使用 `--device` 做临时的机器相关覆盖。
+
 ### 验证改动
 
 无需启动交互式仿真器即可运行自动化契约与布局测试：
@@ -302,6 +322,8 @@ uv run pytest -q
 
 ```text
 src/scale_bench/
+├── sim/
+│   └── simulation_config.py # 仿真 YAML 与 SimulationCfg builder
 ├── robots/
 │   └── robot_profile.py    # 机器人 schema 及 articulation/camera 构建
 ├── scenes/
@@ -318,6 +340,7 @@ configs/
 ├── cameras/d435.yml        # 可复用相机 profile
 ├── robots/piper.yml        # 参考机器人 profile
 ├── scene/default.yml       # 场景内位姿和环境配置
+├── sim/default.yml         # 仿真、渲染与 PhysX 参数
 └── tasks/sort_dolls_by_size.yml
 
 scripts/preview_scene.py    # 交互预览和无界面冒烟验证入口

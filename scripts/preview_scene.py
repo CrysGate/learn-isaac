@@ -10,11 +10,19 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 # Kept lightweight so argparse can reject unknown tasks before Isaac Sim starts.
 SUPPORTED_TASK_IDS = ("sort_dolls_by_size",)
 
+from scale_bench.sim import SimConfig
+
 from isaaclab.app import AppLauncher
 
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--config", type=Path, default=Path("configs/scene/default.yml"))
+parser.add_argument(
+    "--sim-config",
+    type=Path,
+    default=Path("configs/sim/default.yml"),
+    help="Simulation, PhysX, and rendering YAML preset.",
+)
 parser.add_argument(
     "--task",
     choices=SUPPORTED_TASK_IDS,
@@ -63,7 +71,7 @@ parser.add_argument(
     help="Visual length of camera frustums in metres.",
 )
 AppLauncher.add_app_launcher_args(parser)
-parser.set_defaults(visualizer=["kit"], enable_cameras=True)
+parser.set_defaults(visualizer=["kit"], enable_cameras=True, device=None)
 args = parser.parse_args()
 if args.max_steps is not None and args.max_steps <= 0:
     parser.error("--max-steps must be positive")
@@ -75,6 +83,15 @@ if args.task is None and (
     args.seed is not None or args.layout is not None or args.export_layout is not None
 ):
     parser.error("--seed, --layout, and --export-layout require --task")
+
+try:
+    sim_config = SimConfig.load(args.sim_config)
+except ValueError as error:
+    parser.error(str(error))
+if args.device is None:
+    args.device = sim_config.device
+if args.rendering_mode is None:
+    args.rendering_mode = sim_config.render.rendering_mode
 
 preview_overlays_enabled = not args.headless and "kit" in (args.visualizer or ())
 camera_frustum_length_m = args.camera_frustum_length_m
@@ -226,17 +243,7 @@ class ScenePreviewOverlay:
 
 def main() -> None:
     sim = sim_utils.SimulationContext(
-        sim_utils.SimulationCfg(
-            device=args.device,
-            render=sim_utils.RenderCfg(
-                enable_translucency=True,
-                enable_reflections=True,
-                enable_global_illumination=True,
-                antialiasing_mode="DLAA",
-                dlss_mode=2,
-                rendering_mode="quality",
-            ),
-        )
+        sim_config.build_simulation_cfg(device=args.device)
     )
     sim.set_camera_view((2.6, 2.2, 2.2), (0.0, 0.0, 0.8))
 
@@ -292,6 +299,8 @@ def main() -> None:
     print(
         f"Loaded {preview_name} from {args.config} with "
         f"{left_profile.name} (left) and {right_profile.name} (right). "
+        f"Simulation runs at {sim_config.physics_frequency_hz:g} Hz and renders "
+        f"at {sim_config.render_frequency_hz:g} Hz from {args.sim_config}. "
         f"{layout_message}Close the window to exit."
     )
 

@@ -40,9 +40,29 @@ Robot / Camera / Scene YAML
            InteractiveScene preview
 ```
 
-## 后续阶段
+## 当前进行阶段
 
-### 第三步：Env 配置与唯一仿真上下文
+### 第三步：Env 配置与唯一仿真上下文（进行中）
+
+当前已经完成配置驱动的仿真参数边界：
+
+- `configs/sim/default.yml` 只管理 device、physics timestep、gravity、render interval、渲染质量，以及一个与操作稳定性直接相关的 PhysX 覆盖项；
+- `SimConfig` 在启动 Isaac Sim 前完成严格校验，并构建全新的原生 `SimulationCfg`；
+- 默认 preset 使用 120 Hz physics 和 30 Hz render；
+- `scripts/preview_scene.py` 通过 `--sim-config` 使用该配置，显式 `--device` 和 `--rendering_mode` 仍可作为机器相关的命令行覆盖；
+- 其余材质、Fabric、日志、solver iteration 和 GPU buffer 参数保持 Isaac Lab 当前版本的原生默认值，不在项目中复制整套后端配置；
+- sim YAML 不管理 `num_envs`、环境间距或 task layout，这些仍由 Scene/Task 各自拥有。
+
+配置流：
+
+```text
+Sim YAML ──► SimConfig ──► Isaac Lab SimulationCfg
+                                  │
+                                  ├─► 当前：scene preview
+                                  └─► 后续：EnvCfg.sim
+```
+
+本阶段接下来需要：
 
 - 定义组合公共场景、Task、SimulationCfg 和运行时 manager 的 EnvCfg builder；
 - 由 `ManagerBasedEnv` 或等价环境入口创建唯一的 `SimulationContext`；
@@ -65,6 +85,8 @@ env
 └── env.recorder_manager
     └── RecorderManager
 ```
+
+## 后续阶段
 
 ### 第四步：统一的seed管理，当前修改了num_envs之后每个场景的layout都是完全一样的，需要实现多个num_envs有不同的layout布局，即先正常克隆场景，在sim.reset之后为每个env单独生成layout,再通过write_root_pose_to_sim_index()写入各物体的位置
 

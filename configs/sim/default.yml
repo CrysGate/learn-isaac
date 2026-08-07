@@ -1,0 +1,15 @@
+device: cuda:0
+
+physics_dt_s: 0.008333333333333333
+render_interval: 4
+gravity_m_s2: [0.0, 0.0, -9.81]
+
+render:
+  rendering_mode: quality
+  antialiasing_mode: DLAA
+  enable_translucency: true
+  enable_reflections: true
+  enable_global_illumination: true
+
+physx:
+  enable_external_forces_every_iteration: true
