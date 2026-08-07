@@ -4,37 +4,38 @@
 
 Configuration-first Isaac Lab building blocks for scale-aware, dual-arm manipulation scenes.
 
-ScaleBench keeps robot semantics, camera parameters, and scene parameters in YAML, validates profiles at the boundary, and compiles them into native Isaac Lab configuration objects. The current implementation focuses on reusable robot and scene construction rather than a complete task, policy, or evaluation pipeline.
+ScaleBench keeps robot semantics, camera, scene, and task parameters in YAML, validates them at the boundary, and compiles them into native Isaac Lab configuration objects. The current implementation provides reusable scene construction and one seed/layout-driven task, but not a complete environment, policy, or evaluation pipeline.
 
 ## What is implemented
 
 - **Typed robot profiles** — validate joints, TCP, actuators, gripper, and an optional robot-mounted camera, then build fresh Isaac Lab configs.
 - **Reusable camera profiles** — keep camera optics and output parameters separate from scene- and robot-local sensor poses.
-- **Typed scene metadata** — validate the scene preset boundary and expose task-object placement bounds in environment-local coordinates.
+- **Typed scene metadata** — validate every scene-preset section through dedicated nested models and expose task-object placement bounds in environment-local coordinates.
 - **A reusable dual-arm scene** — compose a room, textured ground and table, two independently configured robots with wrist cameras, an overhead RGB-D camera, and environment lighting.
+- **A small task contract and first task** — add task-owned assets directly to a common scene from a deterministic seed or a reusable layout file; `SortDollsBySize` is the first robot-independent example.
 - **Texture-correct procedural surfaces** — `UvCuboidCfg` authors face-varying UV coordinates so MDL materials tile correctly on cuboids.
 - **A runnable scene preview** — launch the default scene with placement-area and camera-frustum overlays, or run a short headless smoke test.
 
 > [!NOTE]
-> The code under `src/scale_bench` currently provides the configuration and scene foundation. Tasks, episode orchestration, recording, and benchmark reporting are not implemented in this package yet.
+> The code under `src/scale_bench` currently provides the configuration/scene foundation and a minimal Task abstraction. Environment assembly, evaluators, episode orchestration, recording, and benchmark reporting are not implemented yet.
 
 ## Architecture
 
 ```text
-configs/robots/*.yml
-        │
-        ▼
-  RobotProfile ── validation ──► ArticulationCfg ─────┤
-                └──────────────► robot CameraCfg ─────┤
-                                                      │
-configs/scene/*.yml ──► SceneConfig ──────────────────┼─► DualArmTabletopSceneCfg
-                                                      │
-configs/cameras/*.yml ──► CameraProfile ──► CameraCfg ┤
-                                                      │
-  UvCuboidCfg ── textured ground and table ───────────┘
-                                                              │
-                                                              ▼
-                                                    Isaac Lab InteractiveScene
+robot / scene / camera YAML ──► typed profiles ──► DualArmTabletopSceneCfg
+                                                        │
+                                                        ├─► common-scene preview
+                                                        │
+task YAML ──► SortDollsBySize ──────────────────────────┤
+seed or layout JSON ────────────────────────────────────┤
+                                                        ▼
+                                      add_assets_to_scene(scene_cfg)
+                                                        │
+                                                        ▼
+                                   named task RigidObjectCfg fields
+                                                        │
+                                                        ▼
+                                          InteractiveScene task preview
 ```
 
 The boundary is intentionally small: robot-specific details stay in robot profiles, scene-specific details stay in scene presets, and downstream code receives standard Isaac Lab configuration objects.
@@ -66,7 +67,7 @@ git clone --branch release/3.0.0-beta2 --depth 1 \
 uv sync --frozen
 ```
 
-The default preset also expects the project asset bundle at `Assets/`. If it is not included in your checkout, provide these files, together with any textures and transitive USD dependencies they reference:
+The required project asset bundle is not tracked by this Git repository. Before using the default preset, obtain the canonical bundle separately from the project maintainer or your organization's asset storage, or provide compatible assets at these exact paths. Include every texture and transitive USD dependency referenced by these files:
 
 ```text
 Assets/
@@ -74,6 +75,7 @@ Assets/
 ├── Material/material_0122/Mahogany_Planks.mdl
 ├── Material/material_0564/Wood_Tiles_Fineline.mdl
 ├── Object/Geometry/camera_stand_aloha/aloha_front_camera_stand_realsense_d435.usd
+├── Object/Rigid/matryoshka_dolls/{00000..00004}/{object.usdz,metadata.json}
 ├── Robots/piper/Piper.usd
 ├── Robots/piper/piper_description/urdf/piper.urdf
 └── Room/Simple_Room_nolight/simple_room_nolight.usd
@@ -87,6 +89,21 @@ Open the default dual-Piper scene in Isaac Sim:
 
 ```bash
 uv run python scripts/preview_scene.py
+```
+
+Preview a task scene by its stable task ID:
+
+```bash
+uv run python scripts/preview_scene.py --task sort_dolls_by_size
+```
+
+Generate and export a reproducible layout, or load it again later:
+
+```bash
+uv run python scripts/preview_scene.py --task sort_dolls_by_size \
+  --seed 42 --export-layout layouts/sort_dolls_by_size/42.json
+uv run python scripts/preview_scene.py --task sort_dolls_by_size \
+  --layout layouts/sort_dolls_by_size/42.json
 ```
 
 Run a two-step headless smoke test:
@@ -110,6 +127,10 @@ Useful preview options:
 | Option | Purpose |
 |---|---|
 | `--config PATH` | Select the scene YAML. |
+| `--task TASK_ID` | Add a task's assets to the common scene (currently `sort_dolls_by_size`). |
+| `--seed N` | Generate a deterministic task layout; defaults to zero. |
+| `--layout PATH` | Load task asset poses from an exported layout JSON file. |
+| `--export-layout PATH` | Save the generated or loaded task layout. |
 | `--left-robot-config PATH` | Select the left robot profile. |
 | `--right-robot-config PATH` | Select the right robot profile. |
 | `--device VALUE` | Choose `cpu`, `cuda`, or a device such as `cuda:0`. |
@@ -185,7 +206,7 @@ scene_cfg = create_dual_arm_tabletop_scene_cfg(
 
 This snippet is intended to run after `AppLauncher` has initialized Isaac Sim.
 
-`SceneConfig` validates the top-level scene structure and the finite, ordered XY bounds in `task_object_placement_area`. Its `table_top_z_m` property and placement-area metadata can be reused by task builders and visualization tools without duplicating scene geometry calculations.
+`SceneConfig` validates every scene section with dedicated nested models, including non-empty asset-path fields, finite poses, positive dimensions, material parameters, unit quaternions, camera conventions, runtime types, and the ordered XY bounds in `task_object_placement_area`. Its `table_top_z_m` property and placement-area metadata can be reused by task builders and visualization tools without duplicating scene geometry calculations.
 
 ```python
 from scale_bench.scenes import SceneConfig
@@ -194,6 +215,8 @@ scene_metadata = SceneConfig.load("configs/scene/default.yml")
 placement_area = scene_metadata.task_object_placement_area
 table_top_z_m = scene_metadata.table_top_z_m
 ```
+
+The nested schema types are also public from `scale_bench.scenes`: `RoomConfig`, `SurfaceConfig`, `TaskObjectPlacementArea`, `RobotMountConfig`, `RobotMountsConfig`, `OverheadCameraConfig`, `LightingConfig`, and `SceneRuntimeConfig`. Prefer `SceneConfig.load()` when loading a complete preset so path resolution, validation, and process-local caching remain consistent.
 
 The scene contains:
 
@@ -205,6 +228,27 @@ The scene contains:
 - configurable environment count, spacing, physics replication, and Fabric cloning.
 
 Robot bases and the camera stand are positioned relative to the computed table-top height. Changing the table height therefore keeps mounted assets aligned automatically.
+
+### Tasks
+
+`TaskDefinition` keeps the shared task behavior in one place: metadata loading, deterministic sampling, placement validation, rigid-object construction, and layout JSON import/export. `SortDollsBySize` only declares its dolls, instruction, and size-order target. No task-specific scene subclass is needed; named `RigidObjectCfg` fields are added directly to the common `InteractiveSceneCfg` instance.
+
+```python
+from scale_bench.scenes import SceneConfig
+from scale_bench.tasks import SortDollsBySize
+
+scene_metadata = SceneConfig.load("configs/scene/default.yml")
+task = SortDollsBySize(scene_config=scene_metadata)
+layout = task.add_assets_to_scene(
+    scene_cfg,
+    seed=42,
+    export_layout_path="layouts/sort_dolls_by_size/42.json",
+)
+instruction = task.instruction
+target_order = task.target_order_small_to_large
+```
+
+Calling `add_assets_to_scene(scene_cfg, layout_path=...)` initializes another scene from the exact saved poses. Generated and loaded layouts are both checked against `task_object_placement_area`; each complete XY footprint stays inside the area and task objects maintain the configured minimum gap. Pass `config_path="configs/tasks/my_sort_dolls.yml"` to `SortDollsBySize` to use an alternative task YAML. Piper/curobo planning, robot assignment, recording, success evaluation, and the application lifecycle remain outside this task layer.
 
 ### UV cuboids
 
@@ -244,6 +288,16 @@ Copy [`configs/scene/default.yml`](configs/scene/default.yml) and edit the relev
 
 Scene YAML files are cached per process. Restart the preview process after editing a scene preset.
 
+### Validating changes
+
+Run the automated contract and layout tests without launching an interactive simulator:
+
+```bash
+uv run pytest -q
+```
+
+The tests cover the public Task API, deterministic placement, bounds and spacing validation, asset registration, and layout replay. Keep the bounded headless preview smoke test for changes that affect actual simulation startup or rendering.
+
 ## Repository layout
 
 ```text
@@ -254,13 +308,17 @@ src/scale_bench/
 │   ├── scene_config.py     # typed scene YAML and placement bounds
 │   ├── scene_template.py   # dual-arm tabletop scene compiler
 │   └── uv_cuboid.py        # cuboid spawner with face-varying UVs
-└── sensors/
-    └── camera_profile.py   # YAML schema, validation, CameraCfg builder
+├── sensors/
+│   └── camera_profile.py   # YAML schema, validation, CameraCfg builder
+└── tasks/
+    ├── base.py             # common task, rigid-asset, and layout behavior
+    └── sort_dolls_by_size.py # one concrete task
 
 configs/
 ├── cameras/d435.yml        # reusable camera profile
 ├── robots/piper.yml        # reference robot profile
-└── scene/default.yml       # scene-local poses and environment settings
+├── scene/default.yml       # scene-local poses and environment settings
+└── tasks/sort_dolls_by_size.yml
 
 scripts/preview_scene.py    # interactive preview and headless smoke entry point
 ```
@@ -278,7 +336,7 @@ The project uses a `src` layout but is not installed as a package (`tool.uv.pack
 
 - [Robot profile contract](docs/robot_profiles.md)
 - [Scene template guide](docs/scene_template.md)
-- [Benchmark architecture direction](docs/benchmark_architecture.md) — design goals; not all components are implemented yet
+- [Current benchmark architecture and boundaries](docs/benchmark_architecture.md)
 
 ## License
 

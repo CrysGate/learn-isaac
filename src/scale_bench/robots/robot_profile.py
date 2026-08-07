@@ -10,14 +10,13 @@ from typing import TYPE_CHECKING, Annotated, Self, TypeAlias
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
+from scale_bench import REPOSITORY_ROOT
 from scale_bench.sensors import CameraConvention, CameraProfile
 
 if TYPE_CHECKING:
     from isaaclab.assets import ArticulationCfg
     from isaaclab.sensors import CameraCfg
 
-
-REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 
 FiniteFloat = Annotated[float, Field(allow_inf_nan=False)]
 NonNegativeFloat = Annotated[float, Field(ge=0.0, allow_inf_nan=False)]

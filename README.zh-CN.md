@@ -4,37 +4,38 @@
 
 ScaleBench 是一组配置优先的 Isaac Lab 基础组件，用于构建尺度相关的双臂操作场景。
 
-项目将机器人语义、相机参数和场景参数保存在 YAML 中，在边界处严格校验各类 profile，再将其编译为原生 Isaac Lab 配置对象。当前实现聚焦于可复用的机器人与场景构建，还不是一套完整的任务、策略或评测流水线。
+项目将机器人语义、相机、场景和任务参数保存在 YAML 中，在边界处严格校验，再将其编译为原生 Isaac Lab 配置对象。当前实现提供可复用的场景构建和一个由 seed/layout 驱动的任务，但还不是一套完整的环境、策略或评测流水线。
 
 ## 已实现能力
 
 - **类型化机器人配置**：校验关节、TCP、执行器、平行夹爪和可选机器人相机，并生成全新的 Isaac Lab 配置。
 - **可复用相机配置**：将相机光学与输出参数和场景、机器人内部的传感器位姿分离。
-- **类型化场景元数据**：校验场景 preset 顶层结构，并公开环境局部坐标系中的任务物体放置范围。
+- **类型化场景元数据**：校验场景 preset 的每个嵌套区块，并公开环境局部坐标系中的任务物体放置范围。
 - **可复用双臂场景**：组合房间、带纹理的地面和桌面、两台带腕部相机的机器人、顶视 RGB-D 相机及环境光。
+- **精简的 Task 接口与首个任务**：通过确定性 seed 或可复用 layout 文件，直接向公共场景添加任务资产；`SortDollsBySize` 是第一个与机器人型号无关的案例。
 - **纹理正确的程序化表面**：`UvCuboidCfg` 会写入 face-varying UV，使 MDL 材质能在长方体表面正确平铺。
 - **可直接运行的场景预览**：既可以在 Isaac Sim 中查看放置区域与相机视锥，也可以执行短时间无界面冒烟验证。
 
 > [!NOTE]
-> `src/scale_bench` 目前只提供配置与场景基础层。任务、episode 调度、数据记录和 benchmark 报告尚未在该包中实现。
+> `src/scale_bench` 目前提供配置/场景基础层与最小 Task 抽象。环境组装、Evaluator、episode 调度、数据记录和 benchmark 报告尚未实现。
 
 ## 架构
 
 ```text
-configs/robots/*.yml
-        │
-        ▼
-  RobotProfile ── 校验 ──► ArticulationCfg ───────────┤
-                └───────► robot CameraCfg ────────────┤
-                                                      │
-configs/scene/*.yml ──► SceneConfig ──────────────────┼─► DualArmTabletopSceneCfg
-                                                      │
-configs/cameras/*.yml ──► CameraProfile ──► CameraCfg ┤
-                                                      │
-  UvCuboidCfg ── 带纹理的地面和桌面 ──────────────────┘
-                                                              │
-                                                              ▼
-                                                    Isaac Lab InteractiveScene
+机器人/场景/相机 YAML ──► 类型化 profile ──► DualArmTabletopSceneCfg
+                                                   │
+                                                   ├─► 公共场景预览
+                                                   │
+任务 YAML ──► SortDollsBySize ─────────────────────┤
+seed 或 layout JSON ───────────────────────────────┤
+                                                   ▼
+                                 add_assets_to_scene(scene_cfg)
+                                                   │
+                                                   ▼
+                                      具名任务 RigidObjectCfg 字段
+                                                   │
+                                                   ▼
+                                      InteractiveScene 任务预览
 ```
 
 这一层边界有意保持精简：机器人特有信息放在 robot profile 中，场景特有信息放在 scene preset 中，下游代码只接收标准 Isaac Lab 配置对象。
@@ -66,7 +67,7 @@ git clone --branch release/3.0.0-beta2 --depth 1 \
 uv sync --frozen
 ```
 
-默认配置还要求项目资产包位于 `Assets/`。如果你的 checkout 中不包含这些资产，请补充以下文件，以及它们引用的纹理和其他 USD 依赖：
+本 Git 仓库不包含运行默认配置所需的项目资产包。使用默认 preset 前，需要从项目维护者或团队资产存储中另行取得标准资产包并放到 `Assets/`，也可以在以下精确路径提供兼容资产。还必须包含这些文件引用的全部纹理和传递 USD 依赖：
 
 ```text
 Assets/
@@ -74,6 +75,7 @@ Assets/
 ├── Material/material_0122/Mahogany_Planks.mdl
 ├── Material/material_0564/Wood_Tiles_Fineline.mdl
 ├── Object/Geometry/camera_stand_aloha/aloha_front_camera_stand_realsense_d435.usd
+├── Object/Rigid/matryoshka_dolls/{00000..00004}/{object.usdz,metadata.json}
 ├── Robots/piper/Piper.usd
 ├── Robots/piper/piper_description/urdf/piper.urdf
 └── Room/Simple_Room_nolight/simple_room_nolight.usd
@@ -87,6 +89,21 @@ Assets/
 
 ```bash
 uv run python scripts/preview_scene.py
+```
+
+通过稳定的 task ID 预览任务场景：
+
+```bash
+uv run python scripts/preview_scene.py --task sort_dolls_by_size
+```
+
+生成并导出可复现布局，或在之后直接加载：
+
+```bash
+uv run python scripts/preview_scene.py --task sort_dolls_by_size \
+  --seed 42 --export-layout layouts/sort_dolls_by_size/42.json
+uv run python scripts/preview_scene.py --task sort_dolls_by_size \
+  --layout layouts/sort_dolls_by_size/42.json
 ```
 
 执行两步无界面冒烟验证：
@@ -110,6 +127,10 @@ uv run python scripts/preview_scene.py \
 | 参数 | 作用 |
 |---|---|
 | `--config PATH` | 选择场景 YAML。 |
+| `--task TASK_ID` | 在公共场景上添加任务资产（目前支持 `sort_dolls_by_size`）。 |
+| `--seed N` | 确定性生成任务布局；默认使用零。 |
+| `--layout PATH` | 从已导出的 layout JSON 加载任务资产位姿。 |
+| `--export-layout PATH` | 保存本次生成或加载的任务布局。 |
 | `--left-robot-config PATH` | 选择左臂 robot profile。 |
 | `--right-robot-config PATH` | 选择右臂 robot profile。 |
 | `--device VALUE` | 选择 `cpu`、`cuda` 或 `cuda:0` 等具体设备。 |
@@ -185,7 +206,7 @@ scene_cfg = create_dual_arm_tabletop_scene_cfg(
 
 这段代码应在 `AppLauncher` 完成 Isaac Sim 初始化后运行。
 
-`SceneConfig` 会校验场景顶层结构，以及 `task_object_placement_area` 中有限且顺序正确的 XY 边界。任务构建器和可视化工具可以复用它的 `table_top_z_m` 属性与放置区域元数据，无需重复计算场景几何。
+`SceneConfig` 使用独立的嵌套模型校验每个场景区块，包括非空资产路径字段、有限位姿、正数尺寸、材质参数、单位四元数、相机坐标约定、运行时类型，以及 `task_object_placement_area` 中顺序正确的 XY 边界。任务构建器和可视化工具可以复用它的 `table_top_z_m` 属性与放置区域元数据，无需重复计算场景几何。
 
 ```python
 from scale_bench.scenes import SceneConfig
@@ -194,6 +215,8 @@ scene_metadata = SceneConfig.load("configs/scene/default.yml")
 placement_area = scene_metadata.task_object_placement_area
 table_top_z_m = scene_metadata.table_top_z_m
 ```
+
+`scale_bench.scenes` 还公开导出以下嵌套 schema：`RoomConfig`、`SurfaceConfig`、`TaskObjectPlacementArea`、`RobotMountConfig`、`RobotMountsConfig`、`OverheadCameraConfig`、`LightingConfig` 和 `SceneRuntimeConfig`。加载完整 preset 时应优先使用 `SceneConfig.load()`，以保持路径解析、校验和进程内缓存行为一致。
 
 场景包含：
 
@@ -205,6 +228,27 @@ table_top_z_m = scene_metadata.table_top_z_m
 - 可配置的环境数量、间距、物理复制和 Fabric cloning。
 
 机器人底座和相机支架会根据计算得到的桌面高度放置，因此修改桌子高度后，安装在桌面上的资产仍会自动对齐。
+
+### Task
+
+`TaskDefinition` 把稳定的共同行为集中在一个文件中：metadata 加载、确定性采样、放置校验、刚体配置构建，以及 layout JSON 的导入导出。`SortDollsBySize` 只声明套娃资产、instruction 和尺寸排序目标。不需要任务专用场景子类；任务会把具名 `RigidObjectCfg` 字段直接加入公共 `InteractiveSceneCfg` 实例。
+
+```python
+from scale_bench.scenes import SceneConfig
+from scale_bench.tasks import SortDollsBySize
+
+scene_metadata = SceneConfig.load("configs/scene/default.yml")
+task = SortDollsBySize(scene_config=scene_metadata)
+layout = task.add_assets_to_scene(
+    scene_cfg,
+    seed=42,
+    export_layout_path="layouts/sort_dolls_by_size/42.json",
+)
+instruction = task.instruction
+target_order = task.target_order_small_to_large
+```
+
+调用 `add_assets_to_scene(scene_cfg, layout_path=...)` 即可用完全相同的位姿初始化另一个场景。无论布局来自 seed 还是文件，都会依据 `task_object_placement_area` 校验；每个资产的完整 XY footprint 都在区域内，并保持配置的最小物体间距。向 `SortDollsBySize` 传入 `config_path="configs/tasks/my_sort_dolls.yml"` 可以改用其他任务 YAML。旧脚本中的 Piper/cuRobo 规划、机器人分工、数据记录、成功评测和应用生命周期仍留在 Task 层之外。
 
 ### UV 长方体
 
@@ -244,6 +288,16 @@ table_top_z_m = scene_metadata.table_top_z_m
 
 场景 YAML 会按路径在进程内缓存。修改场景配置后，请重启预览进程。
 
+### 验证改动
+
+无需启动交互式仿真器即可运行自动化契约与布局测试：
+
+```bash
+uv run pytest -q
+```
+
+当前测试覆盖公共 Task API、确定性放置、边界与间距校验、资产注册和 layout 回放。涉及实际仿真启动或渲染的改动，仍应执行限定步数的无界面预览冒烟测试。
+
 ## 仓库结构
 
 ```text
@@ -254,13 +308,17 @@ src/scale_bench/
 │   ├── scene_config.py     # 场景 YAML 与放置区域 schema
 │   ├── scene_template.py   # 双臂桌面场景编译
 │   └── uv_cuboid.py        # 带 face-varying UV 的长方体 spawner
-└── sensors/
-    └── camera_profile.py   # YAML schema、校验、CameraCfg 构建
+├── sensors/
+│   └── camera_profile.py   # YAML schema、校验、CameraCfg 构建
+└── tasks/
+    ├── base.py             # 公共任务、刚体资产与布局逻辑
+    └── sort_dolls_by_size.py # 一个具体任务
 
 configs/
 ├── cameras/d435.yml        # 可复用相机 profile
 ├── robots/piper.yml        # 参考机器人 profile
-└── scene/default.yml       # 场景内位姿和环境配置
+├── scene/default.yml       # 场景内位姿和环境配置
+└── tasks/sort_dolls_by_size.yml
 
 scripts/preview_scene.py    # 交互预览和无界面冒烟验证入口
 ```
@@ -278,7 +336,7 @@ scripts/preview_scene.py    # 交互预览和无界面冒烟验证入口
 
 - [Robot profile 约定](docs/robot_profiles.md)
 - [场景模板说明](docs/scene_template.md)
-- [Benchmark 架构方向](docs/benchmark_architecture.md)——这是设计目标，其中部分组件尚未实现
+- [当前 Benchmark 架构与边界](docs/benchmark_architecture.md)
 
 ## 许可证
 

@@ -13,6 +13,7 @@ from isaaclab.sensors import CameraCfg
 from isaaclab.sim.spawners.materials import RigidBodyMaterialBaseCfg
 from isaaclab.utils.configclass import configclass
 
+from scale_bench import REPOSITORY_ROOT
 from scale_bench.sensors import CameraProfile
 
 from .scene_config import (
@@ -28,9 +29,6 @@ from .uv_cuboid import UvCuboidCfg
 
 if TYPE_CHECKING:
     from scale_bench.robots import RobotProfile
-
-
-REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 
 
 @overload

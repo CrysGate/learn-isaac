@@ -43,6 +43,17 @@ UvCuboidCfg ──► textured ground/table ────────────
 uv run python scripts/preview_scene.py
 ```
 
+预览 `sort_dolls_by_size` 任务，并按 seed 生成或从文件恢复任务布局：
+
+```bash
+uv run python scripts/preview_scene.py --task sort_dolls_by_size \
+  --seed 42 --export-layout layouts/sort_dolls_by_size/42.json
+uv run python scripts/preview_scene.py --task sort_dolls_by_size \
+  --layout layouts/sort_dolls_by_size/42.json
+```
+
+使用 `--export-layout PATH` 可以保存本次生成或加载的布局。`--seed` 与 `--layout` 互斥；`--seed`、`--layout` 和 `--export-layout` 都要求同时传入 `--task`。选择任务但不指定 seed 或 layout 时默认使用 seed `0`。
+
 执行两步无界面冒烟验证：
 
 ```bash
@@ -139,7 +150,7 @@ table:
 ```yaml
 task_object_placement_area:
   x_range_m: [-0.65, 0.65]
-  y_range_m: [-0.30, 0.45]
+  y_range_m: [-0.20, 0.45]
 ```
 
 该字段定义环境局部坐标系 XY 平面上的任务物体放置范围。默认区域位于机械臂前方至桌面远端，并在桌边保留 5 cm 边距；物体的 Z 坐标由任务根据桌面顶面高度确定。
@@ -152,6 +163,8 @@ area = scene_config.task_object_placement_area
 ```
 
 `SceneConfig` 会校验全部嵌套区块，拒绝未知字段、无效尺寸和材质参数、非单位四元数、非法相机坐标约定，以及非有限或上下界颠倒的放置区域。后续增加场景级配置时，应在对应的具名模型中添加字段。
+
+`scale_bench.scenes` 公开导出 `RoomConfig`、`SurfaceConfig`、`TaskObjectPlacementArea`、`RobotMountConfig`、`RobotMountsConfig`、`OverheadCameraConfig`、`LightingConfig` 和 `SceneRuntimeConfig`。加载完整场景 preset 时应优先调用 `SceneConfig.load()`，以统一路径解析、严格校验和进程内缓存行为。
 
 ### `robot_mounts`
 
@@ -249,7 +262,8 @@ runtime:
 - 场景 YAML 会按路径在进程内缓存；编辑场景 preset 后应重启预览进程。
 - 场景 YAML 的所有区块和放置区域都由 `SceneConfig` 的具名嵌套模型校验；构建 Isaac Lab 配置时只读取已经验证的属性。
 - 相机 YAML 使用严格的 Pydantic schema；加载失败时会以 `ValueError` 报告 profile 路径和具体校验错误。
-- 默认 preset 依赖 `Assets/` 中的房间、材质、相机支架和 HDR 文件，以及这些资产的传递依赖。
+- 默认 preset 依赖 `Assets/` 中的房间、材质、相机支架和 HDR 文件，以及这些资产的传递依赖；该资产包不由 Git 仓库分发，运行预览前必须单独准备。
+- `sort_dolls_by_size` 任务还依赖 `Assets/Object/Rigid/matryoshka_dolls/{00000..00004}/` 下的 `object.usdz`、`metadata.json` 及其传递依赖。
 
 ## `UvCuboidCfg`
 
@@ -272,4 +286,4 @@ runtime:
 - 定义观测、动作、奖励或成功条件；
 - 创建 policy、evaluator 或 recorder。
 
-这些能力属于目标架构中的 `ScenarioSpec`、Task 和评测层，目前尚未实现。机器人配置约定见 [`robot_profiles.md`](robot_profiles.md)，整体设计状态见 [`benchmark_architecture.md`](benchmark_architecture.md)。
+任务物体不属于这个公共模板。Task 层直接在构建完成的 `InteractiveSceneCfg` 实例上增加具名资产配置；`SortDollsBySize` 可按 seed 生成布局，也可从导出的 layout JSON 恢复五个套娃的初始位姿。Env 配置组装、Policy/Evaluator 数据边界、Recorder 和 episode runner 尚未实现。机器人配置约定见 [`robot_profiles.md`](robot_profiles.md)，整体设计状态见 [`benchmark_architecture.md`](benchmark_architecture.md)。

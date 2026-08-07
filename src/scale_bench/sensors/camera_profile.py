@@ -14,11 +14,11 @@ from pydantic import (
     model_validator,
 )
 
+from scale_bench import REPOSITORY_ROOT
+
 if TYPE_CHECKING:
     from isaaclab.sensors import CameraCfg
 
-
-REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 
 FiniteFloat = Annotated[float, Field(allow_inf_nan=False)]
 PositiveFloat = Annotated[float, Field(gt=0.0, allow_inf_nan=False)]

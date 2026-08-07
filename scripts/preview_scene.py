@@ -1,17 +1,45 @@
-"""Open a YAML scene configuration in Isaac Sim."""
+"""Preview a common or task-extended YAML scene in Isaac Sim."""
 
 import argparse
 import sys
 from pathlib import Path
 
-REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPOSITORY_ROOT / "src"))
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(PROJECT_ROOT / "src"))
+
+# Kept lightweight so argparse can reject unknown tasks before Isaac Sim starts.
+SUPPORTED_TASK_IDS = ("sort_dolls_by_size",)
 
 from isaaclab.app import AppLauncher
 
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--config", type=Path, default=Path("configs/scene/default.yml"))
+parser.add_argument(
+    "--task",
+    choices=SUPPORTED_TASK_IDS,
+    default=None,
+    help="Preview a task scene by its task ID; omit to preview the common scene.",
+)
+layout_source = parser.add_mutually_exclusive_group()
+layout_source.add_argument(
+    "--seed",
+    type=int,
+    default=None,
+    help="Seed used to generate the task layout (default: 0).",
+)
+layout_source.add_argument(
+    "--layout",
+    type=Path,
+    default=None,
+    help="Initialize task assets from an exported layout JSON file.",
+)
+parser.add_argument(
+    "--export-layout",
+    type=Path,
+    default=None,
+    help="Export the generated or loaded task layout as JSON.",
+)
 parser.add_argument(
     "--left-robot-config",
     type=Path,
@@ -41,6 +69,12 @@ if args.max_steps is not None and args.max_steps <= 0:
     parser.error("--max-steps must be positive")
 if args.camera_frustum_length_m <= 0.0:
     parser.error("--camera-frustum-length-m must be positive")
+if args.seed is not None and args.seed < 0:
+    parser.error("--seed must be non-negative")
+if args.task is None and (
+    args.seed is not None or args.layout is not None or args.export_layout is not None
+):
+    parser.error("--seed, --layout, and --export-layout require --task")
 
 preview_overlays_enabled = not args.headless and "kit" in (args.visualizer or ())
 camera_frustum_length_m = args.camera_frustum_length_m
@@ -49,13 +83,20 @@ app_launcher = AppLauncher(args)
 simulation_app = app_launcher.app
 
 import isaaclab.sim as sim_utils
-import omni.ui
 from isaaclab.scene import InteractiveScene
-from isaacsim.util.debug_draw import _debug_draw
-from pxr import Gf
+
+if preview_overlays_enabled:
+    from isaacsim.core.experimental.utils.app import enable_extension
+
+    enable_extension("isaacsim.util.debug_draw")
+
+    import omni.ui
+    from isaacsim.util.debug_draw import _debug_draw
+    from pxr import Gf
 
 from scale_bench.robots import RobotProfile
 from scale_bench.scenes import SceneConfig, create_dual_arm_tabletop_scene_cfg
+from scale_bench.tasks import SortDollsBySize
 
 
 Point = tuple[float, float, float]
@@ -199,15 +240,24 @@ def main() -> None:
     )
     sim.set_camera_view((2.6, 2.2, 2.2), (0.0, 0.0, 0.8))
 
+    scene_config = SceneConfig.load(args.config)
     left_profile = RobotProfile.load(args.left_robot_config)
     right_profile = RobotProfile.load(args.right_robot_config)
-    scene = InteractiveScene(
-        create_dual_arm_tabletop_scene_cfg(
-            left_robot_profile=left_profile,
-            right_robot_profile=right_profile,
-            config_path=args.config,
-        )
+    scene_cfg = create_dual_arm_tabletop_scene_cfg(
+        left_robot_profile=left_profile,
+        right_robot_profile=right_profile,
+        config_path=args.config,
     )
+    task = SortDollsBySize(scene_config=scene_config) if args.task is not None else None
+    layout = None
+    if task is not None:
+        layout = task.add_assets_to_scene(
+            scene_cfg,
+            seed=args.seed,
+            layout_path=args.layout,
+            export_layout_path=args.export_layout,
+        )
+    scene = InteractiveScene(scene_cfg)
     sim.reset()
 
     for robot_name in ("left_robot", "right_robot"):
@@ -227,17 +277,22 @@ def main() -> None:
     overlay = (
         ScenePreviewOverlay(
             scene,
-            SceneConfig.load(args.config),
+            scene_config,
             camera_frustum_length_m,
         )
         if preview_overlays_enabled
         else None
     )
 
+    preview_name = f"task '{task.task_id}'" if task is not None else "common scene"
+    layout_message = ""
+    if layout is not None:
+        source = f"layout {args.layout}" if args.layout is not None else f"seed {layout.seed}"
+        layout_message = f"Task assets use {source}. "
     print(
-        f"Scene loaded from {args.config} with "
+        f"Loaded {preview_name} from {args.config} with "
         f"{left_profile.name} (left) and {right_profile.name} (right). "
-        "Close the window to exit."
+        f"{layout_message}Close the window to exit."
     )
 
     step_count = 0

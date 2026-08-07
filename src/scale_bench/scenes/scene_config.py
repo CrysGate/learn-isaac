@@ -19,10 +19,10 @@ from pydantic import (
     model_validator,
 )
 
+from scale_bench import REPOSITORY_ROOT
 from scale_bench.sensors import CameraConvention
 
 
-REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 DEFAULT_SCENE_CONFIG_PATH = REPOSITORY_ROOT / "configs/scene/default.yml"
 FiniteFloat = Annotated[float, Field(allow_inf_nan=False)]
 NonNegativeFloat = Annotated[float, Field(ge=0.0, allow_inf_nan=False)]
