@@ -4,7 +4,7 @@ minimum_object_gap_m: 0.02
 sampling_attempts_per_object: 1000
 
 physics:
-  restitution: 0.05
+  restitution: 0.01
   linear_damping: 0.10
   angular_damping: 0.10
   sleep_threshold: 0.005
