@@ -10,6 +10,7 @@ import isaaclab.sim as sim_utils
 from isaaclab.assets import ArticulationCfg, AssetBaseCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sensors import CameraCfg
+from isaaclab.sim.spawners.materials import RigidBodyMaterialBaseCfg
 from isaaclab.utils.configclass import configclass
 
 from scale_bench.sensors import CameraProfile
@@ -68,7 +69,7 @@ def _surface_cfg(prim_path: str, spec: SurfaceConfig) -> AssetBaseCfg:
             collision_props=sim_utils.PhysxCollisionPropertiesCfg(
                 collision_enabled=True
             ),
-            physics_material=sim_utils.PhysxRigidBodyMaterialCfg(
+            physics_material=RigidBodyMaterialBaseCfg(
                 static_friction=spec.static_friction,
                 dynamic_friction=spec.dynamic_friction,
                 restitution=spec.restitution,
