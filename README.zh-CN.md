@@ -4,7 +4,7 @@
 
 ScaleBench 是一组配置优先的 Isaac Lab 基础组件，用于构建尺度相关的双臂操作场景。
 
-项目将机器人语义、相机、场景和任务参数保存在 YAML 中，在边界处严格校验，再将其编译为原生 Isaac Lab 配置对象。当前实现提供可复用的场景构建和一个由 seed/layout 驱动的任务，但还不是一套完整的环境、策略或评测流水线。
+项目将机器人语义、相机、场景、任务、仿真和环境参数保存在 YAML 中，在边界处严格校验，再将其编译为原生 Isaac Lab 配置对象。当前实现提供可复用的场景构建、一个由 seed/layout 驱动的任务和正式的 manager-based 运行时入口，但还不是完整的策略或评测流水线。
 
 ## 已实现能力
 
@@ -14,29 +14,26 @@ ScaleBench 是一组配置优先的 Isaac Lab 基础组件，用于构建尺度�
 - **类型化仿真 preset**：只校验会定义 benchmark 行为的时间步、重力、渲染和操作稳定性参数，其余设置继承 Isaac Lab 默认值。
 - **可复用双臂场景**：组合房间、带纹理的地面和桌面、两台带腕部相机的机器人、顶视 RGB-D 相机及环境光。
 - **精简的 Task 接口与首个任务**：通过确定性 seed 或可复用 layout 文件，直接向公共场景添加任务资产；`SortDollsBySize` 是第一个与机器人型号无关的案例。
+- **Manager-based 环境入口**：将 Scene、Task、Sim、runtime 与 manager 配置组合为 `ScaleBenchEnvCfg`，由 `ScaleBenchEnv` 独占 reset、step 和仿真生命周期。
 - **纹理正确的程序化表面**：`UvCuboidCfg` 会写入 face-varying UV，使 MDL 材质能在长方体表面正确平铺。
 - **可直接运行的场景预览**：既可以在 Isaac Sim 中查看放置区域与相机视锥，也可以执行短时间无界面冒烟验证。
 
 > [!NOTE]
-> `src/scale_bench` 目前提供配置/场景基础层与最小 Task 抽象。环境组装、Evaluator、episode 调度、数据记录和 benchmark 报告尚未实现。
+> Action 和 Observation Manager 的 term 尚未接入，因此当前环境的 action 维度为零，也还没有 policy observation；Evaluator、episode 调度、数据记录和 benchmark 报告同样留待后续实现。
 
 ## 架构
 
 ```text
-机器人/场景/相机 YAML ──► 类型化 profile ──► DualArmTabletopSceneCfg
-                                                   │
-                                                   ├─► 公共场景预览
-                                                   │
-任务 YAML ──► SortDollsBySize ─────────────────────┤
-seed 或 layout JSON ───────────────────────────────┤
-                                                   ▼
-                                 add_assets_to_scene(scene_cfg)
-                                                   │
-                                                   ▼
-                                      具名任务 RigidObjectCfg 字段
-                                                   │
-                                                   ▼
-                                      InteractiveScene 任务预览
+机器人/场景/相机 YAML ──► 类型化 profile ──► scene cfg ──┐
+任务 YAML + seed/layout ─► TaskDefinition ─────────────────┤
+sim YAML ────────────────► SimConfig ──────────────────────┤
+env YAML ────────────────► EnvRuntimeConfig ───────────────┤
+                                                           ▼
+                                       create_env_cfg() / ScaleBenchEnvCfg
+                                                           │
+                                                           ▼
+                                                 ScaleBenchEnv
+                                      reset() / step() / IO descriptor
 ```
 
 这一层边界有意保持精简：机器人特有信息放在 robot profile 中，场景特有信息放在 scene preset 中，下游代码只接收标准 Isaac Lab 配置对象。
@@ -119,6 +116,7 @@ uv run python scripts/preview_scene.py --viz none --max-steps 2
 uv run python scripts/preview_scene.py \
   --config configs/scene/default.yml \
   --sim-config configs/sim/default.yml \
+  --env-config configs/envs/default.yml \
   --left-robot-config configs/robots/piper.yml \
   --right-robot-config configs/robots/piper.yml \
   --device cuda:0
@@ -130,6 +128,7 @@ uv run python scripts/preview_scene.py \
 |---|---|
 | `--config PATH` | 选择场景 YAML。 |
 | `--sim-config PATH` | 选择仿真、渲染和 PhysX 参数。 |
+| `--env-config PATH` | 选择控制 decimation 和 reset 生命周期参数。 |
 | `--task TASK_ID` | 在公共场景上添加任务资产（目前支持 `sort_dolls_by_size`）。 |
 | `--seed N` | 确定性生成任务布局；默认使用零。 |
 | `--layout PATH` | 从已导出的 layout JSON 加载任务资产位姿。 |
@@ -138,7 +137,7 @@ uv run python scripts/preview_scene.py \
 | `--right-robot-config PATH` | 选择右臂 robot profile。 |
 | `--device VALUE` | 选择 `cpu`、`cuda` 或 `cuda:0` 等具体设备。 |
 | `--viz none` | 关闭 visualizer，以无界面方式运行。 |
-| `--max-steps N` | 在指定仿真步数后退出。 |
+| `--max-steps N` | 在指定环境步数后退出。 |
 | `--camera-frustum-length-m M` | 设置预览中相机视锥的显示长度，单位为米。 |
 
 运行 `uv run python scripts/preview_scene.py --help` 可以查看 Isaac Lab launcher 的全部参数。
@@ -157,6 +156,34 @@ simulation_cfg = sim_profile.build_simulation_cfg(device="cuda:0")
 ```
 
 默认 preset 以 120 Hz 运行 physics，每四步渲染一次，即 30 Hz。它只公开影响 benchmark 时间尺度、重力、观测质量或操作稳定性的参数；材质、Fabric、日志、solver iteration 和 GPU buffer 均继承当前安装的 Isaac Lab 默认值。未知字段、非法时间参数和无效 device 会在加载时被拒绝。`num_envs` 等场景克隆参数仍保留在 scene preset 中。
+
+### 环境运行时
+
+[`create_env_cfg()`](src/scale_bench/envs/env_config.py) 将已加载的 robot profile、`SceneConfig`、可选 task layout、`SimConfig` 和 [`EnvRuntimeConfig`](src/scale_bench/envs/runtime_config.py) 直接编译为原生 `ScaleBenchEnvCfg`：
+
+```python
+from scale_bench.envs import EnvRuntimeConfig, ScaleBenchEnv, create_env_cfg
+
+runtime = EnvRuntimeConfig.load("configs/envs/default.yml")
+layout = task.resolve_layout(seed=42)
+env_cfg = create_env_cfg(
+    left_robot_profile=left,
+    right_robot_profile=right,
+    scene_config=scene,
+    sim_config=sim,
+    runtime_config=runtime,
+    task=task,
+    layout=layout,
+    resample_task_layouts=True,
+)
+env = ScaleBenchEnv(env_cfg)
+try:
+    observation, info = env.reset()
+finally:
+    env.close()
+```
+
+`ScaleBenchEnv` 继承 Isaac Lab 的 `ManagerBasedEnv`，是 `SimulationContext`、`InteractiveScene`、reset、step 和清理操作的唯一所有者。runtime IO 元数据从初始化后的真实环境计算，不再由构建期输入注入。reset event 会为每个 `env_id` 分配确定性 layout，`info["episode"]` 返回本次 reset 涉及的环境 ID 和 layout seed。builder 会拒绝 render 或相机更新与 `step_dt` 不同步的 preset。Action 和 Observation manager 配置目前是显式的空扩展点，供下一阶段填充。
 
 ### Robot profile
 
@@ -255,16 +282,14 @@ from scale_bench.tasks import SortDollsBySize
 
 scene_metadata = SceneConfig.load("configs/scene/default.yml")
 task = SortDollsBySize(scene_config=scene_metadata)
-layout = task.add_assets_to_scene(
-    scene_cfg,
-    seed=42,
-    export_layout_path="layouts/sort_dolls_by_size/42.json",
-)
+layout = task.resolve_layout(seed=42)
+layout.save("layouts/sort_dolls_by_size/42.json")
+task.add_assets_to_scene(scene_cfg, layout)
 instruction = task.instruction
 target_order = task.target_order_small_to_large
 ```
 
-调用 `add_assets_to_scene(scene_cfg, layout_path=...)` 即可用完全相同的位姿初始化另一个场景。无论布局来自 seed 还是文件，都会依据 `task_object_placement_area` 校验；每个资产的完整 XY footprint 都在区域内，并保持配置的最小物体间距。向 `SortDollsBySize` 传入 `config_path="configs/tasks/my_sort_dolls.yml"` 可以改用其他任务 YAML。旧脚本中的 Piper/cuRobo 规划、机器人分工、数据记录、成功评测和应用生命周期仍留在 Task 层之外。
+调用 `task.resolve_layout(layout_path=...)` 会恢复并校验保存的精确位姿，之后再由 `add_assets_to_scene()` 注册到场景。无论布局来自 seed 还是文件，都会依据 `task_object_placement_area` 校验；每个资产的完整 XY footprint 都在区域内，并保持配置的最小物体间距。向 `SortDollsBySize` 传入 `config_path="configs/tasks/my_sort_dolls.yml"` 可以改用其他任务 YAML。旧脚本中的 Piper/cuRobo 规划、机器人分工、数据记录、成功评测和应用生命周期仍留在 Task 层之外。
 
 ### UV 长方体
 
@@ -308,6 +333,8 @@ target_order = task.target_order_small_to_large
 
 复制 [`configs/sim/default.yml`](configs/sim/default.yml) 即可创建仿真 preset。时间步与重力位于顶层，`render` 选择观测质量，`physx` 只保留当前由运行行为证明有必要的一个操作稳定性覆盖项。其他参数跟随 Isaac Lab 默认值；只有 benchmark 需求证明某项必须变化时，才应把它提升为公共配置。使用 `--sim-config` 选择 preset，使用 `--device` 做临时的机器相关覆盖。
 
+复制 [`configs/envs/default.yml`](configs/envs/default.yml) 可以修改 control decimation、reset 重渲染次数、纹理等待和环境 seed。builder 要求 render interval、control decimation 和相机更新周期共同描述同一个同步环境频率。
+
 ### 验证改动
 
 无需启动交互式仿真器即可运行自动化契约与布局测试：
@@ -316,12 +343,17 @@ target_order = task.target_order_small_to_large
 uv run pytest -q
 ```
 
-当前测试覆盖公共 Task API、确定性放置、边界与间距校验、资产注册和 layout 回放。涉及实际仿真启动或渲染的改动，仍应执行限定步数的无界面预览冒烟测试。
+当前测试覆盖环境 preset 校验、manager 组合、同步时序、runtime descriptor 和 episode 元数据。涉及实际仿真启动或渲染的改动，仍应执行限定步数的无界面预览冒烟测试。
 
 ## 仓库结构
 
 ```text
 src/scale_bench/
+├── envs/
+│   ├── env_config.py       # 原生 EnvCfg 组合与时序校验
+│   ├── events.py           # task layout reset 与逐环境 episode 状态
+│   ├── runtime_config.py   # 环境生命周期 YAML schema
+│   └── scale_bench_env.py  # 正式 ManagerBasedEnv 运行时入口
 ├── sim/
 │   └── simulation_config.py # 仿真 YAML 与 SimulationCfg builder
 ├── robots/
@@ -338,6 +370,7 @@ src/scale_bench/
 
 configs/
 ├── cameras/d435.yml        # 可复用相机 profile
+├── env/default.yml         # 控制与 reset 生命周期参数
 ├── robots/piper.yml        # 参考机器人 profile
 ├── scene/default.yml       # 场景内位姿和环境配置
 ├── sim/default.yml         # 仿真、渲染与 PhysX 参数

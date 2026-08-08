@@ -148,7 +148,8 @@ def create_dual_arm_tabletop_scene_cfg(
     *,
     left_robot_profile: RobotProfile,
     right_robot_profile: RobotProfile,
-    config_path: str | Path = DEFAULT_SCENE_CONFIG_PATH,
+    config_path: str | Path | None = None,
+    scene_config: SceneConfig | None = None,
     num_envs: int | None = None,
     env_spacing_m: float | None = None,
 ) -> DualArmTabletopSceneCfg:
@@ -158,11 +159,15 @@ def create_dual_arm_tabletop_scene_cfg(
         raise ValueError("left_robot_profile is required")
     if right_robot_profile is None:
         raise ValueError("right_robot_profile is required")
+    if config_path is not None and scene_config is not None:
+        raise ValueError("config_path and scene_config are mutually exclusive")
 
     left_robot_cfg = left_robot_profile.build_articulation_cfg()
     right_robot_cfg = right_robot_profile.build_articulation_cfg()
 
-    config = SceneConfig.load(config_path)
+    config = scene_config or SceneConfig.load(
+        DEFAULT_SCENE_CONFIG_PATH if config_path is None else config_path
+    )
     table = config.table
     runtime = config.runtime
     camera = config.camera

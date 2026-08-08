@@ -1,6 +1,6 @@
 # ScaleBench 当前架构
 
-本文只描述已经实现的边界。Action、Observation、Evaluator、Runner 和 Recorder 尚未实现，不在当前 Task 层中预留空模块。
+本文只描述已经实现的边界。正式环境入口已经建立，但 Action 与 Observation Manager 目前仍是零 term 配置；Evaluator、Runner 和 Recorder 尚未实现。
 
 ## 当前组件
 
@@ -12,12 +12,22 @@
 | `DualArmTabletopSceneCfg` | 描述公共房间、桌面、双臂、相机和灯光。 |
 | `TaskDefinition` | 统一任务资产加载、seed 布局生成、布局校验和 JSON 导入导出。 |
 | `SortDollsBySize` | 当前唯一具体任务，声明套娃资产、instruction 和尺寸目标顺序。 |
-| `scripts/preview_scene.py` | 预览公共场景或指定 seed/layout 的任务场景。 |
+| `EnvRuntimeConfig` | 校验 control decimation、reset 重渲染、纹理等待和环境 seed。 |
+| `create_env_cfg()` | 将 Scene、Task layout、Sim 和 manager 配置编译为原生 EnvCfg。 |
+| `ScaleBenchEnvCfg` | 可直接交给 Isaac Lab 的完整 `ManagerBasedEnvCfg`。 |
+| `ResetTaskLayout` | 在 reset 时为指定 `env_id` 写入 layout 并维护 episode seed。 |
+| `ScaleBenchEnv` | 唯一持有仿真生命周期，并从实际运行对象导出元数据。 |
+| `scripts/preview_scene.py` | 通过 `ScaleBenchEnv` 预览公共场景或指定 seed/layout 的任务场景。 |
 
 目录保持为最小结构：
 
 ```text
 src/scale_bench/
+├── envs/
+│   ├── env_config.py
+│   ├── events.py
+│   ├── runtime_config.py
+│   └── scale_bench_env.py
 ├── robots/robot_profile.py
 ├── scenes/
 │   ├── scene_config.py
@@ -30,34 +40,53 @@ src/scale_bench/
 
 configs/
 ├── cameras/d435.yml
+├── env/default.yml
 ├── robots/piper.yml
 ├── scene/default.yml
+├── sim/default.yml
 └── tasks/sort_dolls_by_size.yml
 ```
 
 ## 配置流
 
 ```text
-Robot YAML ──► RobotProfile ──► ArticulationCfg ─────┐
-                            └─► robot CameraCfg ─────┤
-                                                    │
-Scene YAML ──► SceneConfig ─────────────────────────┼─► DualArmTabletopSceneCfg ─► 公共场景预览
-                                                    │               │
-Camera YAML ──► CameraProfile ──► CameraCfg ────────┘               │
-                                                                    │
-Task YAML ──► SortDollsBySize ──────────────────────────────────────┤
-seed 或 layout JSON ────────────────────────────────────────────────┤
-                                                                    ▼
-                                                add_assets_to_scene(scene_cfg)
-                                                                    │
-                                                                    ▼
-                                          task-extended InteractiveSceneCfg
-                                                                    │
-                                                                    ▼
-                                                  InteractiveScene 任务预览
+Robot/Camera/Scene YAML ──► profiles ──► DualArmTabletopSceneCfg ──┐
+Task YAML + seed/layout ──► TaskDefinition ─► initial layout/assets ┤
+Sim YAML ────────────────► SimConfig ─► SimulationCfg ─────────────┤
+Env YAML ────────────────► EnvRuntimeConfig ───────────────────────┤
+                                                                   ▼
+                                                     create_env_cfg()
+                                                                   │
+                                                                   ▼
+                                                        ScaleBenchEnvCfg
+                                                                   │
+                                                                   ▼
+                                                        ScaleBenchEnv
+                                             reset() / step() / close()
+                                                  │             │
+                                per-env layout/episode     actual IO metadata
 ```
 
-`DualArmTabletopSceneCfg` 是公共 `InteractiveSceneCfg`。Task 不创建任务专用 SceneCfg 子类，也不复制公共配置；它直接向调用方传入的配置实例增加任务资产字段。Isaac Lab 的 `InteractiveScene` 会正常解析这些动态字段。
+`DualArmTabletopSceneCfg` 是公共 `InteractiveSceneCfg`。Task 不创建任务专用 SceneCfg 子类；调用方先显式解析 layout，再由 Task 将资产字段注册到 SceneCfg。`create_env_cfg()` 只负责把扩展后的 SceneCfg、原生 SimulationCfg 和 manager 配置编译为 `ScaleBenchEnvCfg`。
+
+## Env 入口
+
+`configs/envs/default.yml` 只管理环境生命周期参数，不复制 Sim 或 Scene 配置：
+
+```yaml
+control_decimation: 4
+num_rerenders_on_reset: 1
+wait_for_textures: true
+seed: 0
+```
+
+默认 SimConfig 以 120 Hz 推进 physics，EnvRuntimeConfig 每 4 个 physics step 执行一次环境 step，因此环境、render 和三个相机都以 30 Hz 同步更新。builder 会在创建仿真前检查 `render_interval == control_decimation` 且每个相机 `update_period == step_dt`。
+
+`create_env_cfg()` 直接返回 `ScaleBenchEnvCfg`，调用方通过 `ScaleBenchEnv(env_cfg)` 创建环境。环境的 `get_IO_descriptors` 复用 Isaac Lab 原生 action、observation、articulation 和 scene descriptor，并从已经初始化的 env、sim 与 camera sensor 计算 runtime timing，不保留第二份构建期事实来源。
+
+Task 环境的 reset event 按 `base_seed + env_id + episode_index * num_envs` 生成确定性 layout，只更新本次 reset 的环境。固定 layout 回放则关闭 resample。`info["episode"]` 返回对应的 `env_ids`、`task_id`、`instruction` 和 `layout_seeds`。
+
+Action/Observation manager 目前是显式空配置，因此当前入口可验证环境所有权和生命周期，但不能控制机器人，也不返回 policy observation。这两个 manager 的 term 将在后续阶段根据 RobotProfile 与 CameraProfile 动态生成。
 
 ## Task 接口
 
@@ -68,23 +97,21 @@ task.task_id
 task.instruction
 task.target_order_small_to_large  # SortDollsBySize 的具体任务目标
 
-layout = task.add_assets_to_scene(
-    scene_cfg,
-    seed=42,
-    export_layout_path="layouts/sort_dolls_by_size/42.json",
-)
+layout = task.resolve_layout(seed=42)
+layout.save("layouts/sort_dolls_by_size/42.json")
+task.add_assets_to_scene(scene_cfg, layout)
 ```
 
 也可以从文件恢复：
 
 ```python
-layout = task.add_assets_to_scene(
-    scene_cfg,
+layout = task.resolve_layout(
     layout_path="layouts/sort_dolls_by_size/42.json",
 )
+task.add_assets_to_scene(scene_cfg, layout)
 ```
 
-`seed` 与 `layout_path` 互斥；两者都不传时使用 seed `0`。该方法返回实际加入场景的 `TaskLayout`。
+`seed` 与 `layout_path` 互斥；两者都不传时使用 seed `0`。`resolve_layout()` 只解析和校验，`save()` 显式执行文件写入，`add_assets_to_scene()` 只注册已解析 layout 对应的资产。
 
 共同逻辑集中在 `tasks/base.py`：
 
@@ -139,8 +166,8 @@ layout = task.add_assets_to_scene(
 Task 只负责配置期的任务资产和初始布局。它不会：
 
 - 选择或控制机器人；
-- 启动 Isaac Sim 或创建 `SimulationContext`；
+- 启动 Isaac Sim 或创建 `SimulationContext`，这些由 `ScaleBenchEnv` 负责；
 - 实现 Policy、规划器或成功判定；
 - 管理 episode reset、step 或数据记录。
 
-后续出现第二个任务时，优先复用 `TaskDefinition` 中已经稳定的刚体与布局行为。只有新任务确实需要不同的资产类型或放置规则时，才增加新的小接口；不提前创建 SceneCfg 继承树、registry 或空的运行时框架。
+后续出现第二个任务时，优先复用 `TaskDefinition` 中已经稳定的刚体与布局行为。只有新任务确实需要不同的资产类型或放置规则时，才增加新的小接口；不创建任务专用 SceneCfg 继承树，也不把仿真生命周期下放给 Task。

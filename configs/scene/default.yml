@@ -44,7 +44,7 @@ lighting:
   intensity: 1000.0
 
 runtime:
-  num_envs: 1
+  num_envs: 2
   env_spacing_m: 5.0
   replicate_physics: true
   clone_in_fabric: false

@@ -24,6 +24,12 @@ parser.add_argument(
     help="Simulation, PhysX, and rendering YAML preset.",
 )
 parser.add_argument(
+    "--env-config",
+    type=Path,
+    default=Path("configs/envs/default.yml"),
+    help="Environment control and reset runtime preset.",
+)
+parser.add_argument(
     "--task",
     choices=SUPPORTED_TASK_IDS,
     default=None,
@@ -62,7 +68,7 @@ parser.add_argument(
     "--max-steps",
     type=int,
     default=None,
-    help="Exit after this many simulation steps; useful for headless smoke tests.",
+    help="Exit after this many environment steps; useful for headless smoke tests.",
 )
 parser.add_argument(
     "--camera-frustum-length-m",
@@ -99,7 +105,6 @@ camera_frustum_length_m = args.camera_frustum_length_m
 app_launcher = AppLauncher(args)
 simulation_app = app_launcher.app
 
-import isaaclab.sim as sim_utils
 from isaaclab.scene import InteractiveScene
 
 if preview_overlays_enabled:
@@ -111,8 +116,9 @@ if preview_overlays_enabled:
     from isaacsim.util.debug_draw import _debug_draw
     from pxr import Gf
 
+from scale_bench.envs import EnvRuntimeConfig, ScaleBenchEnv, create_env_cfg
 from scale_bench.robots import RobotProfile
-from scale_bench.scenes import SceneConfig, create_dual_arm_tabletop_scene_cfg
+from scale_bench.scenes import SceneConfig
 from scale_bench.tasks import SortDollsBySize
 
 
@@ -242,74 +248,69 @@ class ScenePreviewOverlay:
 
 
 def main() -> None:
-    sim = sim_utils.SimulationContext(
-        sim_config.build_simulation_cfg(device=args.device)
-    )
-    sim.set_camera_view((2.6, 2.2, 2.2), (0.0, 0.0, 0.8))
-
     scene_config = SceneConfig.load(args.config)
     left_profile = RobotProfile.load(args.left_robot_config)
     right_profile = RobotProfile.load(args.right_robot_config)
-    scene_cfg = create_dual_arm_tabletop_scene_cfg(
-        left_robot_profile=left_profile,
-        right_robot_profile=right_profile,
-        config_path=args.config,
-    )
+    runtime_config = EnvRuntimeConfig.load(args.env_config)
     task = SortDollsBySize(scene_config=scene_config) if args.task is not None else None
-    layout = None
-    if task is not None:
-        layout = task.add_assets_to_scene(
-            scene_cfg,
-            seed=args.seed,
-            layout_path=args.layout,
-            export_layout_path=args.export_layout,
-        )
-    scene = InteractiveScene(scene_cfg)
-    sim.reset()
-
-    for robot_name in ("left_robot", "right_robot"):
-        robot = scene[robot_name]
-        joint_pos = robot.data.default_joint_pos.torch.clone()
-        joint_vel = robot.data.default_joint_vel.torch.clone()
-        robot.write_joint_state_to_sim_index(
-            position=joint_pos,
-            velocity=joint_vel,
-            full_data=True,
-        )
-        robot.set_joint_position_target_index(
-            target=joint_pos,
-            full_data=True,
-        )
-
-    overlay = (
-        ScenePreviewOverlay(
-            scene,
-            scene_config,
-            camera_frustum_length_m,
-        )
-        if preview_overlays_enabled
+    layout = (
+        task.resolve_layout(seed=args.seed, layout_path=args.layout)
+        if task is not None
         else None
     )
+    if layout is not None and args.export_layout is not None:
+        layout.save(args.export_layout)
 
-    preview_name = f"task '{task.task_id}'" if task is not None else "common scene"
-    layout_message = ""
-    if layout is not None:
-        source = f"layout {args.layout}" if args.layout is not None else f"seed {layout.seed}"
-        layout_message = f"Task assets use {source}. "
-    print(
-        f"Loaded {preview_name} from {args.config} with "
-        f"{left_profile.name} (left) and {right_profile.name} (right). "
-        f"Simulation runs at {sim_config.physics_frequency_hz:g} Hz and renders "
-        f"at {sim_config.render_frequency_hz:g} Hz from {args.sim_config}. "
-        f"{layout_message}Close the window to exit."
+    env_cfg = create_env_cfg(
+        left_robot_profile=left_profile,
+        right_robot_profile=right_profile,
+        scene_config=scene_config,
+        sim_config=sim_config,
+        runtime_config=runtime_config,
+        task=task,
+        layout=layout,
+        resample_task_layouts=task is not None and args.layout is None,
+        device=args.device,
     )
-
-    step_count = 0
+    env = ScaleBenchEnv(env_cfg)
+    overlay = None
     try:
+        env.sim.set_camera_view((2.6, 2.2, 2.2), (0.0, 0.0, 0.8))
+        env.reset()
+        overlay = (
+            ScenePreviewOverlay(
+                env.scene,
+                scene_config,
+                camera_frustum_length_m,
+            )
+            if preview_overlays_enabled
+            else None
+        )
+
+        preview_name = f"task '{task.task_id}'" if task is not None else "common scene"
+        layout_message = ""
+        if layout is not None:
+            source = (
+                f"layout {args.layout}"
+                if args.layout is not None
+                else f"seed {layout.seed}"
+            )
+            layout_message = f"Task assets use {source}. "
+        runtime_descriptor = env.get_IO_descriptors["runtime"]
+        print(
+            f"Loaded {preview_name} from {args.config} with "
+            f"{left_profile.name} (left) and {right_profile.name} (right). "
+            f"Environment runs at {runtime_descriptor['step_frequency_hz']:g} Hz over "
+            f"{runtime_descriptor['physics_frequency_hz']:g} Hz physics from "
+            f"{args.sim_config}. {layout_message}Close the window to exit."
+        )
+
+        action = env.action_manager.action.new_zeros(
+            (env.num_envs, env.action_manager.total_action_dim)
+        )
+        step_count = 0
         while simulation_app.is_running():
-            scene.write_data_to_sim()
-            sim.step()
-            scene.update(sim.get_physics_dt())
+            env.step(action)
             if overlay is not None:
                 overlay.draw()
             step_count += 1
@@ -318,8 +319,11 @@ def main() -> None:
     finally:
         if overlay is not None:
             overlay.close()
+        env.close()
 
 
 if __name__ == "__main__":
-    main()
-    simulation_app.close()
+    try:
+        main()
+    finally:
+        simulation_app.close()

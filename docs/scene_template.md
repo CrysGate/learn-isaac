@@ -47,7 +47,7 @@ uv run python scripts/preview_scene.py
 
 ```bash
 uv run python scripts/preview_scene.py --task sort_dolls_by_size \
-  --seed 42 --export-layout layouts/sort_dolls_by_size/42.json
+  --seed 45 --export-layout layouts/sort_dolls_by_size/45.json
 uv run python scripts/preview_scene.py --task sort_dolls_by_size \
   --layout layouts/sort_dolls_by_size/42.json
 ```

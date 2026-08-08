@@ -12,8 +12,8 @@
 
 - `TaskDefinition` 提供 instruction、确定性 seed 布局、layout JSON 导入导出、放置校验和刚体配置构建；
 - `SortDollsBySize` 声明五个套娃资产和从小到大的目标顺序；
-- Task 接收公共 `InteractiveSceneCfg` 实例，直接增加具名 `RigidObjectCfg` 字段；
-- `add_assets_to_scene()` 返回实际使用的 `TaskLayout`，不会创建或返回 `TaskSceneCfg` 子类；
+- `resolve_layout()` 生成或读取并校验 `TaskLayout`，文件导出由调用方显式执行；
+- `add_assets_to_scene()` 接收已解析 layout，并向公共 `InteractiveSceneCfg` 增加具名 `RigidObjectCfg` 字段；
 - `scripts/preview_scene.py` 可以预览公共场景，也可以按 seed 或 layout 文件预览任务场景；
 - 自动化测试覆盖公共 Task 契约、布局复现、边界与间距校验、资产注册和 layout 回放。
 
@@ -40,35 +40,35 @@ Robot / Camera / Scene YAML
            InteractiveScene preview
 ```
 
-## 当前进行阶段
+## 最近完成阶段
 
-### 第三步：Env 配置与唯一仿真上下文（进行中）
+### 第三步：Env 配置与唯一仿真上下文（已完成）
 
-当前已经完成配置驱动的仿真参数边界：
+本阶段已经完成：
 
 - `configs/sim/default.yml` 只管理 device、physics timestep、gravity、render interval、渲染质量，以及一个与操作稳定性直接相关的 PhysX 覆盖项；
 - `SimConfig` 在启动 Isaac Sim 前完成严格校验，并构建全新的原生 `SimulationCfg`；
 - 默认 preset 使用 120 Hz physics 和 30 Hz render；
-- `scripts/preview_scene.py` 通过 `--sim-config` 使用该配置，显式 `--device` 和 `--rendering_mode` 仍可作为机器相关的命令行覆盖；
+- `configs/envs/default.yml` 与 `EnvRuntimeConfig` 管理 control decimation、reset 重渲染、纹理等待和环境 seed；
+- `create_env_cfg()` 组合 RobotProfile、SceneConfig、Task layout、SimConfig 和 manager 配置，直接返回原生 cfg；
+- `ScaleBenchEnvCfg` 提供原生 `ManagerBasedEnvCfg`，Action/Observation manager 暂为后续阶段保留的零 term 配置；
+- `ScaleBenchEnv` 是 `SimulationContext`、Scene、reset、step 和 close 的唯一所有者，并从实际运行对象生成 runtime IO metadata；
+- reset Event term 为指定 `env_id` 生成 layout，并维护逐环境 episode seed；
+- builder 在启动前校验 physics、render、control 和 camera update period 同步；
+- `scripts/preview_scene.py` 已改用正式环境入口，不再直接创建或推进 `SimulationContext`；
 - 其余材质、Fabric、日志、solver iteration 和 GPU buffer 参数保持 Isaac Lab 当前版本的原生默认值，不在项目中复制整套后端配置；
 - sim YAML 不管理 `num_envs`、环境间距或 task layout，这些仍由 Scene/Task 各自拥有。
 
 配置流：
 
 ```text
-Sim YAML ──► SimConfig ──► Isaac Lab SimulationCfg
-                                  │
-                                  ├─► 当前：scene preview
-                                  └─► 后续：EnvCfg.sim
+Scene / Task / Robot ─────────────┐
+Sim YAML ──► SimConfig ───────────┤
+Env YAML ──► EnvRuntimeConfig ────┼─► ScaleBenchEnvCfg ─► ScaleBenchEnv
+manager 配置 ─────────────────────┘
 ```
 
-本阶段接下来需要：
-
-- 定义组合公共场景、Task、SimulationCfg 和运行时 manager 的 EnvCfg builder；
-- 由 `ManagerBasedEnv` 或等价环境入口创建唯一的 `SimulationContext`；
-- 明确 reset、step 和场景访问的所有权，避免 Task、Runner 和脚本重复管理仿真生命周期。
-
-目标结构：
+实现结构：
 
 ```text
 env
@@ -88,7 +88,11 @@ env
 
 ## 后续阶段
 
-### 第四步：统一的seed管理，当前修改了num_envs之后每个场景的layout都是完全一样的，需要实现多个num_envs有不同的layout布局，即先正常克隆场景，在sim.reset之后为每个env单独生成layout,再通过write_root_pose_to_sim_index()写入各物体的位置
+### 第四步：统一的 seed 管理（已完成）
+
+场景先使用 initial layout 创建任务资产；reset 时由 Event Manager term 为每个 `env_id` 生成确定性的独立 layout，并通过 `write_root_pose_to_sim_index()` 写入对象位姿。局部 reset 只推进目标环境的 episode seed，固定 layout 文件可以关闭 resample 以精确回放。
+
+### 第四步下半：现在如果是开启resample_on_reset，就是默认了每个env_id对应的都是不同的种子进行的布局，而且同一个env_id进行多次reset之后还会继续resample,还没有实现在一开始让每个env_id使用不同的sedd采样出的布局，然后后续进行reset操作的时候每个env_id还是保持最开始的那个布局
 
 ### 第五步：Action Profile
 

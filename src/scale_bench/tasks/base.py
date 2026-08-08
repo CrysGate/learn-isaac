@@ -199,15 +199,19 @@ class TaskDefinition:
     def instruction(self) -> str:
         return self._config.instruction
 
-    def add_assets_to_scene(
+    @property
+    def scene_config(self) -> SceneConfig:
+        """Scene metadata used to generate and validate this task's layouts."""
+
+        return self._scene_config
+
+    def resolve_layout(
         self,
-        scene_cfg: InteractiveSceneCfg,
         *,
         seed: int | None = None,
         layout_path: str | Path | None = None,
-        export_layout_path: str | Path | None = None,
     ) -> TaskLayout:
-        """Install task assets directly from a seed or a JSON layout file."""
+        """Generate or load and validate one task layout."""
 
         if seed is not None and layout_path is not None:
             raise ValueError("seed and layout_path are mutually exclusive")
@@ -218,10 +222,23 @@ class TaskDefinition:
             else self.generate_layout(0 if seed is None else seed)
         )
         self.validate_layout(layout)
+        return layout
+
+    def add_assets_to_scene(
+        self,
+        scene_cfg: InteractiveSceneCfg,
+        layout: TaskLayout,
+    ) -> None:
+        """Register the task assets using an already resolved initial layout."""
+
+        self.validate_layout(layout)
 
         conflicts = [name for name in self._assets if hasattr(scene_cfg, name)]
         if conflicts:
-            raise ValueError("scene_cfg already contains task asset fields: " + ", ".join(conflicts))
+            raise ValueError(
+                "scene_cfg already contains task asset fields: "
+                + ", ".join(conflicts)
+            )
 
         asset_cfgs = {
             name: self._build_asset_cfg(name, layout.assets[name])
@@ -229,10 +246,6 @@ class TaskDefinition:
         }
         for name, asset_cfg in asset_cfgs.items():
             setattr(scene_cfg, name, asset_cfg)
-
-        if export_layout_path is not None:
-            layout.save(export_layout_path)
-        return layout
 
     def generate_layout(self, seed: int) -> TaskLayout:
         """Deterministically sample a non-overlapping upright layout."""
