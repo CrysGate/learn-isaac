@@ -159,13 +159,12 @@ The default preset runs physics at 120 Hz and renders every four steps at 30 Hz.
 
 ### Environment runtime
 
-[`create_env_cfg()`](src/scale_bench/envs/env_config.py) compiles loaded robot profiles, `SceneConfig`, an optional task layout, `SimConfig`, and [`EnvRuntimeConfig`](src/scale_bench/envs/runtime_config.py) directly into a native `ScaleBenchEnvCfg`:
+[`create_env_cfg()`](src/scale_bench/envs/env_config.py) compiles loaded robot profiles, `SceneConfig`, an optional task layout source, `SimConfig`, and [`EnvRuntimeConfig`](src/scale_bench/envs/runtime_config.py) directly into a native `ScaleBenchEnvCfg`:
 
 ```python
 from scale_bench.envs import EnvRuntimeConfig, ScaleBenchEnv, create_env_cfg
 
 runtime = EnvRuntimeConfig.load("configs/envs/default.yml")
-layout = task.resolve_layout(seed=42)
 env_cfg = create_env_cfg(
     left_robot_profile=left,
     right_robot_profile=right,
@@ -173,8 +172,7 @@ env_cfg = create_env_cfg(
     sim_config=sim,
     runtime_config=runtime,
     task=task,
-    layout=layout,
-    resample_task_layouts=True,
+    task_layout_seed=42,
 )
 env = ScaleBenchEnv(env_cfg)
 try:
@@ -183,7 +181,7 @@ finally:
     env.close()
 ```
 
-`ScaleBenchEnv` subclasses Isaac Lab's `ManagerBasedEnv` and is the only owner of `SimulationContext`, `InteractiveScene`, reset, step, and cleanup. Runtime IO metadata is derived from the initialized environment instead of injected from build-time inputs. The reset event assigns deterministic layouts per `env_id`; `info["episode"]` reports the affected environment IDs and layout seeds. The builder rejects presets where render or camera updates are not synchronized with `step_dt`. Action and Observation manager configs are currently explicit empty extension points for the next stages.
+`ScaleBenchEnv` subclasses Isaac Lab's `ManagerBasedEnv` and is the only owner of `SimulationContext`, `InteractiveScene`, reset, step, and cleanup. Runtime IO metadata is derived from the initialized environment instead of injected from build-time inputs. With `task_layout_seed`, environment `i` receives the layout generated from `task_layout_seed + i` once during configuration; every full or partial reset restores that same layout. Alternatively, `task_layouts` accepts either one layout to broadcast to every environment or exactly `num_envs` layouts mapped by `env_id`. `info["episode"]` reports the affected environment IDs and their stable layout seeds. The builder rejects presets where render or camera updates are not synchronized with `step_dt`. Action and Observation manager configs are currently explicit empty extension points for the next stages.
 
 ### Robot profiles
 

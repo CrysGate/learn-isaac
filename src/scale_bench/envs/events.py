@@ -13,38 +13,33 @@ from scale_bench.tasks import TaskDefinition, TaskLayout
 
 
 class ResetTaskLayout(ManagerTermBase):
-    """Reset task objects and retain episode state for each environment."""
+    """Restore each environment's immutable initial task layout."""
 
     def __init__(self, cfg: EventTermCfg, env: ManagerBasedEnv) -> None:
         super().__init__(cfg, env)
         self._task: TaskDefinition = cfg.params["task"]
-        self._initial_layout: TaskLayout = cfg.params["initial_layout"]
-        self._resample_on_reset: bool = cfg.params["resample_on_reset"]
-        self._task.validate_layout(self._initial_layout)
-        if self._resample_on_reset and self._initial_layout.seed is None:
-            raise ValueError("resampled task layouts require an initial layout seed")
-
-        self._episode_counts = [0] * env.num_envs
-        self._layout_seeds: list[int | None] = [None] * env.num_envs
+        self._layouts: tuple[TaskLayout, ...] = cfg.params["layouts"]
+        if len(self._layouts) != env.num_envs:
+            raise ValueError(
+                f"expected {env.num_envs} task layouts, got {len(self._layouts)}"
+            )
+        for layout in self._layouts:
+            self._task.validate_layout(layout)
+        self._asset_names = tuple(self._layouts[0].assets)
 
     def __call__(
         self,
         env: ManagerBasedEnv,
         env_ids: Sequence[int] | torch.Tensor | slice | None,
         task: TaskDefinition,
-        initial_layout: TaskLayout,
-        resample_on_reset: bool,
+        layouts: tuple[TaskLayout, ...],
     ) -> None:
-        del task, initial_layout, resample_on_reset
+        del task, layouts
         resolved_env_ids = _resolve_env_ids(env_ids, env.num_envs)
         if not resolved_env_ids:
             return
-        layouts = [self._next_layout(env_id) for env_id in resolved_env_ids]
-        self._write_layouts(env, resolved_env_ids, layouts)
-
-        for env_id, layout in zip(resolved_env_ids, layouts, strict=True):
-            self._layout_seeds[env_id] = layout.seed
-            self._episode_counts[env_id] += 1
+        selected_layouts = [self._layouts[env_id] for env_id in resolved_env_ids]
+        self._write_layouts(env, resolved_env_ids, selected_layouts)
 
     def episode_info(
         self,
@@ -58,19 +53,9 @@ class ResetTaskLayout(ManagerTermBase):
             "task_id": self._task.task_id,
             "instruction": self._task.instruction,
             "layout_seeds": tuple(
-                self._layout_seeds[env_id] for env_id in resolved_env_ids
+                self._layouts[env_id].seed for env_id in resolved_env_ids
             ),
         }
-
-    def _next_layout(self, env_id: int) -> TaskLayout:
-        if not self._resample_on_reset:
-            return self._initial_layout
-
-        base_seed = self._initial_layout.seed
-        if base_seed is None:
-            raise RuntimeError("resampled task layout has no base seed")
-        seed = base_seed + env_id + self._episode_counts[env_id] * self.num_envs
-        return self._task.generate_layout(seed)
 
     def _write_layouts(
         self,
@@ -81,7 +66,7 @@ class ResetTaskLayout(ManagerTermBase):
         env_id_tensor = torch.tensor(env_ids, device=env.device, dtype=torch.long)
         origins = env.scene.env_origins[env_id_tensor]
 
-        for asset_name in self._initial_layout.assets:
+        for asset_name in self._asset_names:
             root_poses = torch.tensor(
                 [
                     (

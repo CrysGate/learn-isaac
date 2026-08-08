@@ -50,10 +50,10 @@ Robot / Camera / Scene YAML
 - `SimConfig` 在启动 Isaac Sim 前完成严格校验，并构建全新的原生 `SimulationCfg`；
 - 默认 preset 使用 120 Hz physics 和 30 Hz render；
 - `configs/envs/default.yml` 与 `EnvRuntimeConfig` 管理 control decimation、reset 重渲染、纹理等待和环境 seed；
-- `create_env_cfg()` 组合 RobotProfile、SceneConfig、Task layout、SimConfig 和 manager 配置，直接返回原生 cfg；
+- `create_env_cfg()` 组合 RobotProfile、SceneConfig、Task layout 来源、SimConfig 和 manager 配置，直接返回原生 cfg；
 - `ScaleBenchEnvCfg` 提供原生 `ManagerBasedEnvCfg`，Action/Observation manager 暂为后续阶段保留的零 term 配置；
 - `ScaleBenchEnv` 是 `SimulationContext`、Scene、reset、step 和 close 的唯一所有者，并从实际运行对象生成 runtime IO metadata；
-- reset Event term 为指定 `env_id` 生成 layout，并维护逐环境 episode seed；
+- 配置期为每个 `env_id` 准备固定的初始 layout，reset Event term 只负责恢复；
 - builder 在启动前校验 physics、render、control 和 camera update period 同步；
 - `scripts/preview_scene.py` 已改用正式环境入口，不再直接创建或推进 `SimulationContext`；
 - 其余材质、Fabric、日志、solver iteration 和 GPU buffer 参数保持 Isaac Lab 当前版本的原生默认值，不在项目中复制整套后端配置；
@@ -90,9 +90,7 @@ env
 
 ### 第四步：统一的 seed 管理（已完成）
 
-场景先使用 initial layout 创建任务资产；reset 时由 Event Manager term 为每个 `env_id` 生成确定性的独立 layout，并通过 `write_root_pose_to_sim_index()` 写入对象位姿。局部 reset 只推进目标环境的 episode seed，固定 layout 文件可以关闭 resample 以精确回放。
-
-### 第四步下半：现在如果是开启resample_on_reset，就是默认了每个env_id对应的都是不同的种子进行的布局，而且同一个env_id进行多次reset之后还会继续resample,还没有实现在一开始让每个env_id使用不同的sedd采样出的布局，然后后续进行reset操作的时候每个env_id还是保持最开始的那个布局
+使用 seed 创建任务环境时，配置期按 `base_seed + env_id` 为每个环境一次性生成确定性的独立 layout；也可以显式传入一个 layout 广播给所有环境，或传入 `num_envs` 个 layout 按 `env_id` 分配。Event Manager term 在全量或局部 reset 时只通过 `write_root_pose_to_sim_index()` 恢复对应环境的初始对象位姿，不再采样或推进 seed。
 
 ### 第五步：Action Profile
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import MISSING
 
 import isaaclab.envs.mdp as mdp
@@ -69,18 +70,23 @@ def create_env_cfg(
     sim_config: SimConfig,
     runtime_config: EnvRuntimeConfig,
     task: TaskDefinition | None = None,
-    layout: TaskLayout | None = None,
-    resample_task_layouts: bool = False,
+    task_layout_seed: int | None = None,
+    task_layouts: Sequence[TaskLayout] | None = None,
     device: str | None = None,
     num_envs: int | None = None,
     env_spacing_m: float | None = None,
 ) -> ScaleBenchEnvCfg:
-    """Compile project profiles into one native manager-based environment config."""
+    """Compile profiles and one unambiguous task-layout source into an EnvCfg.
 
-    if task is None and (layout is not None or resample_task_layouts):
-        raise ValueError("layout and resample_task_layouts require a task")
-    if task is not None and layout is None:
-        raise ValueError("task requires an already resolved layout")
+    One explicit task layout is broadcast; ``num_envs`` layouts map by index.
+    """
+
+    if task is None and (task_layout_seed is not None or task_layouts is not None):
+        raise ValueError("task_layout_seed and task_layouts require a task")
+    if task is not None and (task_layout_seed is None) == (task_layouts is None):
+        raise ValueError(
+            "task requires exactly one of task_layout_seed or task_layouts"
+        )
     if task is not None and task.scene_config != scene_config:
         raise ValueError("task and environment must use the same SceneConfig")
 
@@ -92,15 +98,20 @@ def create_env_cfg(
         env_spacing_m=env_spacing_m,
     )
     events = EventsCfg()
-    if task is not None and layout is not None:
-        task.add_assets_to_scene(scene_cfg, layout)
+    if task is not None:
+        layouts = _prepare_task_layouts(
+            task=task,
+            num_envs=scene_cfg.num_envs,
+            base_seed=task_layout_seed,
+            task_layouts=task_layouts,
+        )
+        task.add_assets_to_scene(scene_cfg, layouts[0])
         events.task_layout = EventTerm(
             func=ResetTaskLayout,
             mode="reset",
             params={
                 "task": task,
-                "initial_layout": layout,
-                "resample_on_reset": resample_task_layouts,
+                "layouts": layouts,
             },
         )
 
@@ -116,6 +127,38 @@ def create_env_cfg(
     cfg.validate()
     _validate_runtime_timing(cfg)
     return cfg
+
+
+def _prepare_task_layouts(
+    *,
+    task: TaskDefinition,
+    num_envs: int,
+    base_seed: int | None,
+    task_layouts: Sequence[TaskLayout] | None,
+) -> tuple[TaskLayout, ...]:
+    """Resolve the immutable initial layout assigned to each environment."""
+
+    if task_layouts is not None:
+        layouts = tuple(task_layouts)
+        if len(layouts) == 1:
+            task.validate_layout(layouts[0])
+            return layouts * num_envs
+        if len(layouts) != num_envs:
+            raise ValueError(
+                "task_layouts must contain either one layout or exactly "
+                f"num_envs ({num_envs}) layouts; got {len(layouts)}"
+            )
+        for layout in layouts:
+            task.validate_layout(layout)
+        return layouts
+
+    if base_seed is None:
+        raise ValueError("base_seed is required when task_layouts is not provided")
+
+    first_layout = task.generate_layout(base_seed)
+    return (first_layout,) + tuple(
+        task.generate_layout(base_seed + env_id) for env_id in range(1, num_envs)
+    )
 
 
 def _camera_update_periods(

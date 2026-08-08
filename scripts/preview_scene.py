@@ -253,13 +253,19 @@ def main() -> None:
     right_profile = RobotProfile.load(args.right_robot_config)
     runtime_config = EnvRuntimeConfig.load(args.env_config)
     task = SortDollsBySize(scene_config=scene_config) if args.task is not None else None
-    layout = (
-        task.resolve_layout(seed=args.seed, layout_path=args.layout)
-        if task is not None
-        else None
-    )
-    if layout is not None and args.export_layout is not None:
-        layout.save(args.export_layout)
+    task_layout_seed = None
+    task_layouts = None
+    imported_layout = None
+    if task is not None:
+        if args.layout is None:
+            task_layout_seed = 0 if args.seed is None else args.seed
+        else:
+            imported_layout = task.resolve_layout(layout_path=args.layout)
+            task_layouts = (imported_layout,)
+
+        if args.export_layout is not None:
+            export_layout = imported_layout or task.generate_layout(task_layout_seed)
+            export_layout.save(args.export_layout)
 
     env_cfg = create_env_cfg(
         left_robot_profile=left_profile,
@@ -268,8 +274,8 @@ def main() -> None:
         sim_config=sim_config,
         runtime_config=runtime_config,
         task=task,
-        layout=layout,
-        resample_task_layouts=task is not None and args.layout is None,
+        task_layout_seed=task_layout_seed,
+        task_layouts=task_layouts,
         device=args.device,
     )
     env = ScaleBenchEnv(env_cfg)
@@ -289,11 +295,11 @@ def main() -> None:
 
         preview_name = f"task '{task.task_id}'" if task is not None else "common scene"
         layout_message = ""
-        if layout is not None:
+        if task is not None:
             source = (
                 f"layout {args.layout}"
                 if args.layout is not None
-                else f"seed {layout.seed}"
+                else f"seed {task_layout_seed}"
             )
             layout_message = f"Task assets use {source}. "
         runtime_descriptor = env.get_IO_descriptors["runtime"]

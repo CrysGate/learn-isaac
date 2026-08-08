@@ -159,13 +159,12 @@ simulation_cfg = sim_profile.build_simulation_cfg(device="cuda:0")
 
 ### 环境运行时
 
-[`create_env_cfg()`](src/scale_bench/envs/env_config.py) 将已加载的 robot profile、`SceneConfig`、可选 task layout、`SimConfig` 和 [`EnvRuntimeConfig`](src/scale_bench/envs/runtime_config.py) 直接编译为原生 `ScaleBenchEnvCfg`：
+[`create_env_cfg()`](src/scale_bench/envs/env_config.py) 将已加载的 robot profile、`SceneConfig`、可选 task layout 来源、`SimConfig` 和 [`EnvRuntimeConfig`](src/scale_bench/envs/runtime_config.py) 直接编译为原生 `ScaleBenchEnvCfg`：
 
 ```python
 from scale_bench.envs import EnvRuntimeConfig, ScaleBenchEnv, create_env_cfg
 
 runtime = EnvRuntimeConfig.load("configs/envs/default.yml")
-layout = task.resolve_layout(seed=42)
 env_cfg = create_env_cfg(
     left_robot_profile=left,
     right_robot_profile=right,
@@ -173,8 +172,7 @@ env_cfg = create_env_cfg(
     sim_config=sim,
     runtime_config=runtime,
     task=task,
-    layout=layout,
-    resample_task_layouts=True,
+    task_layout_seed=42,
 )
 env = ScaleBenchEnv(env_cfg)
 try:
@@ -183,7 +181,7 @@ finally:
     env.close()
 ```
 
-`ScaleBenchEnv` 继承 Isaac Lab 的 `ManagerBasedEnv`，是 `SimulationContext`、`InteractiveScene`、reset、step 和清理操作的唯一所有者。runtime IO 元数据从初始化后的真实环境计算，不再由构建期输入注入。reset event 会为每个 `env_id` 分配确定性 layout，`info["episode"]` 返回本次 reset 涉及的环境 ID 和 layout seed。builder 会拒绝 render 或相机更新与 `step_dt` 不同步的 preset。Action 和 Observation manager 配置目前是显式的空扩展点，供下一阶段填充。
+`ScaleBenchEnv` 继承 Isaac Lab 的 `ManagerBasedEnv`，是 `SimulationContext`、`InteractiveScene`、reset、step 和清理操作的唯一所有者。runtime IO 元数据从初始化后的真实环境计算，不再由构建期输入注入。使用 `task_layout_seed` 时，环境 `i` 在配置期一次性获得由 `task_layout_seed + i` 生成的布局，之后的全量或局部 reset 都恢复该布局。也可以通过 `task_layouts` 传入一个布局并广播给所有环境，或传入恰好 `num_envs` 个布局并按 `env_id` 对应分配。`info["episode"]` 返回本次 reset 涉及的环境 ID 及其稳定的 layout seed。builder 会拒绝 render 或相机更新与 `step_dt` 不同步的 preset。Action 和 Observation manager 配置目前是显式的空扩展点，供下一阶段填充。
 
 ### Robot profile
 

@@ -13,9 +13,9 @@
 | `TaskDefinition` | 统一任务资产加载、seed 布局生成、布局校验和 JSON 导入导出。 |
 | `SortDollsBySize` | 当前唯一具体任务，声明套娃资产、instruction 和尺寸目标顺序。 |
 | `EnvRuntimeConfig` | 校验 control decimation、reset 重渲染、纹理等待和环境 seed。 |
-| `create_env_cfg()` | 将 Scene、Task layout、Sim 和 manager 配置编译为原生 EnvCfg。 |
+| `create_env_cfg()` | 将 Scene、Task layout 来源、Sim 和 manager 配置编译为原生 EnvCfg。 |
 | `ScaleBenchEnvCfg` | 可直接交给 Isaac Lab 的完整 `ManagerBasedEnvCfg`。 |
-| `ResetTaskLayout` | 在 reset 时为指定 `env_id` 写入 layout 并维护 episode seed。 |
+| `ResetTaskLayout` | 在 reset 时为指定 `env_id` 恢复其固定的初始 layout。 |
 | `ScaleBenchEnv` | 唯一持有仿真生命周期，并从实际运行对象导出元数据。 |
 | `scripts/preview_scene.py` | 通过 `ScaleBenchEnv` 预览公共场景或指定 seed/layout 的任务场景。 |
 
@@ -51,7 +51,7 @@ configs/
 
 ```text
 Robot/Camera/Scene YAML ──► profiles ──► DualArmTabletopSceneCfg ──┐
-Task YAML + seed/layout ──► TaskDefinition ─► initial layout/assets ┤
+Task YAML + seed/layout ──► TaskDefinition ─► per-env layouts/assets ┤
 Sim YAML ────────────────► SimConfig ─► SimulationCfg ─────────────┤
 Env YAML ────────────────► EnvRuntimeConfig ───────────────────────┤
                                                                    ▼
@@ -64,10 +64,10 @@ Env YAML ────────────────► EnvRuntimeConfig �
                                                         ScaleBenchEnv
                                              reset() / step() / close()
                                                   │             │
-                                per-env layout/episode     actual IO metadata
+                                stable per-env layout      actual IO metadata
 ```
 
-`DualArmTabletopSceneCfg` 是公共 `InteractiveSceneCfg`。Task 不创建任务专用 SceneCfg 子类；调用方先显式解析 layout，再由 Task 将资产字段注册到 SceneCfg。`create_env_cfg()` 只负责把扩展后的 SceneCfg、原生 SimulationCfg 和 manager 配置编译为 `ScaleBenchEnvCfg`。
+`DualArmTabletopSceneCfg` 是公共 `InteractiveSceneCfg`。Task 不创建任务专用 SceneCfg 子类。调用方传入 `task_layout_seed` 时，`create_env_cfg()` 为每个环境生成初始 layout；传入一个 `task_layouts` 元素时广播给所有环境，传入 `num_envs` 个元素时按 `env_id` 分配。Task 仍只负责 layout 生成、校验和资产字段注册。
 
 ## Env 入口
 
@@ -84,7 +84,7 @@ seed: 0
 
 `create_env_cfg()` 直接返回 `ScaleBenchEnvCfg`，调用方通过 `ScaleBenchEnv(env_cfg)` 创建环境。环境的 `get_IO_descriptors` 复用 Isaac Lab 原生 action、observation、articulation 和 scene descriptor，并从已经初始化的 env、sim 与 camera sensor 计算 runtime timing，不保留第二份构建期事实来源。
 
-Task 环境的 reset event 按 `base_seed + env_id + episode_index * num_envs` 生成确定性 layout，只更新本次 reset 的环境。固定 layout 回放则关闭 resample。`info["episode"]` 返回对应的 `env_ids`、`task_id`、`instruction` 和 `layout_seeds`。
+Task 环境在配置期按 `base_seed + env_id` 一次性生成每个环境的确定性 layout，或直接接收一个/每环境一个显式 layout。reset event 不采样、不推进 seed，只恢复本次 reset 环境原有的 layout。`info["episode"]` 返回对应的 `env_ids`、`task_id`、`instruction` 和稳定的 `layout_seeds`。
 
 Action/Observation manager 目前是显式空配置，因此当前入口可验证环境所有权和生命周期，但不能控制机器人，也不返回 policy observation。这两个 manager 的 term 将在后续阶段根据 RobotProfile 与 CameraProfile 动态生成。
 
