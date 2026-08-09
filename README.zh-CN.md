@@ -15,11 +15,13 @@ ScaleBench 是一组配置优先的 Isaac Lab 基础组件，用于构建尺度�
 - **可复用双臂场景**：组合房间、带纹理的地面和桌面、两台带腕部相机的机器人、顶视 RGB-D 相机及环境光。
 - **精简的 Task 接口与首个任务**：通过确定性 seed 或可复用 layout 文件，直接向公共场景添加任务资产；`SortDollsBySize` 是第一个与机器人型号无关的案例。
 - **Manager-based 环境入口**：将 Scene、Task、Sim、runtime 与 manager 配置组合为 `ScaleBenchEnvCfg`，由 `ScaleBenchEnv` 独占 reset、step 和仿真生命周期。
+- **Profile 驱动的 action**：左右机械臂与夹爪均使用动态维度、物理单位的绝对命令关节目标。
+- **具名 policy observation**：按 profile 顺序提供机器人状态和已配置相机的原始 RGB-D，不混入任务或评测真值。
 - **纹理正确的程序化表面**：`UvCuboidCfg` 会写入 face-varying UV，使 MDL 材质能在长方体表面正确平铺。
 - **可直接运行的场景预览**：既可以在 Isaac Sim 中查看放置区域与相机视锥，也可以执行短时间无界面冒烟验证。
 
 > [!NOTE]
-> Action 和 Observation Manager 的 term 尚未接入，因此当前环境的 action 维度为零，也还没有 policy observation；Evaluator、episode 调度、数据记录和 benchmark 报告同样留待后续实现。
+> 关节空间 Action 与 policy Observation Manager term 已接入。末端控制、Evaluator、episode 调度、数据记录和 benchmark 报告仍留待后续实现。
 
 ## 架构
 
@@ -159,7 +161,7 @@ simulation_cfg = sim_profile.build_simulation_cfg(device="cuda:0")
 
 ### 环境运行时
 
-[`create_env_cfg()`](src/scale_bench/envs/env_config.py) 将已加载的 robot profile、`SceneConfig`、可选 task layout 来源、`SimConfig` 和 [`EnvRuntimeConfig`](src/scale_bench/envs/runtime_config.py) 直接编译为原生 `ScaleBenchEnvCfg`：
+[`create_env_cfg()`](src/scale_bench/envs/env_cfg.py) 将已加载的 robot profile、`SceneConfig`、可选 task layout 来源、`SimConfig` 和 [`EnvRuntimeConfig`](src/scale_bench/envs/runtime_config.py) 直接编译为原生 `ScaleBenchEnvCfg`：
 
 ```python
 from scale_bench.envs import EnvRuntimeConfig, ScaleBenchEnv, create_env_cfg
@@ -181,7 +183,7 @@ finally:
     env.close()
 ```
 
-`ScaleBenchEnv` 继承 Isaac Lab 的 `ManagerBasedEnv`，是 `SimulationContext`、`InteractiveScene`、reset、step 和清理操作的唯一所有者。runtime IO 元数据从初始化后的真实环境计算，不再由构建期输入注入。使用 `task_layout_seed` 时，环境 `i` 在配置期一次性获得由 `task_layout_seed + i` 生成的布局，之后的全量或局部 reset 都恢复该布局。也可以通过 `task_layouts` 传入一个布局并广播给所有环境，或传入恰好 `num_envs` 个布局并按 `env_id` 对应分配。`info["episode"]` 返回本次 reset 涉及的环境 ID 及其稳定的 layout seed。builder 会拒绝 render 或相机更新与 `step_dt` 不同步的 preset。Action 和 Observation manager 配置目前是显式的空扩展点，供下一阶段填充。
+`ScaleBenchEnv` 继承 Isaac Lab 的 `ManagerBasedEnv`，是 `SimulationContext`、`InteractiveScene`、reset、step 和清理操作的唯一所有者。runtime IO 元数据从初始化后的真实环境计算，不再由构建期输入注入。使用 `task_layout_seed` 时，环境 `i` 在配置期一次性获得由 `task_layout_seed + i` 生成的布局，之后的全量或局部 reset 都恢复该布局。也可以通过 `task_layouts` 传入一个布局并广播给所有环境，或传入恰好 `num_envs` 个布局并按 `env_id` 对应分配。`info["episode"]` 返回本次 reset 涉及的环境 ID 及其稳定的 layout seed。builder 会拒绝 render 或相机更新与 `step_dt` 不同步的 preset。Action term 顺序为 `left_arm | left_gripper | right_arm | right_gripper`；`observation["policy"]` 是不拼接的机器人状态与 RGB-D 具名字典。runtime IO descriptor 会公开实际解析的维度、slice、关节顺序、相机元数据和时序。
 
 ### Robot profile
 
@@ -331,7 +333,7 @@ target_order = task.target_order_small_to_large
 
 复制 [`configs/sim/default.yml`](configs/sim/default.yml) 即可创建仿真 preset。时间步与重力位于顶层，`render` 选择观测质量，`physx` 只保留当前由运行行为证明有必要的一个操作稳定性覆盖项。其他参数跟随 Isaac Lab 默认值；只有 benchmark 需求证明某项必须变化时，才应把它提升为公共配置。使用 `--sim-config` 选择 preset，使用 `--device` 做临时的机器相关覆盖。
 
-复制 [`configs/envs/default.yml`](configs/envs/default.yml) 可以修改 control decimation、reset 重渲染次数、纹理等待和环境 seed。builder 要求 render interval、control decimation 和相机更新周期共同描述同一个同步环境频率。
+复制 [`configs/envs/default.yml`](configs/envs/default.yml) 可以修改机械臂 action 模式、control decimation、reset 重渲染次数、纹理等待和环境 seed。当前机械臂模式为 `joint_position`，该显式分派点为后续末端控制模式保留。builder 要求 render interval、control decimation 和相机更新周期共同描述同一个同步环境频率。
 
 ### 验证改动
 
@@ -348,8 +350,11 @@ uv run pytest -q
 ```text
 src/scale_bench/
 ├── envs/
-│   ├── env_config.py       # 原生 EnvCfg 组合与时序校验
+│   ├── action_cfg.py       # Action Manager Cfg 与 profile 编译
+│   ├── env_cfg.py          # 原生 EnvCfg 组合与时序校验
 │   ├── events.py           # task layout reset 与逐环境 episode 状态
+│   ├── mdp/                # observation 运行时 term
+│   ├── observation_cfg.py  # Observation Manager group 与 Cfg 编译
 │   ├── runtime_config.py   # 环境生命周期 YAML schema
 │   └── scale_bench_env.py  # 正式 ManagerBasedEnv 运行时入口
 ├── sim/

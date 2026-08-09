@@ -1,6 +1,6 @@
 # ScaleBench 当前架构
 
-本文只描述已经实现的边界。正式环境入口已经建立，但 Action 与 Observation Manager 目前仍是零 term 配置；Evaluator、Runner 和 Recorder 尚未实现。
+本文只描述已经实现的边界。正式环境入口、Action Manager 与 policy Observation Manager 已经建立；EE 控制、Evaluator、Runner 和 Recorder 尚未实现。
 
 ## 当前组件
 
@@ -12,7 +12,7 @@
 | `DualArmTabletopSceneCfg` | 描述公共房间、桌面、双臂、相机和灯光。 |
 | `TaskDefinition` | 统一任务资产加载、seed 布局生成、布局校验和 JSON 导入导出。 |
 | `SortDollsBySize` | 当前唯一具体任务，声明套娃资产、instruction 和尺寸目标顺序。 |
-| `EnvRuntimeConfig` | 校验 control decimation、reset 重渲染、纹理等待和环境 seed。 |
+| `EnvRuntimeConfig` | 校验 arm action 模式、control decimation、reset 重渲染、纹理等待和环境 seed。 |
 | `create_env_cfg()` | 将 Scene、Task layout 来源、Sim 和 manager 配置编译为原生 EnvCfg。 |
 | `ScaleBenchEnvCfg` | 可直接交给 Isaac Lab 的完整 `ManagerBasedEnvCfg`。 |
 | `ResetTaskLayout` | 在 reset 时为指定 `env_id` 恢复其固定的初始 layout。 |
@@ -24,8 +24,12 @@
 ```text
 src/scale_bench/
 ├── envs/
-│   ├── env_config.py
+│   ├── action_cfg.py
+│   ├── env_cfg.py
 │   ├── events.py
+│   ├── mdp/
+│   │   └── observations.py
+│   ├── observation_cfg.py
 │   ├── runtime_config.py
 │   └── scale_bench_env.py
 ├── robots/robot_profile.py
@@ -49,6 +53,8 @@ configs/
 
 ## 配置流
 
+项目默认使用 `Config` 表示 Pydantic 数据配置、`Profile` 表示可复用的 Pydantic 规格，使用 `Cfg` 表示 Isaac Lab `configclass`。这是命名约定，不增加运行时命名校验。
+
 ```text
 Robot/Camera/Scene YAML ──► profiles ──► DualArmTabletopSceneCfg ──┐
 Task YAML + seed/layout ──► TaskDefinition ─► per-env layouts/assets ┤
@@ -71,10 +77,11 @@ Env YAML ────────────────► EnvRuntimeConfig �
 
 ## Env 入口
 
-`configs/envs/default.yml` 只管理环境生命周期参数，不复制 Sim 或 Scene 配置：
+`configs/envs/default.yml` 管理环境运行时与 action 模式，不复制 Sim 或 Scene 配置：
 
 ```yaml
 control_decimation: 4
+arm_action_mode: joint_position
 num_rerenders_on_reset: 1
 wait_for_textures: true
 seed: 0
@@ -86,7 +93,9 @@ seed: 0
 
 Task 环境在配置期按 `base_seed + env_id` 一次性生成每个环境的确定性 layout，或直接接收一个/每环境一个显式 layout。reset event 不采样、不推进 seed，只恢复本次 reset 环境原有的 layout。`info["episode"]` 返回对应的 `env_ids`、`task_id`、`instruction` 和稳定的 `layout_seeds`。
 
-Action/Observation manager 目前是显式空配置，因此当前入口可验证环境所有权和生命周期，但不能控制机器人，也不返回 policy observation。这两个 manager 的 term 将在后续阶段根据 RobotProfile 与 CameraProfile 动态生成。
+Action Manager 按 `left_arm | left_gripper | right_arm | right_gripper` 组织 term。机械臂与夹爪都直接使用 Isaac Lab `JointPositionAction`，关节顺序和维度来自各自 RobotProfile，并接收物理单位的绝对关节目标；夹爪目标由 profile 的开合位置范围约束。`arm_action_mode` 是 policy 输出模式与控制 term 的显式分派边界，后续 EE 控制在此扩展。
+
+Observation Manager 的 `policy` group 不拼接，包含左右机械臂与夹爪实际 joint position，以及场景中已配置相机的原始 RGB-D。任务物体和评测真值不进入该 group。环境启动时会对照 manager 实际解析结果检查 IO descriptor 的 term 维度、关节顺序和相机输出。
 
 ## Task 接口
 

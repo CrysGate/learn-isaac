@@ -1,4 +1,5 @@
 control_decimation: 4
+arm_action_mode: joint_position
 num_rerenders_on_reset: 1
 wait_for_textures: true
 seed: 0

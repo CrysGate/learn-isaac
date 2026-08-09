@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from functools import cache
 from pathlib import Path
-from typing import Annotated, Self
+from typing import Annotated, Literal, Self
 
 import yaml
 from pydantic import (
@@ -30,6 +30,7 @@ class EnvRuntimeConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     control_decimation: PositiveInt = 4
+    arm_action_mode: Literal["joint_position"] = "joint_position"
     num_rerenders_on_reset: NonNegativeInt = 1
     wait_for_textures: StrictBool = True
     seed: NonNegativeInt | None = 0

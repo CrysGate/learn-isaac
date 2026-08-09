@@ -15,11 +15,13 @@ ScaleBench keeps robot semantics, camera, scene, task, simulation, and environme
 - **A reusable dual-arm scene** — compose a room, textured ground and table, two independently configured robots with wrist cameras, an overhead RGB-D camera, and environment lighting.
 - **A small task contract and first task** — add task-owned assets directly to a common scene from a deterministic seed or a reusable layout file; `SortDollsBySize` is the first robot-independent example.
 - **A manager-based environment entry** — compose Scene, Task, Sim, runtime, and manager configs into `ScaleBenchEnvCfg`, with `ScaleBenchEnv` as the sole owner of reset, stepping, and simulation lifetime.
+- **Profile-driven actions** — control both arms and grippers with dynamically sized absolute command-joint targets in physical units.
+- **Named policy observations** — expose ordered robot state and raw RGB-D from configured cameras without leaking task or evaluation ground truth.
 - **Texture-correct procedural surfaces** — `UvCuboidCfg` authors face-varying UV coordinates so MDL materials tile correctly on cuboids.
 - **A runnable scene preview** — launch the default scene with placement-area and camera-frustum overlays, or run a short headless smoke test.
 
 > [!NOTE]
-> Action and Observation Manager terms are not connected yet. The current environment entry therefore has zero action dimensions and no policy observations; evaluators, episode orchestration, recording, and benchmark reporting also remain future work.
+> Joint-space Action and policy Observation Manager terms are connected. End-effector control, evaluators, episode orchestration, recording, and benchmark reporting remain future work.
 
 ## Architecture
 
@@ -159,7 +161,7 @@ The default preset runs physics at 120 Hz and renders every four steps at 30 Hz.
 
 ### Environment runtime
 
-[`create_env_cfg()`](src/scale_bench/envs/env_config.py) compiles loaded robot profiles, `SceneConfig`, an optional task layout source, `SimConfig`, and [`EnvRuntimeConfig`](src/scale_bench/envs/runtime_config.py) directly into a native `ScaleBenchEnvCfg`:
+[`create_env_cfg()`](src/scale_bench/envs/env_cfg.py) compiles loaded robot profiles, `SceneConfig`, an optional task layout source, `SimConfig`, and [`EnvRuntimeConfig`](src/scale_bench/envs/runtime_config.py) directly into a native `ScaleBenchEnvCfg`:
 
 ```python
 from scale_bench.envs import EnvRuntimeConfig, ScaleBenchEnv, create_env_cfg
@@ -181,7 +183,7 @@ finally:
     env.close()
 ```
 
-`ScaleBenchEnv` subclasses Isaac Lab's `ManagerBasedEnv` and is the only owner of `SimulationContext`, `InteractiveScene`, reset, step, and cleanup. Runtime IO metadata is derived from the initialized environment instead of injected from build-time inputs. With `task_layout_seed`, environment `i` receives the layout generated from `task_layout_seed + i` once during configuration; every full or partial reset restores that same layout. Alternatively, `task_layouts` accepts either one layout to broadcast to every environment or exactly `num_envs` layouts mapped by `env_id`. `info["episode"]` reports the affected environment IDs and their stable layout seeds. The builder rejects presets where render or camera updates are not synchronized with `step_dt`. Action and Observation manager configs are currently explicit empty extension points for the next stages.
+`ScaleBenchEnv` subclasses Isaac Lab's `ManagerBasedEnv` and is the only owner of `SimulationContext`, `InteractiveScene`, reset, step, and cleanup. Runtime IO metadata is derived from the initialized environment instead of injected from build-time inputs. With `task_layout_seed`, environment `i` receives the layout generated from `task_layout_seed + i` once during configuration; every full or partial reset restores that same layout. Alternatively, `task_layouts` accepts either one layout to broadcast to every environment or exactly `num_envs` layouts mapped by `env_id`. `info["episode"]` reports the affected environment IDs and their stable layout seeds. The builder rejects presets where render or camera updates are not synchronized with `step_dt`. Action terms follow `left_arm | left_gripper | right_arm | right_gripper`; `observation["policy"]` is a named, non-concatenated robot-state and RGB-D dictionary. Runtime IO descriptors expose the resolved dimensions, slices, joint order, camera metadata, and timing.
 
 ### Robot profiles
 
@@ -331,7 +333,7 @@ Scene YAML files are cached per process. Restart the preview process after editi
 
 Copy [`configs/sim/default.yml`](configs/sim/default.yml) to create a simulation preset. Timing and gravity are top-level settings; `render` selects observation quality, and `physx` contains the one manipulation-specific override currently justified by runtime behavior. Everything else follows Isaac Lab defaults and should only become public configuration after a benchmark requirement demonstrates that it must vary. Use `--sim-config` to select the preset and `--device` for a temporary machine-specific override.
 
-Copy [`configs/envs/default.yml`](configs/envs/default.yml) to change control decimation, reset rerenders, texture waiting, or the environment seed. The builder requires render interval, control decimation, and camera update periods to describe one synchronous environment rate.
+Copy [`configs/envs/default.yml`](configs/envs/default.yml) to change the arm action mode, control decimation, reset rerenders, texture waiting, or the environment seed. The current arm mode is `joint_position`; this explicit dispatch point is reserved for later end-effector modes. The builder requires render interval, control decimation, and camera update periods to describe one synchronous environment rate.
 
 ### Validating changes
 
@@ -348,8 +350,11 @@ The tests cover environment-preset validation, manager composition, synchronized
 ```text
 src/scale_bench/
 ├── envs/
-│   ├── env_config.py       # native EnvCfg composition and timing validation
+│   ├── action_cfg.py       # Action Manager cfg and profile compiler
+│   ├── env_cfg.py          # native EnvCfg composition and timing validation
 │   ├── events.py           # task layout reset and per-env episode state
+│   ├── mdp/                # runtime observation terms
+│   ├── observation_cfg.py  # Observation Manager groups and cfg compiler
 │   ├── runtime_config.py   # environment lifecycle YAML schema
 │   └── scale_bench_env.py  # formal ManagerBasedEnv runtime entry
 ├── sim/

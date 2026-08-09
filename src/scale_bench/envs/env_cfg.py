@@ -1,4 +1,4 @@
-"""Compose project profiles into an Isaac Lab manager-based environment config."""
+"""Compose project profiles into an Isaac Lab manager-based environment cfg."""
 
 from __future__ import annotations
 
@@ -20,22 +20,10 @@ from scale_bench.scenes import SceneConfig, create_dual_arm_tabletop_scene_cfg
 from scale_bench.sim import SimConfig
 from scale_bench.tasks import TaskDefinition, TaskLayout
 
+from .action_cfg import ActionsCfg, ArmActionMode, create_actions_cfg
 from .events import ResetTaskLayout
+from .observation_cfg import ObservationsCfg, create_observations_cfg
 from .runtime_config import EnvRuntimeConfig
-
-
-@configclass
-class ActionsCfg:
-    """Action Manager extension point; populated in the Action Manager stage."""
-
-    pass
-
-
-@configclass
-class ObservationsCfg:
-    """Observation Manager extension point; populated in the Observation Manager stage."""
-
-    pass
 
 
 @configclass
@@ -57,8 +45,9 @@ class ScaleBenchEnvCfg(ManagerBasedEnvCfg):
     scene: InteractiveSceneCfg = MISSING
     sim: SimulationCfg = MISSING
     decimation: int = MISSING
-    actions: ActionsCfg = ActionsCfg()
-    observations: ObservationsCfg = ObservationsCfg()
+    arm_action_mode: ArmActionMode = MISSING
+    actions: ActionsCfg = MISSING
+    observations: ObservationsCfg = MISSING
     events: EventsCfg = EventsCfg()
 
 
@@ -119,6 +108,17 @@ def create_env_cfg(
         scene=scene_cfg,
         sim=sim_config.build_simulation_cfg(device=device),
         decimation=runtime_config.control_decimation,
+        arm_action_mode=runtime_config.arm_action_mode,
+        actions=create_actions_cfg(
+            left_robot_profile=left_robot_profile,
+            right_robot_profile=right_robot_profile,
+            arm_action_mode=runtime_config.arm_action_mode,
+        ),
+        observations=create_observations_cfg(
+            left_robot_profile=left_robot_profile,
+            right_robot_profile=right_robot_profile,
+            scene_cfg=scene_cfg,
+        ),
         seed=runtime_config.seed,
         num_rerenders_on_reset=runtime_config.num_rerenders_on_reset,
         wait_for_textures=runtime_config.wait_for_textures,
@@ -193,9 +193,7 @@ def _validate_runtime_timing(cfg: ScaleBenchEnvCfg) -> None:
 
 
 __all__ = [
-    "ActionsCfg",
     "EventsCfg",
-    "ObservationsCfg",
     "ScaleBenchEnvCfg",
     "create_env_cfg",
 ]

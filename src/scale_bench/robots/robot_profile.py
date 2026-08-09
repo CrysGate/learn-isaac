@@ -141,6 +141,16 @@ class ParallelJawGripperProfile(_ProfileModel):
                 raise ValueError(
                     f"{field_name} keys must exactly match command_joint_names"
                 )
+        unchanged = [
+            joint_name
+            for joint_name in self.command_joint_names
+            if self.closed_positions[joint_name] == self.open_positions[joint_name]
+        ]
+        if unchanged:
+            raise ValueError(
+                "open and closed positions must differ for command joints: "
+                f"{unchanged}"
+            )
         return self
 
 
