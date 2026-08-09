@@ -281,9 +281,9 @@ runtime:
 
 该模板只定义稳定的场景拓扑和默认视觉、物理参数，不负责：
 
-- 生成任务物体；
-- 采样 episode 布局或随机参数；
-- 定义观测、动作、奖励或成功条件；
+- 直接添加任务物体；
+- 采样或恢复任务布局；
+- 定义 Action/Observation Manager term、奖励或成功条件；
 - 创建 policy、evaluator 或 recorder。
 
-任务物体不属于这个公共模板。Task 层直接在构建完成的 `InteractiveSceneCfg` 实例上增加具名资产配置；`SortDollsBySize` 可按 seed 生成布局，也可从导出的 layout JSON 恢复五个套娃的初始位姿。Env 配置组装、Policy/Evaluator 数据边界、Recorder 和 episode runner 尚未实现。机器人配置约定见 [`robot_profiles.md`](robot_profiles.md)，整体设计状态见 [`benchmark_architecture.md`](benchmark_architecture.md)。
+任务物体不属于这个公共模板。Task 层直接在构建完成的 `InteractiveSceneCfg` 实例上增加具名资产配置；`SortDollsBySize` 可按 seed 生成布局，也可从导出的 layout JSON 恢复五个套娃的初始位姿。Env 层已经完成配置组装、关节空间 Action Manager 和 policy Observation Manager 数据边界；EE 控制、Evaluator、Recorder 和 episode runner 尚未实现。机器人配置约定见 [`robot_profiles.md`](robot_profiles.md)，整体设计状态见 [`benchmark_architecture.md`](benchmark_architecture.md)。

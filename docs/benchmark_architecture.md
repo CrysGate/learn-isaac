@@ -44,7 +44,7 @@ src/scale_bench/
 
 configs/
 ├── cameras/d435.yml
-├── env/default.yml
+├── envs/default.yml
 ├── robots/piper.yml
 ├── scene/default.yml
 ├── sim/default.yml

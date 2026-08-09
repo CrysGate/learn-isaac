@@ -337,13 +337,7 @@ target_order = task.target_order_small_to_large
 
 ### 验证改动
 
-无需启动交互式仿真器即可运行自动化契约与布局测试：
-
-```bash
-uv run pytest -q
-```
-
-当前测试覆盖环境 preset 校验、manager 组合、同步时序、runtime descriptor 和 episode 元数据。涉及实际仿真启动或渲染的改动，仍应执行限定步数的无界面预览冒烟测试。
+仓库当前没有自动化测试套件。无需打开交互式仿真器即可检查 profile 与 preset 加载、确定性任务布局生成和 Python 语法，但这些检查不会覆盖初始化后的 manager 或渲染观测。涉及环境组合、reset event、action、observation、runtime descriptor、仿真启动或渲染的改动，应执行上文给出的限定步数无界面预览冒烟测试。
 
 ## 仓库结构
 
@@ -373,7 +367,7 @@ src/scale_bench/
 
 configs/
 ├── cameras/d435.yml        # 可复用相机 profile
-├── env/default.yml         # 控制与 reset 生命周期参数
+├── envs/default.yml        # 控制与 reset 生命周期参数
 ├── robots/piper.yml        # 参考机器人 profile
 ├── scene/default.yml       # 场景内位姿和环境配置
 ├── sim/default.yml         # 仿真、渲染与 PhysX 参数
@@ -389,7 +383,7 @@ scripts/preview_scene.py    # 交互预览和无界面冒烟验证入口
 - **出现 `Robot asset does not exist`**：检查 robot YAML 中的路径，并确认 `Assets/` 资产包完整。
 - **找不到本地 Isaac Lab 依赖**：运行 `uv sync` 前确认 `third_parties/IsaacLab/source/...` 已存在。
 - **自定义脚本出现 `No module named scale_bench`**：从仓库根目录使用 `PYTHONPATH=src` 启动。
-- **多个环境的房间互相重叠**：增大 `runtime.env_spacing_m`，尤其是在修改房间缩放之后。
+- **多个环境的房间互相重叠**：增大 `scene.runtime.env_spacing_m`，尤其是在修改房间缩放之后。
 
 ## 延伸阅读
 

@@ -337,13 +337,7 @@ Copy [`configs/envs/default.yml`](configs/envs/default.yml) to change the arm ac
 
 ### Validating changes
 
-Run the automated contract and layout tests without launching an interactive simulator:
-
-```bash
-uv run pytest -q
-```
-
-The tests cover environment-preset validation, manager composition, synchronized timing, runtime descriptors, and episode metadata. Keep the bounded headless preview smoke test for changes that affect actual simulation startup or rendering.
+The repository currently has no automated test suite. Profile and preset loaders, deterministic task-layout generation, and Python syntax can be checked without opening an interactive simulator, but these checks do not exercise the initialized managers or rendered observations. For changes to environment composition, reset events, actions, observations, runtime descriptors, simulation startup, or rendering, run the bounded headless preview smoke test shown above.
 
 ## Repository layout
 
@@ -373,7 +367,7 @@ src/scale_bench/
 
 configs/
 ├── cameras/d435.yml        # reusable camera profile
-├── env/default.yml         # control and reset lifecycle settings
+├── envs/default.yml        # control and reset lifecycle settings
 ├── robots/piper.yml        # reference robot profile
 ├── scene/default.yml       # scene-local poses and environment settings
 ├── sim/default.yml         # simulation, rendering, and PhysX settings
@@ -389,7 +383,7 @@ The project uses a `src` layout but is not installed as a package (`tool.uv.pack
 - **`Robot asset does not exist`** — check the path in the robot YAML and ensure the `Assets/` bundle is present.
 - **A local Isaac Lab dependency cannot be found** — verify that `third_parties/IsaacLab/source/...` exists before running `uv sync`.
 - **`No module named scale_bench` in a custom script** — launch it with `PYTHONPATH=src` from the repository root.
-- **Different environments overlap** — increase `runtime.env_spacing_m`, especially after changing the room scale.
+- **Different environments overlap** — increase `scene.runtime.env_spacing_m`, especially after changing the room scale.
 
 ## Further reading
 
