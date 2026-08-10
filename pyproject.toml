@@ -10,6 +10,7 @@ dependencies = [
     "torchaudio==2.10.0",
     "torchvision==0.25.0",
     "modelscope",
+    "nvidia-curobo[cu12]",
     "isaaclab",
     "isaaclab-assets",
     "isaaclab-contrib",
@@ -33,6 +34,7 @@ torch = { index = "pytorch-cu128" }
 torchaudio = { index = "pytorch-cu128" }
 torchvision = { index = "pytorch-cu128" }
 isaacsim = { index = "nvidia" }
+nvidia-curobo = { path = "third_parties/curobo", editable = true }
 isaaclab = { path = "third_parties/IsaacLab/source/isaaclab", editable = true }
 isaaclab-assets = { path = "third_parties/IsaacLab/source/isaaclab_assets", editable = true }
 isaaclab-contrib = { path = "third_parties/IsaacLab/source/isaaclab_contrib", editable = true }
