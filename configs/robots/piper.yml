@@ -23,7 +23,7 @@ kinematics:
     # The authored gripper_center is at the distal finger plane. This offset
     # moves the benchmark TCP to the physical centre of the fingers.
     parent_frame: gripper_center
-    position_m: [-0.04, 0.0, 0.0]
+    position_m: [-0.02, 0.0, 0.0]
     orientation_xyzw: [0.0, 0.0, 0.0, 1.0]
 
 actuators:
