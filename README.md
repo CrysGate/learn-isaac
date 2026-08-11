@@ -26,10 +26,10 @@ ScaleBench keeps robot semantics, camera, scene, task, simulation, and environme
 ## Architecture
 
 ```text
-robot / scene / camera YAML ──► typed profiles ──► scene cfg ──┐
+robot / scene / camera YAML ──► config.loader / pure models ───┐
 task YAML + seed/layout ──────► TaskDefinition ─────────────────┤
-sim YAML ─────────────────────► SimConfig ──────────────────────┤
-env YAML ─────────────────────► EnvRuntimeConfig ───────────────┤
+sim YAML ─────────────────────► SimulationConfig ───────────────┤
+env YAML ─────────────────────► EnvironmentConfig ──────────────┤
                                                                 ▼
                                             create_env_cfg() / ScaleBenchEnvCfg
                                                                 │
@@ -81,7 +81,7 @@ Assets/
 └── Room/Simple_Room_nolight/simple_room_nolight.usd
 ```
 
-All relative configuration paths are resolved from the repository root, so keep the asset layout intact.
+Configuration references resolve from their containing file. The preview passes `--asset-root .` by default, so run it from the asset-root directory or provide another explicit root.
 
 ## Quick start
 
@@ -135,6 +135,7 @@ Useful preview options:
 | `--seed N` | Generate a deterministic task layout; defaults to zero. |
 | `--layout PATH` | Load task asset poses from an exported layout JSON file. |
 | `--export-layout PATH` | Save the generated or loaded task layout. |
+| `--asset-root PATH` | Resolve asset references against an explicit root. |
 | `--left-robot-config PATH` | Select the left robot profile. |
 | `--right-robot-config PATH` | Select the right robot profile. |
 | `--device VALUE` | Choose `cpu`, `cuda`, or a device such as `cuda:0`. |
@@ -146,33 +147,40 @@ Run `uv run python scripts/preview_scene.py --help` for all Isaac Lab launcher o
 
 ## Core API
 
-### Simulation presets
+### Configuration
 
-[`SimConfig`](src/scale_bench/sim/simulation_config.py) validates `configs/sim/*.yml` without launching Isaac Sim. After `AppLauncher` starts, it builds a fresh native config for the environment or a standalone preview:
+[`load_config()`](src/scale_bench/config/loader.py) is the only YAML/JSON loading boundary. The five immutable pure-Python models contain data and local validation only:
 
 ```python
-from scale_bench.sim import SimConfig
+from scale_bench.config.loader import load_config
+from scale_bench.config.models.environment import EnvironmentConfig
+from scale_bench.config.models.robot import RobotConfig
+from scale_bench.config.models.scene import SceneConfig
+from scale_bench.config.models.simulation import SimulationConfig
 
-sim_profile = SimConfig.load("configs/sim/default.yml")
-simulation_cfg = sim_profile.build_simulation_cfg(device="cuda:0")
+robot = load_config("configs/robots/piper.yml", RobotConfig, asset_root=".")
+scene = load_config("configs/scene/default.yml", SceneConfig, asset_root=".")
+sim = load_config("configs/sim/default.yml", SimulationConfig)
+environment = load_config("configs/envs/default.yml", EnvironmentConfig)
 ```
 
-The default preset runs physics at 120 Hz and renders every four steps at 30 Hz. It deliberately exposes only parameters that affect benchmark timing, gravity, observation quality, or manipulation stability. Materials, Fabric, logging, solver iterations, and GPU buffers inherit the installed Isaac Lab defaults. Unknown fields and invalid timing or device values are rejected at load time. Scene cloning parameters such as `num_envs` remain in the scene preset.
+Models forbid unknown fields, are frozen, reject non-finite numeric values, and do not read files or build Isaac Lab objects. Configuration references resolve relative to the file containing them. Asset references resolve relative to `asset_root` when supplied, otherwise relative to the containing file. Absolute paths are preserved, and missing local assets are reported with the source path and field location. Only local configuration and asset paths are supported. `num_envs`, spacing, cloning, control, and reset settings belong to `EnvironmentConfig`, not `SceneConfig`.
+
+The default simulation preset runs physics at 120 Hz and renders every four steps at 30 Hz. Materials, Fabric, logging, solver iterations, and GPU buffers inherit the installed Isaac Lab defaults.
 
 ### Environment runtime
 
-[`create_env_cfg()`](src/scale_bench/envs/env_cfg.py) compiles loaded robot profiles, `SceneConfig`, an optional task layout source, `SimConfig`, and [`EnvRuntimeConfig`](src/scale_bench/envs/runtime_config.py) directly into a native `ScaleBenchEnvCfg`:
+[`create_env_cfg()`](src/scale_bench/envs/env_cfg.py) compiles loaded `RobotConfig`, `SceneConfig`, an optional task layout source, `SimulationConfig`, and `EnvironmentConfig` into a native `ScaleBenchEnvCfg`:
 
 ```python
-from scale_bench.envs import EnvRuntimeConfig, ScaleBenchEnv, create_env_cfg
+from scale_bench.envs import ScaleBenchEnv, create_env_cfg
 
-runtime = EnvRuntimeConfig.load("configs/envs/default.yml")
 env_cfg = create_env_cfg(
-    left_robot_profile=left,
-    right_robot_profile=right,
+    left_robot_profile=robot,
+    right_robot_profile=robot,
     scene_config=scene,
     sim_config=sim,
-    runtime_config=runtime,
+    runtime_config=environment,
     task=task,
     task_layout_seed=42,
 )
@@ -185,81 +193,58 @@ finally:
 
 `ScaleBenchEnv` subclasses Isaac Lab's `ManagerBasedEnv` and is the only owner of `SimulationContext`, `InteractiveScene`, reset, step, and cleanup. Runtime IO metadata is derived from the initialized environment instead of injected from build-time inputs. With `task_layout_seed`, environment `i` receives the layout generated from `task_layout_seed + i` once during configuration; every full or partial reset restores that same layout. Alternatively, `task_layouts` accepts either one layout to broadcast to every environment or exactly `num_envs` layouts mapped by `env_id`. `info["episode"]` reports the affected environment IDs and their stable layout seeds. The builder rejects presets where render or camera updates are not synchronized with `step_dt`. Action terms follow `left_arm | left_gripper | right_arm | right_gripper`; `observation["policy"]` is a named, non-concatenated robot-state and RGB-D dictionary. Runtime IO descriptors expose the resolved dimensions, slices, joint order, camera metadata, and timing.
 
-### Robot profiles
+### Robot configuration
 
-[`RobotProfile`](src/scale_bench/robots/robot_profile.py) is the typed boundary between `configs/robots/*.yml` and Isaac Lab:
+[`RobotConfig`](src/scale_bench/config/models/robot.py) validates robot semantics independently of Isaac Sim. Loading it through `load_config()`:
 
-```python
-from scale_bench.robots import RobotProfile
-
-profile = RobotProfile.load("configs/robots/piper.yml")
-robot_cfg = profile.build_articulation_cfg(
-    prim_path="{ENV_REGEX_NS}/Robot",
-)
-camera_cfg = profile.build_camera_cfg(
-    robot_prim_path="{ENV_REGEX_NS}/Robot",
-)
-```
-
-Loading and validating a profile does not require a running simulator. Start Isaac Lab's `AppLauncher` before calling `build_articulation_cfg()`; the included [`preview_scene.py`](scripts/preview_scene.py) shows the required startup and import order.
-
-`RobotProfile.load()`:
-
-- resolves relative paths from the repository root;
+- resolves configuration references relative to the robot YAML and assets against the explicit asset root;
 - rejects unknown fields and non-finite numeric values;
 - requires unique arm, gripper, and actuator joint names;
 - verifies that initial positions exactly cover all declared joints;
 - verifies actuator coverage and prevents overlapping actuator groups;
 - validates the TCP, parallel-jaw gripper, and optional camera-mount contract;
-- loads and validates the referenced camera profile;
 - checks that local USD and optional URDF assets exist.
 
-`build_articulation_cfg()` returns a new Isaac Lab `ArticulationCfg` on every call. `build_camera_cfg()` returns a camera below the supplied robot root, or `None` when the robot has no camera. The current robot implementation supports implicit actuators, parallel-jaw grippers, and one mounted camera.
+`scale_bench.robots.RobotProfile` remains as a temporary compatibility facade during migration. New code should use `RobotConfig` and `load_config()`.
 
-### Camera profiles
+### Camera configuration
 
-[`CameraProfile`](src/scale_bench/sensors/camera_profile.py) validates reusable camera optics and output settings independently of Isaac Sim:
+[`CameraConfig`](src/scale_bench/config/models/camera.py) owns image dimensions, update period, data types, pinhole intrinsics, distortion metadata, focal length, clipping range, and coordinate convention:
 
 ```python
-from scale_bench.sensors import CameraProfile
+from scale_bench.config.loader import load_config
+from scale_bench.config.models.camera import CameraConfig
 
-profile = CameraProfile.load("configs/cameras/d435.yml")
+camera = load_config("configs/cameras/d435.yml", CameraConfig)
 ```
 
-The profile owns image dimensions, update period, data types, pinhole intrinsics, distortion metadata, focal length, and clipping range. Scene and robot profiles reference it while keeping installation poses local to their owning asset. The D435 profile is reused by both Piper wrist cameras and the overhead camera.
+Scene and robot configs reference it while keeping installation poses local to their owning asset. The D435 config is reused by both Piper wrist cameras and the overhead camera.
 
 ### Scene template
 
-[`create_dual_arm_tabletop_scene_cfg()`](src/scale_bench/scenes/scene_template.py) combines two robot profiles with the scene preset:
+[`create_dual_arm_tabletop_scene_cfg()`](src/scale_bench/scenes/scene_template.py) currently adapts loaded pure configs into the native scene after `AppLauncher` has initialized Isaac Sim:
 
 ```python
-from scale_bench.robots import RobotProfile
 from scale_bench.scenes import create_dual_arm_tabletop_scene_cfg
 
-left = RobotProfile.load("configs/robots/piper.yml")
-right = RobotProfile.load("configs/robots/piper.yml")
-
 scene_cfg = create_dual_arm_tabletop_scene_cfg(
-    left_robot_profile=left,
-    right_robot_profile=right,
-    config_path="configs/scene/default.yml",
-    num_envs=1,
+    left_robot_profile=robot,
+    right_robot_profile=robot,
+    scene_config=scene,
+    environment_config=environment,
 )
 ```
 
-This snippet is intended to run after `AppLauncher` has initialized Isaac Sim.
-
-`SceneConfig` validates every scene section with dedicated nested models, including non-empty asset-path fields, finite poses, positive dimensions, material parameters, unit quaternions, camera conventions, runtime types, and the ordered XY bounds in `task_object_placement_area`. Its `table_top_z_m` property and placement-area metadata can be reused by task builders and visualization tools without duplicating scene geometry calculations.
+`SceneConfig` validates static scene sections, including asset references, finite poses, positive dimensions, material parameters, unit quaternions, camera conventions, and ordered XY placement bounds. Its `table_top_z_m` property and placement-area metadata can be reused without duplicating scene geometry calculations.
 
 ```python
-from scale_bench.scenes import SceneConfig
+from scale_bench.config.loader import load_config
+from scale_bench.config.models.scene import SceneConfig
 
-scene_metadata = SceneConfig.load("configs/scene/default.yml")
+scene_metadata = load_config("configs/scene/default.yml", SceneConfig, asset_root=".")
 placement_area = scene_metadata.task_object_placement_area
 table_top_z_m = scene_metadata.table_top_z_m
 ```
-
-The nested schema types are also public from `scale_bench.scenes`: `RoomConfig`, `SurfaceConfig`, `TaskObjectPlacementArea`, `RobotMountConfig`, `RobotMountsConfig`, `OverheadCameraConfig`, `LightingConfig`, and `SceneRuntimeConfig`. Prefer `SceneConfig.load()` when loading a complete preset so path resolution, validation, and process-local caching remain consistent.
 
 The scene contains:
 
@@ -268,7 +253,7 @@ The scene contains:
 - independent left and right robot mounts;
 - left and right robot-mounted D435-style RGB-D sensors;
 - a camera stand and overhead D435-style RGB-D sensor;
-- configurable environment count, spacing, physics replication, and Fabric cloning.
+- environment count, spacing, physics replication, and Fabric cloning supplied by `EnvironmentConfig`.
 
 Robot bases and the camera stand are positioned relative to the computed table-top height. Changing the table height therefore keeps mounted assets aligned automatically.
 
@@ -277,10 +262,11 @@ Robot bases and the camera stand are positioned relative to the computed table-t
 `TaskDefinition` keeps the shared task behavior in one place: metadata loading, deterministic sampling, placement validation, rigid-object construction, and layout JSON import/export. `SortDollsBySize` only declares its dolls, instruction, and size-order target. No task-specific scene subclass is needed; named `RigidObjectCfg` fields are added directly to the common `InteractiveSceneCfg` instance.
 
 ```python
-from scale_bench.scenes import SceneConfig
+from scale_bench.config.loader import load_config
+from scale_bench.config.models.scene import SceneConfig
 from scale_bench.tasks import SortDollsBySize
 
-scene_metadata = SceneConfig.load("configs/scene/default.yml")
+scene_metadata = load_config("configs/scene/default.yml", SceneConfig, asset_root=".")
 task = SortDollsBySize(scene_config=scene_metadata)
 layout = task.resolve_layout(seed=42)
 layout.save("layouts/sort_dolls_by_size/42.json")
@@ -306,7 +292,7 @@ Calling `task.resolve_layout(layout_path=...)` restores and validates the exact 
 
    ```bash
    PYTHONPATH=src uv run python -c \
-     'from scale_bench.robots import RobotProfile; p = RobotProfile.load("configs/robots/my_robot.yml"); print(p.name)'
+     'from scale_bench.config.loader import load_config; from scale_bench.config.models.robot import RobotConfig; print(load_config("configs/robots/my_robot.yml", RobotConfig, asset_root=".").name)'
    ```
 
 5. Preview the robot in the scene with `--left-robot-config` or `--right-robot-config`.
@@ -325,51 +311,52 @@ Copy [`configs/scene/default.yml`](configs/scene/default.yml) and edit the relev
 | `robot_mounts` | Left and right base poses relative to the table top. |
 | `camera` | Camera profile reference, stand pose, and sensor transform. |
 | `lighting` | HDR environment texture and intensity. |
-| `runtime` | Environment count, spacing, physics replication, and Fabric cloning. |
 
-Scene YAML files are cached per process. Restart the preview process after editing a scene preset.
+Environment count, spacing, physics replication, and Fabric cloning are configured in `configs/envs/*.yml`.
 
 ### Customizing the simulation
 
 Copy [`configs/sim/default.yml`](configs/sim/default.yml) to create a simulation preset. Timing and gravity are top-level settings; `render` selects observation quality, and `physx` contains the one manipulation-specific override currently justified by runtime behavior. Everything else follows Isaac Lab defaults and should only become public configuration after a benchmark requirement demonstrates that it must vary. Use `--sim-config` to select the preset and `--device` for a temporary machine-specific override.
 
-Copy [`configs/envs/default.yml`](configs/envs/default.yml) to change the arm action mode, control decimation, reset rerenders, texture waiting, or the environment seed. The current arm mode is `joint_position`; this explicit dispatch point is reserved for later end-effector modes. The builder requires render interval, control decimation, and camera update periods to describe one synchronous environment rate.
+Copy [`configs/envs/default.yml`](configs/envs/default.yml) to change environment cloning, arm action mode, control decimation, reset rerenders, texture waiting, or the environment seed. The current arm mode is `joint_position`; this explicit dispatch point is reserved for later end-effector modes. The builder requires render interval, control decimation, and camera update periods to describe one synchronous environment rate.
 
 ### Validating changes
 
-The repository currently has no automated test suite. Profile and preset loaders, deterministic task-layout generation, and Python syntax can be checked without opening an interactive simulator, but these checks do not exercise the initialized managers or rendered observations. For changes to environment composition, reset events, actions, observations, runtime descriptors, simulation startup, or rendering, run the bounded headless preview smoke test shown above.
+Run `uv run pytest` for the pure configuration model, loader/path, and dependency-boundary tests. These tests do not exercise initialized managers or rendered observations. For changes to environment composition, reset events, actions, observations, runtime descriptors, simulation startup, or rendering, also run the bounded headless preview smoke test shown above.
 
 ## Repository layout
 
 ```text
 src/scale_bench/
+├── config/
+│   ├── base.py             # immutable model base and shared constraints
+│   ├── loader.py           # YAML/JSON loading and error wrapping
+│   ├── paths.py            # config-reference and asset-reference semantics
+│   └── models/             # pure camera, robot, scene, sim, and env models
 ├── envs/
 │   ├── action_cfg.py       # Action Manager cfg and profile compiler
 │   ├── env_cfg.py          # native EnvCfg composition and timing validation
 │   ├── events.py           # task layout reset and per-env episode state
 │   ├── mdp/                # runtime observation terms
 │   ├── observation_cfg.py  # Observation Manager groups and cfg compiler
-│   ├── runtime_config.py   # environment lifecycle YAML schema
+│   ├── runtime_config.py   # transitional EnvironmentConfig facade
 │   └── scale_bench_env.py  # formal ManagerBasedEnv runtime entry
-├── sim/
-│   └── simulation_config.py # simulation YAML and SimulationCfg builder
-├── robots/
-│   └── robot_profile.py    # robot schema and articulation/camera builders
+├── sim/                    # transitional simulation compatibility/builder code
+├── robots/                 # transitional robot compatibility/builder code
 ├── scenes/
-│   ├── scene_config.py     # typed scene YAML and placement bounds
+│   ├── scene_config.py     # transitional SceneConfig facade
 │   ├── scene_template.py   # dual-arm tabletop scene compiler
 │   └── uv_cuboid.py        # cuboid spawner with face-varying UVs
-├── sensors/
-│   └── camera_profile.py   # YAML schema, validation, CameraCfg builder
+├── sensors/                # transitional camera compatibility/builder code
 └── tasks/
     ├── base.py             # common task, rigid-asset, and layout behavior
     └── sort_dolls_by_size.py # one concrete task
 
 configs/
 ├── cameras/d435.yml        # reusable camera profile
-├── envs/default.yml        # control and reset lifecycle settings
+├── envs/default.yml        # cloning, control, and reset lifecycle settings
 ├── robots/piper.yml        # reference robot profile
-├── scene/default.yml       # scene-local poses and environment settings
+├── scene/default.yml       # static scene assets and local poses
 ├── sim/default.yml         # simulation, rendering, and PhysX settings
 └── tasks/sort_dolls_by_size.yml
 
@@ -383,7 +370,7 @@ The project uses a `src` layout but is not installed as a package (`tool.uv.pack
 - **`Robot asset does not exist`** — check the path in the robot YAML and ensure the `Assets/` bundle is present.
 - **A local Isaac Lab dependency cannot be found** — verify that `third_parties/IsaacLab/source/...` exists before running `uv sync`.
 - **`No module named scale_bench` in a custom script** — launch it with `PYTHONPATH=src` from the repository root.
-- **Different environments overlap** — increase `scene.runtime.env_spacing_m`, especially after changing the room scale.
+- **Different environments overlap** — increase `env_spacing_m` in the environment config, especially after changing the room scale.
 
 ## Further reading
 

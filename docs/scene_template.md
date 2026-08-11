@@ -2,15 +2,16 @@
 
 `DualArmTabletopSceneCfg` 是当前 `scale_bench` 已实现的场景拓扑：在每个环境中组合房间、地面、桌面、两台带挂载相机的机器人、相机支架和顶视 RGB-D 相机，并使用一盏全局环境光。默认 Piper 场景一共创建三台相机。
 
-场景编译实现位于 [`src/scale_bench/scenes/scene_template.py`](../src/scale_bench/scenes/scene_template.py)，场景 YAML schema 位于 [`src/scale_bench/scenes/scene_config.py`](../src/scale_bench/scenes/scene_config.py)。默认场景配置位于 [`configs/scene/default.yml`](../configs/scene/default.yml)，默认相机参数位于 [`configs/cameras/d435.yml`](../configs/cameras/d435.yml)。
+场景编译实现位于 [`src/scale_bench/scenes/scene_template.py`](../src/scale_bench/scenes/scene_template.py)，纯场景模型位于 [`src/scale_bench/config/models/scene.py`](../src/scale_bench/config/models/scene.py)。默认场景配置位于 [`configs/scene/default.yml`](../configs/scene/default.yml)，环境生命周期配置位于 [`configs/envs/default.yml`](../configs/envs/default.yml)。
 
 ```text
-RobotProfile YAML ──► left/right ArticulationCfg ─────┐
-                  └─► left/right robot CameraCfg ─────┤
+RobotConfig ────────► left/right ArticulationCfg ─────┐
+              └────► left/right robot CameraCfg ──────┤
                                                       │
 Scene YAML ──► SceneConfig ───────────────────────────┼─► DualArmTabletopSceneCfg
                                                       │
-CameraProfile YAML ──► CameraProfile ──► CameraCfg ───┤
+CameraConfig ───────────────────────────► CameraCfg ───┤
+EnvironmentConfig ──► cloning settings ───────────────┤
                                                       │
 UvCuboidCfg ──► textured ground/table ────────────────┘
                                                               │
@@ -87,16 +88,22 @@ Isaac Lab 要求先启动 `AppLauncher`，再导入依赖 Isaac Sim runtime 的�
 ```python
 from isaaclab.scene import InteractiveScene
 
-from scale_bench.robots import RobotProfile
+from scale_bench.config.loader import load_config
+from scale_bench.config.models.environment import EnvironmentConfig
+from scale_bench.config.models.robot import RobotConfig
+from scale_bench.config.models.scene import SceneConfig
 from scale_bench.scenes import create_dual_arm_tabletop_scene_cfg
 
-left = RobotProfile.load("configs/robots/piper.yml")
-right = RobotProfile.load("configs/robots/piper.yml")
+left = load_config("configs/robots/piper.yml", RobotConfig, asset_root=".")
+right = load_config("configs/robots/piper.yml", RobotConfig, asset_root=".")
+scene_config = load_config("configs/scene/default.yml", SceneConfig, asset_root=".")
+environment_config = load_config("configs/envs/default.yml", EnvironmentConfig)
 
 scene_cfg = create_dual_arm_tabletop_scene_cfg(
     left_robot_profile=left,
     right_robot_profile=right,
-    config_path="configs/scene/default.yml",
+    scene_config=scene_config,
+    environment_config=environment_config,
 )
 scene = InteractiveScene(scene_cfg)
 ```
@@ -105,13 +112,15 @@ scene = InteractiveScene(scene_cfg)
 
 | 参数 | 必需 | 作用 |
 |---|---:|---|
-| `left_robot_profile` | 是 | 左侧 `RobotProfile`；用于生成 articulation 和机器人相机。 |
-| `right_robot_profile` | 是 | 右侧 `RobotProfile`；用于生成 articulation 和机器人相机。 |
+| `left_robot_profile` | 是 | 左侧 `RobotConfig`；用于生成 articulation 和机器人相机。 |
+| `right_robot_profile` | 是 | 右侧 `RobotConfig`；用于生成 articulation 和机器人相机。 |
 | `config_path` | 否 | 场景 YAML；默认是 `configs/scene/default.yml`。 |
-| `num_envs` | 否 | 覆盖 YAML 中的 `runtime.num_envs`。 |
-| `env_spacing_m` | 否 | 覆盖 YAML 中的 `runtime.env_spacing_m`。 |
+| `scene_config` | 否 | 已加载的纯 `SceneConfig`；与 `config_path` 互斥。 |
+| `environment_config` | 否 | 已加载的 `EnvironmentConfig`。 |
+| `num_envs` | 否 | 覆盖 `EnvironmentConfig.num_envs`。 |
+| `env_spacing_m` | 否 | 覆盖 `EnvironmentConfig.env_spacing_m`。 |
 
-左右两侧都必须提供 robot profile。场景会分别从 profile 构建 articulation 和挂载相机。`replicate_physics` 和 `clone_in_fabric` 当前始终读取 YAML 的 `runtime` 配置。
+左右两侧都必须提供 robot config。场景会分别构建 articulation 和挂载相机。`replicate_physics` 和 `clone_in_fabric` 来自 `EnvironmentConfig`。
 
 ## 场景 YAML
 
@@ -156,15 +165,16 @@ task_object_placement_area:
 该字段定义环境局部坐标系 XY 平面上的任务物体放置范围。默认区域位于机械臂前方至桌面远端，并在桌边保留 5 cm 边距；物体的 Z 坐标由任务根据桌面顶面高度确定。
 
 ```python
-from scale_bench.scenes import SceneConfig
+from scale_bench.config.loader import load_config
+from scale_bench.config.models.scene import SceneConfig
 
-scene_config = SceneConfig.load("configs/scene/default.yml")
+scene_config = load_config("configs/scene/default.yml", SceneConfig, asset_root=".")
 area = scene_config.task_object_placement_area
 ```
 
 `SceneConfig` 会校验全部嵌套区块，拒绝未知字段、无效尺寸和材质参数、非单位四元数、非法相机坐标约定，以及非有限或上下界颠倒的放置区域。后续增加场景级配置时，应在对应的具名模型中添加字段。
 
-`scale_bench.scenes` 公开导出 `RoomConfig`、`SurfaceConfig`、`TaskObjectPlacementArea`、`RobotMountConfig`、`RobotMountsConfig`、`OverheadCameraConfig`、`LightingConfig` 和 `SceneRuntimeConfig`。加载完整场景 preset 时应优先调用 `SceneConfig.load()`，以统一路径解析、严格校验和进程内缓存行为。
+嵌套模型位于 `scale_bench.config.models.scene`。完整 preset 统一通过 `load_config()` 加载，以获得一致的路径解析、严格校验和错误包装。
 
 ### `robot_mounts`
 
@@ -203,7 +213,7 @@ table_top_z = table.position_m[2] + table.size_m[2] / 2
 
 ```yaml
 camera:
-  profile_path: configs/cameras/d435.yml
+  profile_path: ../cameras/d435.yml
   stand_usd_path: Assets/Object/Geometry/camera_stand_aloha/aloha_front_camera_stand_realsense_d435.usd
   stand_position_xy_m: [0.0, -0.47]
   stand_orientation_xyzw: [0.0, 0.0, 0.70710678, 0.70710678]
@@ -235,7 +245,7 @@ distortion_coefficients: [0.0, 0.0, 0.0, 0.0, 0.0]
 clipping_range_m: [0.105, 10.0]
 ```
 
-[`CameraProfile`](../src/scale_bench/sensors/camera_profile.py) 会拒绝未知字段、非有限数值、重复的 `data_types`、无效针孔内参和顺序错误的裁剪平面。加载后的 profile 不可修改，每次调用 `build_camera_cfg()` 都会生成新的 Isaac Lab `CameraCfg`。
+[`CameraConfig`](../src/scale_bench/config/models/camera.py) 会拒绝未知字段、非有限数值、重复的 `data_types`、无效针孔内参和顺序错误的裁剪平面。加载后的配置不可修改；生成原生 `CameraCfg` 属于过渡期 builder 的职责。
 
 `model`、`intrinsic_source`、`distortion_model` 和 `distortion_coefficients` 当前作为标定元数据保存；Isaac Lab 场景使用针孔模型，不会根据 distortion 字段模拟镜头畸变。
 
@@ -243,25 +253,25 @@ clipping_range_m: [0.105, 10.0]
 
 `texture_path` 指向 HDR 环境纹理，`intensity` 设置 dome light 强度。环境光使用全局 prim `/World/EnvironmentLight`，多个克隆环境共享该光源。
 
-### `runtime`
+### 环境生命周期配置
 
 ```yaml
-runtime:
-  num_envs: 1
-  env_spacing_m: 5.0
-  replicate_physics: true
-  clone_in_fabric: false
+num_envs: 2
+env_spacing_m: 5.0
+control_decimation: 4
+replicate_physics: true
+clone_in_fabric: false
 ```
 
-增加环境数量或修改房间缩放时，应同步检查 `env_spacing_m`，确保相邻房间几何不会重叠。函数参数 `num_envs` 和 `env_spacing_m` 可以临时覆盖对应 YAML 值，而不修改 preset。
+这些字段位于 `configs/envs/*.yml`，不再放在 scene YAML。增加环境数量或修改房间缩放时，应同步检查 `env_spacing_m`。函数参数 `num_envs` 和 `env_spacing_m` 可以临时覆盖配置值。
 
-## 路径、缓存与错误行为
+## 路径与错误行为
 
-- 场景配置、机器人 profile、相机 profile 和本地资产的相对路径都从仓库根目录解析。
-- 包含 `://` 的资产路径会作为 URI 原样传给 Isaac Lab。
-- 场景 YAML 会按路径在进程内缓存；编辑场景 preset 后应重启预览进程。
+- 配置引用相对于包含该引用的 YAML/JSON 文件解析。
+- 资产引用相对于显式 `asset_root` 解析；未提供时相对于包含它的配置文件解析。
+- 绝对路径原样保留；当前只支持本地配置与资产路径。
 - 场景 YAML 的所有区块和放置区域都由 `SceneConfig` 的具名嵌套模型校验；构建 Isaac Lab 配置时只读取已经验证的属性。
-- 相机 YAML 使用严格的 Pydantic schema；加载失败时会以 `ValueError` 报告 profile 路径和具体校验错误。
+- 所有 YAML/JSON 使用严格 Pydantic schema；加载失败时 `ConfigLoadError` 会报告源路径和具体字段。
 - 默认 preset 依赖 `Assets/` 中的房间、材质、相机支架和 HDR 文件，以及这些资产的传递依赖；该资产包不由 Git 仓库分发，运行预览前必须单独准备。
 - `sort_dolls_by_size` 任务还依赖 `Assets/Object/Rigid/matryoshka_dolls/{00000..00004}/` 下的 `object.usdz`、`metadata.json` 及其传递依赖。
 
