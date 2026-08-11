@@ -104,7 +104,6 @@ def build_environment_cfg(
             mode="reset",
             params={
                 "task": task,
-                "context": placement_context,
                 "layouts": layouts,
             },
         )
@@ -170,29 +169,24 @@ def _prepare_task_layouts(
     base_seed: int | None,
     task_layouts: Sequence[TaskLayout] | None,
 ) -> tuple[TaskLayout, ...]:
-    if task_layouts is not None:
+    if task_layouts is None:
+        if base_seed is None:
+            raise ValueError("base_seed is required when task_layouts is not provided")
+        layouts = tuple(
+            task.generate_layout(context, base_seed + env_id)
+            for env_id in range(num_envs)
+        )
+    else:
         layouts = tuple(task_layouts)
-        if len(layouts) == 1:
-            task.validate_layout(context, layouts[0])
-            return layouts * num_envs
-        if len(layouts) != num_envs:
+        if len(layouts) not in {1, num_envs}:
             raise ValueError(
                 "task_layouts must contain either one layout or exactly "
                 f"num_envs ({num_envs}) layouts; got {len(layouts)}"
             )
-        for layout in layouts:
-            task.validate_layout(context, layout)
-        return layouts
 
-    if base_seed is None:
-        raise ValueError("base_seed is required when task_layouts is not provided")
-    layouts = tuple(
-        task.generate_layout(context, base_seed + env_id)
-        for env_id in range(num_envs)
-    )
     for layout in layouts:
         task.validate_layout(context, layout)
-    return layouts
+    return layouts * num_envs if len(layouts) == 1 else layouts
 
 
 def _camera_update_periods(

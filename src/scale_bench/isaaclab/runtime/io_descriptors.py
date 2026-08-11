@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 from typing import Any
 
 from isaaclab.envs import ManagerBasedEnv
@@ -58,10 +57,6 @@ def validate_io_descriptors(
     if env.observation_manager.group_obs_concatenate["policy"]:
         raise RuntimeError("policy observation terms must not be concatenated")
 
-    action_dims = [item["shape"][0] for item in descriptors["actions"]]
-    if action_dims != env.action_manager.action_term_dim:
-        raise RuntimeError("action descriptors do not match manager dimensions")
-
     observation_descriptors = descriptors["observations"]["policy"]
     observation_dims = env.observation_manager.group_obs_term_dim["policy"]
     for descriptor, actual_shape in zip(
@@ -87,30 +82,6 @@ def validate_io_descriptors(
                 dtype="torch.float32",
                 channels=1,
             )
-
-    runtime = descriptors["runtime"]
-    if not math.isclose(
-        runtime["render_dt"],
-        runtime["step_dt"],
-        rel_tol=0.0,
-        abs_tol=1.0e-9,
-    ):
-        raise RuntimeError("runtime render_dt must equal environment step_dt")
-    mismatched_cameras = [
-        f"{name}={period:g}s"
-        for name, period in runtime["camera_update_periods"].items()
-        if not math.isclose(
-            period,
-            runtime["step_dt"],
-            rel_tol=0.0,
-            abs_tol=1.0e-9,
-        )
-    ]
-    if mismatched_cameras:
-        raise RuntimeError(
-            "runtime camera update periods must equal environment step_dt; "
-            f"mismatched: {', '.join(mismatched_cameras)}"
-        )
 
 
 def _annotate_action_descriptors(

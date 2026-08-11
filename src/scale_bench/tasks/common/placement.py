@@ -100,20 +100,11 @@ def generate_tabletop_layout(
                 f"after {sampling_attempts_per_object} attempts for seed {seed}"
             )
 
-    layout = TaskLayout(
+    return TaskLayout(
         task_id=task_id,
         seed=seed,
         assets={name: placements[name] for name in asset_sizes_m},
     )
-    validate_tabletop_layout(
-        task_id=task_id,
-        context=context,
-        layout=layout,
-        asset_sizes_m=asset_sizes_m,
-        spawn_clearance_m=spawn_clearance_m,
-        minimum_object_gap_m=minimum_object_gap_m,
-    )
-    return layout
 
 
 def validate_tabletop_layout(

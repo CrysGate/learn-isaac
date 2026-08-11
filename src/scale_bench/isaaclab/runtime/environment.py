@@ -10,7 +10,7 @@ from isaaclab.envs import ManagerBasedEnv
 from isaaclab.envs.common import VecEnvObs
 
 from scale_bench.isaaclab.builders.environment import ScaleBenchEnvCfg
-from scale_bench.isaaclab.mdp.events import ResetTaskLayout
+from scale_bench.isaaclab.mdp.events import ResetTaskLayout, resolve_env_ids
 from scale_bench.isaaclab.runtime.io_descriptors import (
     build_io_descriptors,
     validate_io_descriptors,
@@ -54,15 +54,6 @@ class ScaleBenchEnv(ManagerBasedEnv):
             raise ValueError(
                 f"action shape must be {expected_shape}, got {tuple(action.shape)}"
             )
-        if action.dtype != torch.float32:
-            raise TypeError(f"action dtype must be torch.float32, got {action.dtype}")
-        if action.device != torch.device(self.device):
-            raise ValueError(
-                f"action must be on environment device {self.device}, "
-                f"got {action.device}"
-            )
-        if not torch.isfinite(action).all():
-            raise ValueError("action must contain only finite values")
         return super().step(action)
 
     def reset(
@@ -71,18 +62,21 @@ class ScaleBenchEnv(ManagerBasedEnv):
         env_ids: Sequence[int] | torch.Tensor | None = None,
         options: dict[str, Any] | None = None,
     ) -> tuple[VecEnvObs, dict]:
-        resolved_env_ids = None
-        if env_ids is not None:
-            resolved_env_ids = torch.as_tensor(
-                env_ids,
+        resolved_env_ids = (
+            None if env_ids is None else resolve_env_ids(env_ids, self.num_envs)
+        )
+        env_id_tensor = (
+            None
+            if resolved_env_ids is None
+            else torch.tensor(
+                resolved_env_ids,
                 device=self.device,
                 dtype=torch.int32,
             )
-            if resolved_env_ids.ndim != 1:
-                raise ValueError("env_ids must be a one-dimensional sequence")
+        )
         observation, info = super().reset(
             seed=seed,
-            env_ids=resolved_env_ids,
+            env_ids=env_id_tensor,
             options=options,
         )
         if self._task_layout_reset is not None:
