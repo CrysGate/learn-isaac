@@ -78,8 +78,15 @@ def main(asset_root: Path) -> None:
             "instruction": task.instruction,
             "layout_seeds": (41, 42),
         }
-        _assert_policy_observation(observation["policy"], torch)
-        _assert_descriptors(env.get_IO_descriptors)
+        descriptors = env.get_IO_descriptors
+        _assert_policy_observation(
+            observation["policy"],
+            descriptors,
+            torch,
+            check_image_content=True,
+        )
+        _assert_camera_frames_updated(env, (0, 1), torch)
+        _assert_descriptors(descriptors)
         layouts = tuple(
             task.generate_layout(PlacementContext.from_scene_config(scene), seed)
             for seed in (41, 42)
@@ -101,7 +108,10 @@ def main(asset_root: Path) -> None:
             "instruction": task.instruction,
             "layout_seeds": (42,),
         }
-        _assert_policy_observation(partial_observation["policy"], torch)
+        _assert_policy_observation(
+            partial_observation["policy"], descriptors, torch
+        )
+        _assert_camera_frames_updated(env, (1,), torch)
         reset_poses = asset.data.root_pose_w.torch
         torch.testing.assert_close(reset_poses[0], perturbed_poses[0])
         torch.testing.assert_close(reset_poses[1], initial_poses[1])
@@ -111,8 +121,42 @@ def main(asset_root: Path) -> None:
             dtype=torch.float32,
             device=env.device,
         )
-        stepped_observation, _ = env.step(action)
-        _assert_policy_observation(stepped_observation["policy"], torch)
+        _fill_action_from_observation(
+            action,
+            partial_observation["policy"],
+            descriptors["actions"],
+        )
+        left_arm_slice = slice(*descriptors["actions"][0]["slice"])
+        left_gripper_slice = slice(*descriptors["actions"][1]["slice"])
+        initial_left_joint = partial_observation["policy"][
+            "left_arm_joint_pos"
+        ][0, 0].clone()
+        action[0, left_arm_slice.start] = initial_left_joint + 0.15
+        action[:, left_gripper_slice] = 1.0
+
+        for _ in range(4):
+            stepped_observation, _ = env.step(action)
+
+        _assert_policy_observation(
+            stepped_observation["policy"], descriptors, torch
+        )
+        torch.testing.assert_close(env.action_manager.action, action)
+        left_arm_term = env.action_manager.get_term("left_arm")
+        left_gripper_term = env.action_manager.get_term("left_gripper")
+        torch.testing.assert_close(
+            left_arm_term.processed_actions[0, 0],
+            action[0, left_arm_slice.start],
+        )
+        torch.testing.assert_close(
+            left_gripper_term.processed_actions,
+            torch.full_like(left_gripper_term.processed_actions, 0.05),
+        )
+        assert not torch.isclose(
+            stepped_observation["policy"]["left_arm_joint_pos"][0, 0],
+            initial_left_joint,
+            atol=1.0e-4,
+            rtol=0.0,
+        )
         succeeded = True
     except BaseException:
         traceback.print_exc()
@@ -125,7 +169,13 @@ def main(asset_root: Path) -> None:
         simulation_app.close()
 
 
-def _assert_policy_observation(policy: dict, torch) -> None:
+def _assert_policy_observation(
+    policy: dict,
+    descriptors: dict,
+    torch,
+    *,
+    check_image_content: bool = False,
+) -> None:
     expected_terms = {
         "left_arm_joint_pos",
         "left_gripper_joint_pos",
@@ -139,14 +189,47 @@ def _assert_policy_observation(policy: dict, torch) -> None:
         "overhead_camera_depth",
     }
     assert set(policy) == expected_terms
+    policy_descriptors = {
+        descriptor["name"]: descriptor
+        for descriptor in descriptors["observations"]["policy"]
+    }
     for name, value in policy.items():
         assert value.shape[0] == 2
+        assert tuple(value.shape[1:]) == tuple(policy_descriptors[name]["shape"])
         if name.endswith("_camera_rgb"):
-            assert value.shape[-1] == 3
+            assert tuple(value.shape[1:]) == (480, 640, 3)
             assert value.dtype == torch.uint8
+            if check_image_content:
+                assert torch.count_nonzero(value).item() > 0
         elif name.endswith("_camera_depth"):
-            assert value.shape[-1] == 1
+            assert tuple(value.shape[1:]) == (480, 640, 1)
             assert value.dtype == torch.float32
+            if check_image_content:
+                valid_depth = torch.isfinite(value) & (value > 0.0)
+                assert valid_depth.any().item()
+
+
+def _assert_camera_frames_updated(env, env_ids: tuple[int, ...], torch) -> None:
+    for sensor in env.scene.sensors.values():
+        frames = sensor.frame.torch[list(env_ids)]
+        assert torch.all(frames > 0).item()
+
+
+def _fill_action_from_observation(
+    action,
+    policy: dict,
+    action_descriptors: list[dict],
+) -> None:
+    observation_names = {
+        "left_arm": "left_arm_joint_pos",
+        "left_gripper": "left_gripper_joint_pos",
+        "right_arm": "right_arm_joint_pos",
+        "right_gripper": "right_gripper_joint_pos",
+    }
+    for descriptor in action_descriptors:
+        action_slice = slice(*descriptor["slice"])
+        source = policy[observation_names[descriptor["name"]]]
+        action[:, action_slice] = source[:, : action_slice.stop - action_slice.start]
 
 
 def _assert_descriptors(descriptors: dict) -> None:

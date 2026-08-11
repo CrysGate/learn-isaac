@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import ast
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -78,6 +79,49 @@ def simulation_config() -> SimulationConfig:
 def environment_config() -> EnvironmentConfig:
     return EnvironmentConfig.model_validate(
         _yaml(PROJECT_ROOT / "configs/envs/default.yml")
+    )
+
+
+def _robot_with_joint_contract(
+    name: str,
+    arm_joint_names: tuple[str, ...],
+    gripper_positions: dict[str, tuple[float, float]],
+) -> RobotConfig:
+    gripper_joint_names = tuple(gripper_positions)
+    all_joint_names = (*arm_joint_names, *gripper_joint_names)
+    return RobotConfig.model_validate(
+        {
+            "name": name,
+            "usd_path": f"/fixtures/{name}.usd",
+            "initial_joint_positions": {
+                joint_name: 0.0 for joint_name in all_joint_names
+            },
+            "kinematics": {
+                "base_body": f"{name}_base",
+                "arm_joint_names": arm_joint_names,
+                "ee_body": f"{name}_tool",
+                "tcp": {"parent_frame": f"{name}_tool"},
+            },
+            "actuators": {"all": {"joint_names": all_joint_names}},
+            "gripper": {
+                "joint_names": gripper_joint_names,
+                "command_joint_names": gripper_joint_names,
+                "finger_body_names": (
+                    f"{name}_left_finger",
+                    f"{name}_right_finger",
+                ),
+                "min_aperture_m": 0.0,
+                "max_aperture_m": 0.1,
+                "closed_positions": {
+                    joint_name: positions[0]
+                    for joint_name, positions in gripper_positions.items()
+                },
+                "open_positions": {
+                    joint_name: positions[1]
+                    for joint_name, positions in gripper_positions.items()
+                },
+            },
+        }
     )
 
 
@@ -197,6 +241,75 @@ def test_scene_and_manager_builders_preserve_public_order(
         "overhead_camera_rgb",
         "overhead_camera_depth",
     ]
+
+
+def test_manager_builders_follow_heterogeneous_robot_joint_contracts(
+    scene_config: SceneConfig,
+    environment_config: EnvironmentConfig,
+) -> None:
+    left_robot = _robot_with_joint_contract(
+        "left_fixture",
+        ("left_arm_3", "left_arm_1", "left_arm_2"),
+        {
+            "left_finger_a": (0.0, 0.04),
+            "left_finger_b": (0.03, -0.02),
+        },
+    )
+    right_robot = _robot_with_joint_contract(
+        "right_fixture",
+        tuple(f"right_arm_{index}" for index in range(7)),
+        {"right_finger": (0.05, 0.0)},
+    )
+    scene_cfg = build_scene_cfg(
+        left_robot_config=left_robot,
+        right_robot_config=right_robot,
+        scene_config=scene_config,
+        environment_config=environment_config,
+    )
+    actions = build_actions_cfg(
+        left_robot_config=left_robot,
+        right_robot_config=right_robot,
+        arm_action_mode="joint_position",
+    )
+    observations = build_observations_cfg(
+        left_robot_config=left_robot,
+        right_robot_config=right_robot,
+        scene_cfg=scene_cfg,
+    )
+
+    action_terms = [
+        actions.left_arm,
+        actions.left_gripper,
+        actions.right_arm,
+        actions.right_gripper,
+    ]
+    assert [len(term.joint_names) for term in action_terms] == [3, 2, 7, 1]
+    assert actions.left_arm.joint_names == list(
+        left_robot.kinematics.arm_joint_names
+    )
+    assert actions.right_arm.joint_names == list(
+        right_robot.kinematics.arm_joint_names
+    )
+    assert actions.left_gripper.clip == {
+        re.escape("left_finger_a"): (0.0, 0.04),
+        re.escape("left_finger_b"): (-0.02, 0.03),
+    }
+    assert actions.right_gripper.clip == {
+        re.escape("right_finger"): (0.0, 0.05),
+    }
+
+    assert observations.policy.left_arm_joint_pos.params[
+        "asset_cfg"
+    ].joint_names == list(left_robot.kinematics.arm_joint_names)
+    assert observations.policy.left_gripper_joint_pos.params[
+        "asset_cfg"
+    ].joint_names == list(left_robot.gripper.joint_names)
+    assert observations.policy.right_arm_joint_pos.params[
+        "asset_cfg"
+    ].joint_names == list(right_robot.kinematics.arm_joint_names)
+    assert observations.policy.right_gripper_joint_pos.params[
+        "asset_cfg"
+    ].joint_names == list(right_robot.gripper.joint_names)
 
 
 @pytest.mark.parametrize(
