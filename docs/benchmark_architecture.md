@@ -1,6 +1,6 @@
 # ScaleBench 当前架构
 
-本文只描述已经实现的边界。正式环境入口、Action Manager 与 policy Observation Manager 已经建立；EE 控制、Evaluator、Runner 和 Recorder 尚未实现。
+本文只描述已经实现的边界。正式环境入口、Action Manager、policy Observation Manager 与可选 Recorder Manager 已经建立；EE 控制、Evaluator 和 Runner 尚未实现。
 
 ## 当前组件
 
@@ -13,9 +13,10 @@
 | `Task` / `PlacementContext` | 定义任务身份与布局接口，并只传递布局所需的场景值。 |
 | `RigidObjectTask` | 复用刚体 metadata、seed 布局生成、校验和 JSON 导入导出。 |
 | `scale_bench.isaaclab.builders` | 将纯配置与 Task layout 转换为新的 Isaac Lab cfg。 |
-| `scale_bench.isaaclab.managers` | 声明 action、observation 和 event manager cfg。 |
+| `scale_bench.isaaclab.managers` | 声明 action、observation、event 和 recorder manager cfg。 |
 | `SortDollsBySize` | 当前唯一具体任务，声明套娃资产、instruction 和尺寸目标顺序。 |
 | `EnvironmentConfig` | 校验环境数量、间距、克隆、control decimation、reset 和 seed。 |
+| `RecordingConfig` | 显式选择数据集路径、导出模式及 recorder term。 |
 | `scale_bench.api.create_env()` | 延迟导入适配层并返回初始化后的正式环境。 |
 | `build_environment_cfg()` | 将纯配置、Task layout 来源和 manager 配置编译为原生 EnvCfg。 |
 | `ScaleBenchEnvCfg` | 适配层内部使用的完整 `ManagerBasedEnvCfg`。 |
@@ -30,7 +31,7 @@ src/scale_bench/
 ├── config/                 # 纯配置模型、loader 与本地路径解析
 ├── isaaclab/
 │   ├── builders/           # camera/robot/scene/simulation/task/environment
-│   ├── managers/           # action/observation/event cfg 声明
+│   ├── managers/           # action/observation/event/recorder cfg 声明
 │   ├── mdp/                # manager 运行时 term
 │   ├── runtime/            # 环境生命周期与初始化后 IO descriptor
 │   └── spawners/           # 项目自定义 Isaac Lab spawner
@@ -100,6 +101,8 @@ seed: 0
 调用方启动 Isaac Sim 后，通过 `scale_bench.api.create_env()` 直接获得 `ScaleBenchEnv`；native `ScaleBenchEnvCfg` 与 builder 保持为适配层内部细节。`api.py` 在顶层只导入纯配置与 Task 类型，Isaac 适配层只在函数内部延迟导入，也不创建或关闭 `AppLauncher`。环境的 `get_IO_descriptors` 由 `isaaclab/runtime/io_descriptors.py` 补充并校验，它复用 Isaac Lab 原生 action、observation、articulation 和 scene descriptor，并从已经初始化的 env、sim 与 camera sensor 计算 runtime timing，不保留第二份构建期事实来源。
 
 `tests/isaaclab/test_headless_runtime.py` 以独立子进程启动 Isaac Sim，自动化验证双环境 create/reset/step/close、实际 RGB-D 观测与 IO descriptor、`base_seed + env_id` 布局分配，以及 partial reset 只恢复指定环境。该测试通过 `pytest -m integration` 显式运行。
+
+Recorder Manager 由 `RecordingConfig` 显式启用，未传配置时保留无 active term 的原生 manager。默认数据边界包含初始相对场景状态、原始和处理后 action，以及四项关节观测；相机 RGB-D 和逐步 scene state 分别通过独立开关启用。layout seed 写入各环境的 `EpisodeData.seed`。Runner 尚未实现，因此调用方必须在 reset 前通过 `complete_episodes()` 写入 success 并导出对应环境。已有 HDF5 默认通过递增后缀分配新名称，仅在显式允许时覆盖。
 
 Task 环境在配置期按 `base_seed + env_id` 一次性生成每个环境的确定性 layout，或直接接收一个/每环境一个显式 layout。reset event 不采样、不推进 seed，只恢复本次 reset 环境原有的 layout。`info["episode"]` 返回对应的 `env_ids`、`task_id`、`instruction` 和稳定的 `layout_seeds`。
 

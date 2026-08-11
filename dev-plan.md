@@ -17,7 +17,7 @@
 - `scripts/preview_scene.py` 可以预览公共场景，也可以按 seed 或 layout 文件预览任务场景；
 - 自动化测试覆盖 Task 契约、布局复现、边界与间距、资产注册和 layout 回放。
 
-Task 层不拥有 reset、step、Action、Observation、Evaluator、Recorder 或 episode 生命周期。reset、step 与 Action/Observation Manager 已由 Env 层实现；Evaluator、Recorder 和 episode 调度仍属于后续阶段。
+Task 层不拥有 reset、step、Action、Observation、Evaluator、Recorder 或 episode 生命周期。reset、step 与 Action/Observation/Recorder Manager 已由 Env 层实现；Evaluator 和 episode 调度仍属于后续阶段。
 
 ```text
 Robot / Camera / Scene YAML
@@ -120,7 +120,7 @@ Action 同时依赖机器人语义和 policy 控制方式。当前已经接入 j
 
 这些能力不应塞入当前只负责配置期资产和布局的 `RigidObjectTask`，除非后续接口设计证明它们属于同一个稳定抽象。
 
-### 第八步：Episode Runner 与 Recorder
+### 第八步：Episode Runner 与 Recorder（Recorder 第一版已完成）
 
 Runner 统一执行：
 
@@ -128,7 +128,7 @@ Runner 统一执行：
 reset → observe → policy.act → apply_action → step → evaluate → record
 ```
 
-并负责 episode 生命周期、timeout、结果汇总和批量运行。Recorder 只记录已定义的数据边界，不反向影响 Policy 或 Evaluator。
+并负责 episode 生命周期、timeout、结果汇总和批量运行。Recorder 第一版已通过原生 Recorder Manager 接入；Runner 尚未实现。Recorder 只记录已定义的数据边界，不反向影响 Policy 或 Evaluator。
 
 ## 长期架构原则
 

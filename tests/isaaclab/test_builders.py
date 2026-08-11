@@ -12,6 +12,7 @@ import yaml
 
 from scale_bench.config.models.camera import CameraConfig
 from scale_bench.config.models.environment import EnvironmentConfig
+from scale_bench.config.models.recording import RecordingConfig
 from scale_bench.config.models.robot import RobotConfig
 from scale_bench.config.models.scene import SceneConfig
 from scale_bench.config.models.simulation import SimulationConfig
@@ -23,6 +24,7 @@ from scale_bench.isaaclab.builders.scene import build_scene_cfg
 from scale_bench.isaaclab.builders.simulation import build_simulation_cfg
 from scale_bench.isaaclab.managers.actions import build_actions_cfg
 from scale_bench.isaaclab.managers.observations import build_observations_cfg
+from scale_bench.isaaclab.managers.recorders import build_recorders_cfg
 from scale_bench.tasks.common.layout import AssetPlacement, TaskLayout
 from scale_bench.tasks.common.placement import PlacementContext
 from scale_bench.tasks.common.rigid_object import (
@@ -241,6 +243,158 @@ def test_scene_and_manager_builders_preserve_public_order(
         "overhead_camera_rgb",
         "overhead_camera_depth",
     ]
+
+
+def test_recorder_builder_is_opt_in_and_excludes_cameras_by_default(
+    tmp_path: Path,
+    robot_config: RobotConfig,
+    scene_config: SceneConfig,
+    environment_config: EnvironmentConfig,
+) -> None:
+    from isaaclab.managers import DatasetExportMode
+
+    scene_cfg = build_scene_cfg(
+        left_robot_config=robot_config,
+        right_robot_config=robot_config,
+        scene_config=scene_config,
+        environment_config=environment_config,
+    )
+    observations = build_observations_cfg(
+        left_robot_config=robot_config,
+        right_robot_config=robot_config,
+        scene_cfg=scene_cfg,
+    )
+
+    disabled = build_recorders_cfg(None, observations)
+    assert disabled.dataset_export_mode == DatasetExportMode.EXPORT_NONE
+
+    enabled = build_recorders_cfg(
+        RecordingConfig(
+            output_dir=tmp_path,
+            dataset_name="rollout",
+        ),
+        observations,
+    )
+    assert enabled.dataset_export_dir_path == str(tmp_path.resolve())
+    assert enabled.dataset_filename == "rollout"
+    assert enabled.export_in_record_pre_reset is False
+    assert enabled.export_in_close is False
+    assert enabled.policy_observations.observation_names == (
+        "left_arm_joint_pos",
+        "left_gripper_joint_pos",
+        "right_arm_joint_pos",
+        "right_gripper_joint_pos",
+    )
+
+    with_cameras = build_recorders_cfg(
+        RecordingConfig(
+            output_dir=tmp_path,
+            dataset_name="rollout_with_cameras",
+            record_camera_observations=True,
+        ),
+        observations,
+    )
+    assert with_cameras.policy_observations.observation_names == tuple(
+        name
+        for name in vars(observations.policy)
+        if name.startswith(("left_", "right_", "overhead_"))
+    )
+
+    cameras_only = build_recorders_cfg(
+        RecordingConfig(
+            output_dir=tmp_path,
+            dataset_name="rollout_cameras_only",
+            record_joint_observations=False,
+            record_camera_observations=True,
+        ),
+        observations,
+    )
+    assert cameras_only.policy_observations.observation_names == tuple(
+        name
+        for name in vars(observations.policy)
+        if "_camera_" in name
+    )
+
+
+def test_recorder_builder_allocates_next_available_dataset_name(
+    tmp_path: Path,
+    robot_config: RobotConfig,
+    scene_config: SceneConfig,
+    environment_config: EnvironmentConfig,
+) -> None:
+    scene_cfg = build_scene_cfg(
+        left_robot_config=robot_config,
+        right_robot_config=robot_config,
+        scene_config=scene_config,
+        environment_config=environment_config,
+    )
+    observations = build_observations_cfg(
+        left_robot_config=robot_config,
+        right_robot_config=robot_config,
+        scene_cfg=scene_cfg,
+    )
+    (tmp_path / "rollout.hdf5").touch()
+
+    cfg = build_recorders_cfg(
+        RecordingConfig(
+            output_dir=tmp_path,
+            dataset_name="rollout",
+        ),
+        observations,
+    )
+    assert cfg.dataset_filename == "rollout_1"
+
+    (tmp_path / "rollout_1.hdf5").touch()
+    cfg = build_recorders_cfg(
+        RecordingConfig(
+            output_dir=tmp_path,
+            dataset_name="rollout",
+        ),
+        observations,
+    )
+    assert cfg.dataset_filename == "rollout_2"
+
+    cfg = build_recorders_cfg(
+        RecordingConfig(
+            output_dir=tmp_path,
+            dataset_name="rollout",
+            overwrite_existing=True,
+        ),
+        observations,
+    )
+    assert cfg.dataset_filename == "rollout"
+
+
+def test_recorder_builder_allocates_paired_success_failed_names(
+    tmp_path: Path,
+    robot_config: RobotConfig,
+    scene_config: SceneConfig,
+    environment_config: EnvironmentConfig,
+) -> None:
+    scene_cfg = build_scene_cfg(
+        left_robot_config=robot_config,
+        right_robot_config=robot_config,
+        scene_config=scene_config,
+        environment_config=environment_config,
+    )
+    observations = build_observations_cfg(
+        left_robot_config=robot_config,
+        right_robot_config=robot_config,
+        scene_cfg=scene_cfg,
+    )
+    (tmp_path / "rollout.hdf5").touch()
+    (tmp_path / "rollout_1_failed.hdf5").touch()
+
+    cfg = build_recorders_cfg(
+        RecordingConfig(
+            output_dir=tmp_path,
+            dataset_name="rollout",
+            export_mode="succeeded_failed_separate",
+        ),
+        observations,
+    )
+
+    assert cfg.dataset_filename == "rollout_2"
 
 
 def test_manager_builders_follow_heterogeneous_robot_joint_contracts(

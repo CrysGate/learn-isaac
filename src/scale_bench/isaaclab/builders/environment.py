@@ -15,6 +15,7 @@ from isaaclab.sim import SimulationCfg
 from isaaclab.utils.configclass import configclass
 
 from scale_bench.config.models.environment import EnvironmentConfig
+from scale_bench.config.models.recording import RecordingConfig
 from scale_bench.config.models.robot import RobotConfig
 from scale_bench.config.models.scene import SceneConfig
 from scale_bench.config.models.simulation import SimulationConfig
@@ -31,6 +32,7 @@ from scale_bench.isaaclab.managers.observations import (
     ObservationsCfg,
     build_observations_cfg,
 )
+from scale_bench.isaaclab.managers.recorders import build_recorders_cfg
 from scale_bench.isaaclab.mdp.events import ResetTaskLayout
 from scale_bench.tasks.common.layout import TaskLayout
 from scale_bench.tasks.common.placement import PlacementContext
@@ -57,6 +59,7 @@ def build_environment_cfg(
     scene_config: SceneConfig,
     simulation_config: SimulationConfig,
     environment_config: EnvironmentConfig,
+    recording_config: RecordingConfig | None = None,
     task: Task | None = None,
     task_layout_seed: int | None = None,
     task_layouts: Sequence[TaskLayout] | None = None,
@@ -108,6 +111,11 @@ def build_environment_cfg(
             },
         )
 
+    observations = build_observations_cfg(
+        left_robot_config=left_robot_config,
+        right_robot_config=right_robot_config,
+        scene_cfg=scene_cfg,
+    )
     cfg = ScaleBenchEnvCfg(
         scene=scene_cfg,
         sim=build_simulation_cfg(simulation_config, device=device),
@@ -118,11 +126,8 @@ def build_environment_cfg(
             right_robot_config=right_robot_config,
             arm_action_mode=environment_config.arm_action_mode,
         ),
-        observations=build_observations_cfg(
-            left_robot_config=left_robot_config,
-            right_robot_config=right_robot_config,
-            scene_cfg=scene_cfg,
-        ),
+        observations=observations,
+        recorders=build_recorders_cfg(recording_config, observations),
         seed=environment_config.seed,
         num_rerenders_on_reset=environment_config.num_rerenders_on_reset,
         wait_for_textures=environment_config.wait_for_textures,

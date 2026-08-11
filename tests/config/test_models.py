@@ -9,6 +9,7 @@ from pydantic import ValidationError
 
 from scale_bench.config.models.camera import CameraConfig
 from scale_bench.config.models.environment import EnvironmentConfig
+from scale_bench.config.models.recording import RecordingConfig
 from scale_bench.config.models.robot import RobotConfig
 from scale_bench.config.models.scene import SceneConfig
 from scale_bench.config.models.simulation import SimulationConfig
@@ -113,6 +114,10 @@ def _scene_data() -> dict:
         (SceneConfig, _scene_data()),
         (SimulationConfig, {}),
         (EnvironmentConfig, {}),
+        (
+            RecordingConfig,
+            {"output_dir": "datasets", "dataset_name": "rollout"},
+        ),
     ],
 )
 def test_models_are_frozen_and_forbid_extra_fields(model_type, data) -> None:
@@ -133,6 +138,7 @@ def test_models_are_frozen_and_forbid_extra_fields(model_type, data) -> None:
         SceneConfig,
         SimulationConfig,
         EnvironmentConfig,
+        RecordingConfig,
     ],
 )
 def test_pure_models_do_not_load_files_or_build_native_configs(model_type) -> None:
@@ -197,6 +203,29 @@ def test_environment_owns_scene_cloning_settings() -> None:
     assert config.env_spacing_m == 3.0
     assert config.replicate_physics is False
     assert config.clone_in_fabric is True
+
+
+def test_recording_requires_an_active_term() -> None:
+    disabled_terms = {
+        "record_initial_state": False,
+        "record_actions": False,
+        "record_processed_actions": False,
+        "record_joint_observations": False,
+        "record_camera_observations": False,
+        "record_scene_state": False,
+    }
+    with pytest.raises(ValidationError, match="at least one recorder term"):
+        RecordingConfig(
+            output_dir="datasets",
+            dataset_name="rollout",
+            **disabled_terms,
+        )
+
+def test_recording_rejects_dataset_names_containing_paths() -> None:
+    with pytest.raises(ValidationError, match="dataset_name"):
+        RecordingConfig(output_dir="datasets", dataset_name="nested/rollout")
+    with pytest.raises(ValidationError, match="must not include"):
+        RecordingConfig(output_dir="datasets", dataset_name="rollout.hdf5")
 
 
 def test_scene_validates_ranges_and_quaternions() -> None:

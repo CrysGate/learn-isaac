@@ -21,7 +21,7 @@ ScaleBench keeps robot semantics, camera, scene, task, simulation, and environme
 - **A runnable scene preview** — launch the default scene with placement-area and camera-frustum overlays, or run a short headless smoke test.
 
 > [!NOTE]
-> Joint-space Action and policy Observation Manager terms are connected. End-effector control, evaluators, episode orchestration, recording, and benchmark reporting remain future work.
+> Joint-space Action, policy Observation, and opt-in Recorder Manager terms are connected. End-effector control, evaluators, episode orchestration, and benchmark reporting remain future work.
 
 ## Architecture
 
@@ -149,11 +149,12 @@ Run `uv run python scripts/preview_scene.py --help` for all Isaac Lab launcher o
 
 ### Configuration
 
-[`load_config()`](src/scale_bench/config/loader.py) is the only YAML/JSON loading boundary. The five immutable pure-Python models contain data and local validation only:
+[`load_config()`](src/scale_bench/config/loader.py) is the only YAML/JSON loading boundary. The six immutable pure-Python models contain data and local validation only:
 
 ```python
 from scale_bench.config.loader import load_config
 from scale_bench.config.models.environment import EnvironmentConfig
+from scale_bench.config.models.recording import RecordingConfig
 from scale_bench.config.models.robot import RobotConfig
 from scale_bench.config.models.scene import SceneConfig
 from scale_bench.config.models.simulation import SimulationConfig
@@ -162,6 +163,10 @@ robot = load_config("configs/robots/piper.yml", RobotConfig, asset_root=".")
 scene = load_config("configs/scene/default.yml", SceneConfig, asset_root=".")
 sim = load_config("configs/sim/default.yml", SimulationConfig)
 environment = load_config("configs/envs/default.yml", EnvironmentConfig)
+recording = RecordingConfig(
+    output_dir="outputs/datasets",
+    dataset_name="sort_dolls_seed_42",
+)
 ```
 
 Models forbid unknown fields, are frozen, reject non-finite numeric values, and do not read files or build Isaac Lab objects. Configuration references resolve relative to the file containing them. Asset references resolve relative to `asset_root` when supplied, otherwise relative to the containing file. Absolute paths are preserved, and missing local assets are reported with the source path and field location. Only local configuration and asset paths are supported. `num_envs`, spacing, cloning, control, and reset settings belong to `EnvironmentConfig`, not `SceneConfig`.
@@ -186,17 +191,22 @@ env = create_env(
     scene_config=scene,
     simulation_config=sim,
     environment_config=environment,
+    recording_config=recording,
     task=task,
     base_seed=42,
 )
 try:
     observation, info = env.reset()
+    # Run the policy/evaluator loop, then export before resetting these envs.
+    env.complete_episodes(success=[True] * env.num_envs)
 finally:
     env.close()
     simulation_app.close()
 ```
 
 `ScaleBenchEnv` subclasses Isaac Lab's `ManagerBasedEnv` and is the only owner of `SimulationContext`, `InteractiveScene`, reset, step, and cleanup. `AppLauncher` and its application remain caller-owned. Runtime IO metadata is derived from initialized managers and sensors in `isaaclab/runtime/io_descriptors.py`. With `base_seed`, environment `i` receives the layout generated from `base_seed + i` once during configuration; every full or partial reset restores that same layout. Alternatively, `layouts` accepts either one layout to broadcast or exactly `num_envs` layouts. `info["episode"]` reports affected environment IDs and stable layout seeds.
+
+Recording is opt-in through `RecordingConfig`. The default recording terms store the initial relative scene state, raw and processed actions, and joint observations in HDF5. Camera RGB-D is independently enabled with `record_camera_observations=True`; per-step scene truth also requires explicit opt-in. `complete_episodes()` writes success and exports selected environment buffers; call it before their next reset. With `overwrite_existing=False`, occupied names are advanced automatically (`rollout.hdf5`, `rollout_1.hdf5`, ...); `overwrite_existing=True` explicitly reuses the requested name.
 
 Native camera, robot, scene, simulation, task, manager, and environment cfg implementations live under [`scale_bench.isaaclab`](src/scale_bench/isaaclab). The pre-refactor `envs`, `scenes`, `robots`, `sensors`, and `sim` import paths have been removed; application code uses the pure configuration models and `scale_bench.api`.
 

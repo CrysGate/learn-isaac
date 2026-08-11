@@ -6,6 +6,7 @@ from collections.abc import Sequence
 from typing import Any
 
 from scale_bench.config.models.environment import EnvironmentConfig
+from scale_bench.config.models.recording import RecordingConfig
 from scale_bench.config.models.robot import RobotConfig
 from scale_bench.config.models.scene import SceneConfig
 from scale_bench.config.models.simulation import SimulationConfig
@@ -20,6 +21,7 @@ def create_env(
     scene_config: SceneConfig,
     simulation_config: SimulationConfig,
     environment_config: EnvironmentConfig,
+    recording_config: RecordingConfig | None = None,
     task: Task | None = None,
     base_seed: int | None = None,
     layouts: Sequence[TaskLayout] | None = None,
@@ -39,6 +41,7 @@ def create_env(
         scene_config=scene_config,
         simulation_config=simulation_config,
         environment_config=environment_config,
+        recording_config=recording_config,
         task=task,
         task_layout_seed=base_seed,
         task_layouts=layouts,

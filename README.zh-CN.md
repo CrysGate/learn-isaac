@@ -21,7 +21,7 @@ ScaleBench 是一组配置优先的 Isaac Lab 基础组件，用于构建尺度�
 - **可直接运行的场景预览**：既可以在 Isaac Sim 中查看放置区域与相机视锥，也可以执行短时间无界面冒烟验证。
 
 > [!NOTE]
-> 关节空间 Action 与 policy Observation Manager term 已接入。末端控制、Evaluator、episode 调度、数据记录和 benchmark 报告仍留待后续实现。
+> 关节空间 Action、policy Observation 与可选 Recorder Manager term 已接入。末端控制、Evaluator、episode 调度和 benchmark 报告仍留待后续实现。
 
 ## 架构
 
@@ -149,11 +149,12 @@ uv run python scripts/preview_scene.py \
 
 ### 配置层
 
-[`load_config()`](src/scale_bench/config/loader.py) 是唯一的 YAML/JSON 加载边界。五类不可变纯 Python 模型只包含数据和局部校验：
+[`load_config()`](src/scale_bench/config/loader.py) 是唯一的 YAML/JSON 加载边界。六类不可变纯 Python 模型只包含数据和局部校验：
 
 ```python
 from scale_bench.config.loader import load_config
 from scale_bench.config.models.environment import EnvironmentConfig
+from scale_bench.config.models.recording import RecordingConfig
 from scale_bench.config.models.robot import RobotConfig
 from scale_bench.config.models.scene import SceneConfig
 from scale_bench.config.models.simulation import SimulationConfig
@@ -162,6 +163,10 @@ robot = load_config("configs/robots/piper.yml", RobotConfig, asset_root=".")
 scene = load_config("configs/scene/default.yml", SceneConfig, asset_root=".")
 sim = load_config("configs/sim/default.yml", SimulationConfig)
 environment = load_config("configs/envs/default.yml", EnvironmentConfig)
+recording = RecordingConfig(
+    output_dir="outputs/datasets",
+    dataset_name="sort_dolls_seed_42",
+)
 ```
 
 模型禁止未知字段、冻结属性、拒绝非有限数值，并且不读取文件或构造 Isaac Lab 对象。配置引用相对于包含它的配置文件解析；资产引用在提供 `asset_root` 时相对于该目录解析，否则相对于配置文件目录解析。绝对路径保持不变，本地资产缺失时错误会包含源文件与字段位置。当前只支持本地配置与资产路径。`num_envs`、间距、克隆、控制和 reset 设置属于 `EnvironmentConfig`，不再属于 `SceneConfig`。
@@ -186,17 +191,22 @@ env = create_env(
     scene_config=scene,
     simulation_config=sim,
     environment_config=environment,
+    recording_config=recording,
     task=task,
     base_seed=42,
 )
 try:
     observation, info = env.reset()
+    # 执行 policy/evaluator 循环，并在再次 reset 前导出这些环境。
+    env.complete_episodes(success=[True] * env.num_envs)
 finally:
     env.close()
     simulation_app.close()
 ```
 
 `ScaleBenchEnv` 继承 Isaac Lab 的 `ManagerBasedEnv`，是 `SimulationContext`、`InteractiveScene`、reset、step 和清理操作的唯一所有者；`AppLauncher` 及其 application 仍由调用方持有。runtime IO 元数据由 `isaaclab/runtime/io_descriptors.py` 从初始化后的 manager 和 sensor 计算。使用 `base_seed` 时，环境 `i` 在配置期一次性获得由 `base_seed + i` 生成的布局，之后的全量或局部 reset 都恢复该布局。也可以通过 `layouts` 传入一个布局并广播，或传入恰好 `num_envs` 个布局。`info["episode"]` 返回受影响的环境 ID 及稳定 layout seed。
+
+数据记录通过 `RecordingConfig` 显式启用。默认 term 将初始相对场景状态、原始与处理后 action，以及关节观测写入 HDF5；相机 RGB-D 通过 `record_camera_observations=True` 独立开启，逐步场景真值也必须显式开启。`complete_episodes()` 写入 success 并导出指定环境的 buffer，必须在这些环境下一次 reset 前调用。`overwrite_existing=False` 时会自动递增已占用的名称（`rollout.hdf5`、`rollout_1.hdf5`……）；`overwrite_existing=True` 才会明确复用请求的名称。
 
 Camera、robot、scene、simulation、task、manager 和 environment 的原生 cfg 实现统一位于 [`scale_bench.isaaclab`](src/scale_bench/isaaclab)。重构前的 `envs`、`scenes`、`robots`、`sensors` 和 `sim` 导入路径已删除；应用代码只使用纯配置模型和 `scale_bench.api`。
 

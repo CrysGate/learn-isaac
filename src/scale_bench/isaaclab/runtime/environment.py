@@ -80,10 +80,80 @@ class ScaleBenchEnv(ManagerBasedEnv):
             options=options,
         )
         if self._task_layout_reset is not None:
-            info["episode"] = self._task_layout_reset.episode_info(
+            episode_info = self._task_layout_reset.episode_info(
                 resolved_env_ids
             )
+            info["episode"] = episode_info
+            if self.recorder_manager.active_terms:
+                for env_id, layout_seed in zip(
+                    episode_info["env_ids"],
+                    episode_info["layout_seeds"],
+                    strict=True,
+                ):
+                    self.recorder_manager.get_episode(env_id).seed = layout_seed
         return observation, info
+
+    def complete_episodes(
+        self,
+        *,
+        success: Sequence[bool] | torch.Tensor,
+        env_ids: Sequence[int] | torch.Tensor | None = None,
+        demo_ids: Sequence[int] | None = None,
+    ) -> None:
+        """Mark and export completed episodes before their next reset."""
+
+        if not self.recorder_manager.active_terms:
+            raise RuntimeError("episode recording is not enabled")
+        resolved_env_ids = resolve_env_ids(env_ids, self.num_envs)
+        success_tensor = _resolve_success_values(
+            success,
+            count=len(resolved_env_ids),
+            device=self.device,
+        )
+        env_id_tensor = torch.tensor(
+            resolved_env_ids,
+            device=self.device,
+            dtype=torch.int32,
+        )
+        self.recorder_manager.set_success_to_episodes(
+            env_id_tensor,
+            success_tensor,
+        )
+        self.recorder_manager.export_episodes(env_id_tensor, demo_ids=demo_ids)
+
+    def close(self) -> None:
+        """Close dataset handles deterministically, then release the simulation."""
+
+        try:
+            if not self._is_closed and hasattr(self, "recorder_manager"):
+                self.recorder_manager.close()
+        finally:
+            super().close()
+
+
+def _resolve_success_values(
+    success: Sequence[bool] | torch.Tensor,
+    *,
+    count: int,
+    device: str,
+) -> torch.Tensor:
+    if isinstance(success, torch.Tensor):
+        if success.dtype != torch.bool:
+            raise TypeError("success must contain boolean values")
+        if success.ndim != 1:
+            raise ValueError("success must be one-dimensional")
+        values = success.to(device=device)
+    else:
+        raw_values = tuple(success)
+        if any(type(value) is not bool for value in raw_values):
+            raise TypeError("success must contain boolean values")
+        values = torch.tensor(raw_values, device=device, dtype=torch.bool)
+    if values.shape != (count,):
+        raise ValueError(
+            f"success must contain one value per environment ({count}), "
+            f"got shape {tuple(values.shape)}"
+        )
+    return values
 
 
 __all__ = ["ScaleBenchEnv"]

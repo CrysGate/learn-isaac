@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import sys
+import tempfile
 import traceback
 from pathlib import Path
 
@@ -16,6 +17,7 @@ def main(asset_root: Path) -> None:
     from scale_bench.api import create_env
     from scale_bench.config.loader import load_config
     from scale_bench.config.models.environment import EnvironmentConfig
+    from scale_bench.config.models.recording import RecordingConfig
     from scale_bench.config.models.robot import RobotConfig
     from scale_bench.config.models.scene import SceneConfig
     from scale_bench.config.models.simulation import SimulationConfig
@@ -56,6 +58,8 @@ def main(asset_root: Path) -> None:
     app_launcher = AppLauncher(headless=True, enable_cameras=True)
     simulation_app = app_launcher.app
     env = None
+    recording_tmp = tempfile.TemporaryDirectory(prefix="scale_bench_recording_")
+    dataset_path = Path(recording_tmp.name) / "runtime_smoke.hdf5"
     succeeded = False
     try:
         import torch
@@ -66,6 +70,10 @@ def main(asset_root: Path) -> None:
             scene_config=scene,
             simulation_config=simulation,
             environment_config=environment,
+            recording_config=RecordingConfig(
+                output_dir=recording_tmp.name,
+                dataset_name="runtime_smoke",
+            ),
             task=task,
             base_seed=41,
             num_envs=2,
@@ -157,6 +165,14 @@ def main(asset_root: Path) -> None:
             atol=1.0e-4,
             rtol=0.0,
         )
+        env.complete_episodes(
+            env_ids=(0, 1),
+            success=(True, False),
+            demo_ids=(101, 102),
+        )
+        env.close()
+        env = None
+        _assert_recorded_dataset(dataset_path)
         succeeded = True
     except BaseException:
         traceback.print_exc()
@@ -167,6 +183,7 @@ def main(asset_root: Path) -> None:
         if succeeded:
             print("SCALE_BENCH_HEADLESS_RUNTIME_OK", flush=True)
         simulation_app.close()
+        recording_tmp.cleanup()
 
 
 def _assert_policy_observation(
@@ -279,6 +296,31 @@ def _assert_task_layouts(env, layouts: tuple, torch) -> None:
         expected[:, :3] += env.scene.env_origins
         actual = env.scene[asset_name].data.root_pose_w.torch
         torch.testing.assert_close(actual, expected)
+
+
+def _assert_recorded_dataset(dataset_path: Path) -> None:
+    import h5py
+
+    assert dataset_path.is_file()
+    with h5py.File(dataset_path, "r") as dataset:
+        assert set(dataset["data"]) == {"demo_101", "demo_102"}
+        for demo_id, seed, success in (
+            (101, 41, True),
+            (102, 42, False),
+        ):
+            episode = dataset[f"data/demo_{demo_id}"]
+            assert episode.attrs["seed"] == seed
+            assert bool(episode.attrs["success"]) is success
+            assert episode.attrs["num_samples"] == 4
+            assert episode["actions"].shape == (4, 14)
+            assert episode["processed_actions"].shape == (4, 14)
+            assert set(episode["obs"]) == {
+                "left_arm_joint_pos",
+                "left_gripper_joint_pos",
+                "right_arm_joint_pos",
+                "right_gripper_joint_pos",
+            }
+            assert episode["obs/left_arm_joint_pos"].shape == (4, 6)
 
 
 if __name__ == "__main__":

@@ -181,3 +181,108 @@ def test_resolve_env_ids_rejects_invalid_shape_range_and_duplicates() -> None:
         resolve_env_ids([-1], num_envs=2)
     with pytest.raises(ValueError, match="duplicates"):
         resolve_env_ids([1, 1], num_envs=2)
+
+
+class _FakeRecorderManager:
+    active_terms = ["actions"]
+
+    def __init__(self) -> None:
+        self.success_call = None
+        self.export_call = None
+
+    def set_success_to_episodes(self, env_ids, success) -> None:
+        self.success_call = (env_ids.clone(), success.clone())
+
+    def export_episodes(self, env_ids, demo_ids=None) -> None:
+        self.export_call = (env_ids.clone(), demo_ids)
+
+
+def test_complete_episodes_marks_success_before_export() -> None:
+    env = _environment_for_action_validation()
+    recorder = _FakeRecorderManager()
+    env.recorder_manager = recorder
+
+    env.complete_episodes(
+        env_ids=(1, 0),
+        success=(True, False),
+        demo_ids=(7, 8),
+    )
+
+    success_env_ids, success_values = recorder.success_call
+    export_env_ids, demo_ids = recorder.export_call
+    torch.testing.assert_close(
+        success_env_ids,
+        torch.tensor([1, 0], dtype=torch.int32),
+    )
+    torch.testing.assert_close(success_values, torch.tensor([True, False]))
+    torch.testing.assert_close(
+        export_env_ids,
+        torch.tensor([1, 0], dtype=torch.int32),
+    )
+    assert demo_ids == (7, 8)
+
+
+def test_complete_episodes_validates_recording_and_success_contract() -> None:
+    env = _environment_for_action_validation()
+    env.recorder_manager = SimpleNamespace(active_terms=[])
+    with pytest.raises(RuntimeError, match="not enabled"):
+        env.complete_episodes(success=(True, True))
+
+    env.recorder_manager = _FakeRecorderManager()
+    with pytest.raises(TypeError, match="boolean"):
+        env.complete_episodes(success=(1, 0))
+    with pytest.raises(ValueError, match="one value per environment"):
+        env.complete_episodes(success=(True,))
+
+
+def test_reset_attaches_layout_seed_to_recorded_episode(monkeypatch) -> None:
+    env = _environment_for_action_validation()
+    episodes = {0: SimpleNamespace(seed=None), 1: SimpleNamespace(seed=None)}
+    env.recorder_manager = SimpleNamespace(
+        active_terms=["initial_state"],
+        get_episode=lambda env_id: episodes[env_id],
+    )
+    env._task_layout_reset = SimpleNamespace(
+        episode_info=lambda env_ids: {
+            "env_ids": (1,),
+            "task_id": "fixture",
+            "instruction": "Move the object.",
+            "layout_seeds": (42,),
+        }
+    )
+    monkeypatch.setattr(
+        ManagerBasedEnv,
+        "reset",
+        lambda self, **kwargs: ({"policy": {}}, {}),
+    )
+
+    _, info = env.reset(env_ids=(1,))
+
+    assert info["episode"]["layout_seeds"] == (42,)
+    assert episodes[0].seed is None
+    assert episodes[1].seed == 42
+
+
+def test_close_releases_parent_resources_when_recorder_close_fails(
+    monkeypatch,
+) -> None:
+    env = _environment_for_action_validation()
+    env._is_closed = False
+
+    def fail_close() -> None:
+        raise OSError("dataset close failed")
+
+    env.recorder_manager = SimpleNamespace(close=fail_close)
+    parent_closed = False
+
+    def close_parent(self) -> None:
+        nonlocal parent_closed
+        parent_closed = True
+        self._is_closed = True
+
+    monkeypatch.setattr(ManagerBasedEnv, "close", close_parent)
+
+    with pytest.raises(OSError, match="dataset close failed"):
+        env.close()
+
+    assert parent_closed is True
