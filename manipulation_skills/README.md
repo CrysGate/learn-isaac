@@ -26,7 +26,7 @@ object center. An explicit candidate is a TCP pose in the object's frame.
 Run the included environment example with:
 
 ```bash
-uv run python manipulation_skills/demo_piper_pick.py --viz none
+uv run python manipulation_skills/demo_piper_pick.py --robot right
 ```
 
 The first version uses differential IK and segmented Cartesian motion. It does
