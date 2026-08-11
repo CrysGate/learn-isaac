@@ -10,12 +10,12 @@
 
 当前 Task 层只负责配置期的任务信息、资产和初始布局：
 
-- `TaskDefinition` 提供 instruction、确定性 seed 布局、layout JSON 导入导出、放置校验和刚体配置构建；
+- `RigidObjectTask` 提供 instruction、确定性 seed 布局、layout JSON 导入导出和放置校验；
 - `SortDollsBySize` 声明五个套娃资产和从小到大的目标顺序；
 - `resolve_layout()` 生成或读取并校验 `TaskLayout`，文件导出由调用方显式执行；
-- `add_assets_to_scene()` 接收已解析 layout，并向公共 `InteractiveSceneCfg` 增加具名 `RigidObjectCfg` 字段；
+- `RigidObjectTaskBuilder` 接收已解析 layout，并由 environment builder 向公共 `InteractiveSceneCfg` 增加具名 `RigidObjectCfg` 字段；
 - `scripts/preview_scene.py` 可以预览公共场景，也可以按 seed 或 layout 文件预览任务场景；
-- 当前仓库暂未保留自动化测试；Task 契约、布局复现、边界与间距、资产注册和 layout 回放需要在后续补回测试覆盖。
+- 自动化测试覆盖 Task 契约、布局复现、边界与间距、资产注册和 layout 回放。
 
 Task 层不拥有 reset、step、Action、Observation、Evaluator、Recorder 或 episode 生命周期。reset、step 与 Action/Observation Manager 已由 Env 层实现；Evaluator、Recorder 和 episode 调度仍属于后续阶段。
 
@@ -30,7 +30,7 @@ Robot / Camera / Scene YAML
              │     Task YAML + seed/layout
              │              │
              │              ▼
-             │       TaskDefinition
+             │       RigidObjectTask
              │              │
              └──────┬───────┘
                     ▼
@@ -47,15 +47,16 @@ Robot / Camera / Scene YAML
 本阶段已经完成：
 
 - `configs/sim/default.yml` 只管理 device、physics timestep、gravity、render interval、渲染质量，以及一个与操作稳定性直接相关的 PhysX 覆盖项；
-- `SimConfig` 在启动 Isaac Sim 前完成严格校验，并构建全新的原生 `SimulationCfg`；
+- `SimulationConfig` 在启动 Isaac Sim 前完成严格校验，由 adapter builder 构建全新的原生 `SimulationCfg`；
 - 默认 preset 使用 120 Hz physics 和 30 Hz render；
-- `configs/envs/default.yml` 与 `EnvRuntimeConfig` 管理 control decimation、reset 重渲染、纹理等待和环境 seed；
-- `create_env_cfg()` 组合 RobotProfile、SceneConfig、Task layout 来源、SimConfig 和 manager 配置，直接返回原生 cfg；
-- `ScaleBenchEnvCfg` 提供原生 `ManagerBasedEnvCfg`，并正式接入由 RobotProfile 和 CameraProfile 编译得到的 Action/Observation manager term；
+- `configs/envs/default.yml` 与 `EnvironmentConfig` 管理 control decimation、reset 重渲染、纹理等待和环境 seed；
+- `scale_bench.api.create_env()` 组合 RobotConfig、SceneConfig、Task layout 来源、SimulationConfig 和 manager 配置并返回正式环境；
+- 内部 `ScaleBenchEnvCfg` 提供原生 `ManagerBasedEnvCfg`，并正式接入由 RobotConfig 和 CameraConfig 编译得到的 Action/Observation manager term；
 - `ScaleBenchEnv` 是 `SimulationContext`、Scene、reset、step 和 close 的唯一所有者，并从实际运行对象生成 runtime IO metadata；
 - 配置期为每个 `env_id` 准备固定的初始 layout，reset Event term 只负责恢复；
 - builder 在启动前校验 physics、render、control 和 camera update period 同步；
 - `scripts/preview_scene.py` 已改用正式环境入口，不再直接创建或推进 `SimulationContext`；
+- `pytest -m integration` 在隔离子进程中覆盖双环境生命周期、渲染观测、runtime descriptor、布局 seed 分配和 partial reset；
 - 其余材质、Fabric、日志、solver iteration 和 GPU buffer 参数保持 Isaac Lab 当前版本的原生默认值，不在项目中复制整套后端配置；
 - sim YAML 不管理 `num_envs`、环境间距或 task layout，这些仍由 Scene/Task 各自拥有。
 
@@ -63,8 +64,8 @@ Robot / Camera / Scene YAML
 
 ```text
 Scene / Task / Robot ─────────────┐
-Sim YAML ──► SimConfig ───────────┤
-Env YAML ──► EnvRuntimeConfig ────┼─► ScaleBenchEnvCfg ─► ScaleBenchEnv
+Sim YAML ──► SimulationConfig ─────┤
+Env YAML ──► EnvironmentConfig ───┼─► create_env() ─► ScaleBenchEnv
 manager 配置 ─────────────────────┘
 ```
 
@@ -99,7 +100,7 @@ Action 同时依赖机器人语义和 policy 控制方式。当前已经接入 j
 - EE pose；
 - EE delta pose。
 
-当前 Action Manager 按 `left_arm | left_gripper | right_arm | right_gripper` 组织动态维度的绝对关节位置 term，并保留 RobotProfile 中的关节顺序。控制关节、末端 link、TCP 和夹爪语义来自 `RobotProfile`，不在 Task 或 policy 适配代码中按机器人名称分支。
+当前 Action Manager 按 `left_arm | left_gripper | right_arm | right_gripper` 组织动态维度的绝对关节位置 term，并保留 `RobotConfig` 中的关节顺序。控制关节、末端 link、TCP 和夹爪语义来自 `RobotConfig`，不在 Task 或 policy 适配代码中按机器人名称分支。
 
 ### 第六步：Observation 数据边界（已完成第一版）
 
@@ -117,7 +118,7 @@ Action 同时依赖机器人语义和 policy 控制方式。当前已经接入 j
 - 指标计算；
 - Task 与 Evaluator 的绑定方式。
 
-这些能力不应塞入当前只负责配置期资产和布局的 `TaskDefinition`，除非后续接口设计证明它们属于同一个稳定抽象。
+这些能力不应塞入当前只负责配置期资产和布局的 `RigidObjectTask`，除非后续接口设计证明它们属于同一个稳定抽象。
 
 ### 第八步：Episode Runner 与 Recorder
 

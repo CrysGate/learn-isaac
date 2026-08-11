@@ -12,7 +12,8 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from scale_bench.sim import SimConfig
+from scale_bench.config.loader import load_config
+from scale_bench.config.models.simulation import SimulationConfig
 
 from isaaclab.app import AppLauncher
 
@@ -34,7 +35,10 @@ if args.lift_distance <= 0.0:
 if args.max_steps <= 0:
     parser.error("--max-steps must be positive")
 
-sim_config = SimConfig.load()
+sim_config = load_config(
+    PROJECT_ROOT / "configs/sim/default.yml",
+    SimulationConfig,
+)
 if args.device is None:
     args.device = sim_config.device
 if args.rendering_mode is None:
@@ -44,29 +48,48 @@ app_launcher = AppLauncher(args)
 simulation_app = app_launcher.app
 
 from manipulation_skills import PickConfig, pick
-from scale_bench.envs import EnvRuntimeConfig, ScaleBenchEnv, create_env_cfg
-from scale_bench.robots import RobotProfile
-from scale_bench.scenes import SceneConfig
-from scale_bench.tasks import SortDollsBySize
+from scale_bench.api import create_env
+from scale_bench.config.models.environment import EnvironmentConfig
+from scale_bench.config.models.robot import RobotConfig
+from scale_bench.config.models.scene import SceneConfig
+from scale_bench.tasks.sort_dolls_by_size.config import SortDollsBySizeConfig
+from scale_bench.tasks.sort_dolls_by_size.task import SortDollsBySize
 
 
 def main() -> None:
-    scene_config = SceneConfig.load()
-    profile = RobotProfile.load("configs/robots/piper.yml")
-    task = SortDollsBySize(scene_config=scene_config)
-    env_cfg = create_env_cfg(
-        left_robot_profile=profile,
-        right_robot_profile=profile,
+    scene_config = load_config(
+        PROJECT_ROOT / "configs/scene/default.yml",
+        SceneConfig,
+        asset_root=PROJECT_ROOT,
+    )
+    profile = load_config(
+        PROJECT_ROOT / "configs/robots/piper.yml",
+        RobotConfig,
+        asset_root=PROJECT_ROOT,
+    )
+    environment_config = load_config(
+        PROJECT_ROOT / "configs/envs/default.yml",
+        EnvironmentConfig,
+    )
+    task = SortDollsBySize(
+        load_config(
+            PROJECT_ROOT / "configs/tasks/sort_dolls_by_size.yml",
+            SortDollsBySizeConfig,
+            asset_root=PROJECT_ROOT,
+        )
+    )
+    env = create_env(
+        left_robot_config=profile,
+        right_robot_config=profile,
         scene_config=scene_config,
-        sim_config=sim_config,
-        runtime_config=EnvRuntimeConfig.load(),
+        simulation_config=sim_config,
+        environment_config=environment_config,
         task=task,
-        task_layout_seed=args.seed,
+        base_seed=args.seed,
         device=args.device,
         num_envs=1,
     )
 
-    env = ScaleBenchEnv(env_cfg)
     try:
         env.reset()
         print("PICK_SETUP stage=environment_reset", flush=True)

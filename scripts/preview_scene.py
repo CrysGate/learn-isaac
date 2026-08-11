@@ -10,13 +10,20 @@ sys.path.insert(0, str(PROJECT_ROOT / "src"))
 # Kept lightweight so argparse can reject unknown tasks before Isaac Sim starts.
 SUPPORTED_TASK_IDS = ("sort_dolls_by_size",)
 
-from scale_bench.sim import SimConfig
+from scale_bench.config.loader import load_config
+from scale_bench.config.models.simulation import SimulationConfig
 
 from isaaclab.app import AppLauncher
 
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--config", type=Path, default=Path("configs/scene/default.yml"))
+parser.add_argument(
+    "--asset-root",
+    type=Path,
+    default=Path("."),
+    help="Root used to resolve relative asset references in configuration files.",
+)
 parser.add_argument(
     "--sim-config",
     type=Path,
@@ -91,7 +98,7 @@ if args.task is None and (
     parser.error("--seed, --layout, and --export-layout require --task")
 
 try:
-    sim_config = SimConfig.load(args.sim_config)
+    sim_config = load_config(args.sim_config, SimulationConfig)
 except ValueError as error:
     parser.error(str(error))
 if args.device is None:
@@ -116,10 +123,13 @@ if preview_overlays_enabled:
     from isaacsim.util.debug_draw import _debug_draw
     from pxr import Gf
 
-from scale_bench.envs import EnvRuntimeConfig, ScaleBenchEnv, create_env_cfg
-from scale_bench.robots import RobotProfile
-from scale_bench.scenes import SceneConfig
-from scale_bench.tasks import SortDollsBySize
+from scale_bench.config.models.environment import EnvironmentConfig
+from scale_bench.config.models.robot import RobotConfig
+from scale_bench.config.models.scene import SceneConfig
+from scale_bench.api import create_env
+from scale_bench.tasks.common.placement import PlacementContext
+from scale_bench.tasks.sort_dolls_by_size.config import SortDollsBySizeConfig
+from scale_bench.tasks.sort_dolls_by_size.task import SortDollsBySize
 
 
 Point = tuple[float, float, float]
@@ -248,37 +258,61 @@ class ScenePreviewOverlay:
 
 
 def main() -> None:
-    scene_config = SceneConfig.load(args.config)
-    left_profile = RobotProfile.load(args.left_robot_config)
-    right_profile = RobotProfile.load(args.right_robot_config)
-    runtime_config = EnvRuntimeConfig.load(args.env_config)
-    task = SortDollsBySize(scene_config=scene_config) if args.task is not None else None
-    task_layout_seed = None
-    task_layouts = None
+    scene_config = load_config(args.config, SceneConfig, asset_root=args.asset_root)
+    placement_context = PlacementContext.from_scene_config(scene_config)
+    left_profile = load_config(
+        args.left_robot_config,
+        RobotConfig,
+        asset_root=args.asset_root,
+    )
+    right_profile = load_config(
+        args.right_robot_config,
+        RobotConfig,
+        asset_root=args.asset_root,
+    )
+    runtime_config = load_config(args.env_config, EnvironmentConfig)
+    task = (
+        SortDollsBySize(
+            load_config(
+                PROJECT_ROOT / "configs/tasks/sort_dolls_by_size.yml",
+                SortDollsBySizeConfig,
+                asset_root=args.asset_root,
+            )
+        )
+        if args.task is not None
+        else None
+    )
+    base_seed = None
+    layouts = None
     imported_layout = None
     if task is not None:
         if args.layout is None:
-            task_layout_seed = 0 if args.seed is None else args.seed
+            base_seed = 0 if args.seed is None else args.seed
         else:
-            imported_layout = task.resolve_layout(layout_path=args.layout)
-            task_layouts = (imported_layout,)
+            imported_layout = task.resolve_layout(
+                placement_context,
+                layout_path=args.layout,
+            )
+            layouts = (imported_layout,)
 
         if args.export_layout is not None:
-            export_layout = imported_layout or task.generate_layout(task_layout_seed)
+            export_layout = imported_layout or task.generate_layout(
+                placement_context,
+                base_seed,
+            )
             export_layout.save(args.export_layout)
 
-    env_cfg = create_env_cfg(
-        left_robot_profile=left_profile,
-        right_robot_profile=right_profile,
+    env = create_env(
+        left_robot_config=left_profile,
+        right_robot_config=right_profile,
         scene_config=scene_config,
-        sim_config=sim_config,
-        runtime_config=runtime_config,
+        simulation_config=sim_config,
+        environment_config=runtime_config,
         task=task,
-        task_layout_seed=task_layout_seed,
-        task_layouts=task_layouts,
+        base_seed=base_seed,
+        layouts=layouts,
         device=args.device,
     )
-    env = ScaleBenchEnv(env_cfg)
     overlay = None
     try:
         env.sim.set_camera_view((2.6, 2.2, 2.2), (0.0, 0.0, 0.8))
@@ -299,7 +333,7 @@ def main() -> None:
             source = (
                 f"layout {args.layout}"
                 if args.layout is not None
-                else f"seed {task_layout_seed}"
+                else f"seed {base_seed}"
             )
             layout_message = f"Task assets use {source}. "
         runtime_descriptor = env.get_IO_descriptors["runtime"]

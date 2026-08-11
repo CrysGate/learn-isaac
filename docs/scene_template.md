@@ -2,7 +2,7 @@
 
 `DualArmTabletopSceneCfg` 是当前 `scale_bench` 已实现的场景拓扑：在每个环境中组合房间、地面、桌面、两台带挂载相机的机器人、相机支架和顶视 RGB-D 相机，并使用一盏全局环境光。默认 Piper 场景一共创建三台相机。
 
-场景编译实现位于 [`src/scale_bench/scenes/scene_template.py`](../src/scale_bench/scenes/scene_template.py)，纯场景模型位于 [`src/scale_bench/config/models/scene.py`](../src/scale_bench/config/models/scene.py)。默认场景配置位于 [`configs/scene/default.yml`](../configs/scene/default.yml)，环境生命周期配置位于 [`configs/envs/default.yml`](../configs/envs/default.yml)。
+场景编译实现位于 [`src/scale_bench/isaaclab/builders/scene.py`](../src/scale_bench/isaaclab/builders/scene.py)，纯场景模型位于 [`src/scale_bench/config/models/scene.py`](../src/scale_bench/config/models/scene.py)。默认场景配置位于 [`configs/scene/default.yml`](../configs/scene/default.yml)，环境生命周期配置位于 [`configs/envs/default.yml`](../configs/envs/default.yml)。
 
 ```text
 RobotConfig ────────► left/right ArticulationCfg ─────┐
@@ -34,7 +34,7 @@ UvCuboidCfg ──► textured ground/table ────────────
 | `overhead_camera` | `{ENV_REGEX_NS}/CameraStand/OverheadCamera` | Pinhole RGB-D 相机。 |
 | `environment_light` | `/World/EnvironmentLight` | 使用 HDR 纹理的全局 dome light。 |
 
-左右机器人配置会先复制再设置 prim path 和安装位姿，传入的原始 `ArticulationCfg` 不会被修改。因此左右两侧可以使用不同的 robot profile。
+左右 `RobotConfig` 会分别编译为新的 `ArticulationCfg` 和挂载相机 cfg，纯配置对象不会被修改。因此左右两侧可以使用不同的机器人配置。
 
 ## 快速预览
 
@@ -83,44 +83,42 @@ uv run python scripts/preview_scene.py --help
 
 ## Python API
 
-Isaac Lab 要求先启动 `AppLauncher`，再导入依赖 Isaac Sim runtime 的场景模块。以下片段应放在 `AppLauncher` 初始化之后；完整顺序以 [`scripts/preview_scene.py`](../scripts/preview_scene.py) 为准。
+Isaac Lab 要求先启动 `AppLauncher`，再调用公共 `create_env()` 创建环境。`scale_bench.api` 可以在启动 Isaac Sim 前安全导入，但 `create_env()` 必须在 application 启动后调用。完整顺序以 [`scripts/preview_scene.py`](../scripts/preview_scene.py) 为准。
 
 ```python
-from isaaclab.scene import InteractiveScene
+from isaaclab.app import AppLauncher
 
+app_launcher = AppLauncher(headless=True, enable_cameras=True)
+simulation_app = app_launcher.app
+
+from scale_bench.api import create_env
 from scale_bench.config.loader import load_config
 from scale_bench.config.models.environment import EnvironmentConfig
 from scale_bench.config.models.robot import RobotConfig
 from scale_bench.config.models.scene import SceneConfig
-from scale_bench.scenes import create_dual_arm_tabletop_scene_cfg
+from scale_bench.config.models.simulation import SimulationConfig
 
 left = load_config("configs/robots/piper.yml", RobotConfig, asset_root=".")
 right = load_config("configs/robots/piper.yml", RobotConfig, asset_root=".")
-scene_config = load_config("configs/scene/default.yml", SceneConfig, asset_root=".")
-environment_config = load_config("configs/envs/default.yml", EnvironmentConfig)
+scene = load_config("configs/scene/default.yml", SceneConfig, asset_root=".")
+simulation = load_config("configs/sim/default.yml", SimulationConfig)
+environment = load_config("configs/envs/default.yml", EnvironmentConfig)
 
-scene_cfg = create_dual_arm_tabletop_scene_cfg(
-    left_robot_profile=left,
-    right_robot_profile=right,
-    scene_config=scene_config,
-    environment_config=environment_config,
+env = create_env(
+    left_robot_config=left,
+    right_robot_config=right,
+    scene_config=scene,
+    simulation_config=simulation,
+    environment_config=environment,
 )
-scene = InteractiveScene(scene_cfg)
+try:
+    observation, info = env.reset()
+finally:
+    env.close()
+    simulation_app.close()
 ```
 
-工厂函数参数：
-
-| 参数 | 必需 | 作用 |
-|---|---:|---|
-| `left_robot_profile` | 是 | 左侧 `RobotConfig`；用于生成 articulation 和机器人相机。 |
-| `right_robot_profile` | 是 | 右侧 `RobotConfig`；用于生成 articulation 和机器人相机。 |
-| `config_path` | 否 | 场景 YAML；默认是 `configs/scene/default.yml`。 |
-| `scene_config` | 否 | 已加载的纯 `SceneConfig`；与 `config_path` 互斥。 |
-| `environment_config` | 否 | 已加载的 `EnvironmentConfig`。 |
-| `num_envs` | 否 | 覆盖 `EnvironmentConfig.num_envs`。 |
-| `env_spacing_m` | 否 | 覆盖 `EnvironmentConfig.env_spacing_m`。 |
-
-左右两侧都必须提供 robot config。场景会分别构建 articulation 和挂载相机。`replicate_physics` 和 `clone_in_fabric` 来自 `EnvironmentConfig`。
+`left_robot_config`、`right_robot_config`、`scene_config`、`simulation_config` 和 `environment_config` 是必需的纯配置对象。`num_envs`、`env_spacing_m` 和 `device` 可以在创建时覆盖对应 preset；任务场景另外传入 `task` 以及二选一的 `base_seed` 或 `layouts`。`replicate_physics` 和 `clone_in_fabric` 始终来自 `EnvironmentConfig`。
 
 ## 场景 YAML
 
@@ -245,7 +243,7 @@ distortion_coefficients: [0.0, 0.0, 0.0, 0.0, 0.0]
 clipping_range_m: [0.105, 10.0]
 ```
 
-[`CameraConfig`](../src/scale_bench/config/models/camera.py) 会拒绝未知字段、非有限数值、重复的 `data_types`、无效针孔内参和顺序错误的裁剪平面。加载后的配置不可修改；生成原生 `CameraCfg` 属于过渡期 builder 的职责。
+[`CameraConfig`](../src/scale_bench/config/models/camera.py) 会拒绝未知字段、非有限数值、重复的 `data_types`、无效针孔内参和顺序错误的裁剪平面。加载后的配置不可修改；原生 `CameraCfg` 由 `scale_bench.isaaclab.builders` 适配层在环境装配时生成。
 
 `model`、`intrinsic_source`、`distortion_model` 和 `distortion_coefficients` 当前作为标定元数据保存；Isaac Lab 场景使用针孔模型，不会根据 distortion 字段模拟镜头畸变。
 
@@ -277,7 +275,7 @@ clone_in_fabric: false
 
 ## `UvCuboidCfg`
 
-[`UvCuboidCfg`](../src/scale_bench/scenes/uv_cuboid.py) 是场景内部用于地面和桌面的 `CuboidCfg` 扩展。
+[`UvCuboidCfg`](../src/scale_bench/isaaclab/spawners/uv_cuboid.py) 是场景内部用于地面和桌面的 `CuboidCfg` 扩展。
 
 它先调用 Isaac Lab 原生 `spawn_cuboid()` 完成几何、变换、克隆、碰撞和材质创建，再为每个生成的 `UsdGeom.Cube` 写入：
 

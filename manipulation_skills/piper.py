@@ -15,7 +15,7 @@ from isaaclab.utils.math import (
     subtract_frame_transforms,
 )
 
-from scale_bench.robots import RobotProfile
+from scale_bench.config.models.robot import RobotConfig
 
 from .pick import (
     GraspCandidate,
@@ -76,7 +76,7 @@ class PiperRuntime:
     def __init__(
         self,
         env: Any,
-        profile: RobotProfile,
+        profile: RobotConfig,
         robot: str,
         env_id: int,
         max_joint_step_rad: float,
@@ -104,7 +104,7 @@ class PiperRuntime:
             preserve_order=True,
         )
         if arm_names != list(profile.kinematics.arm_joint_names):
-            raise RuntimeError("Piper arm joints do not match RobotProfile order")
+            raise RuntimeError("Piper arm joints do not match RobotConfig order")
         body_ids, body_names = self.robot.find_bodies(profile.kinematics.ee_body)
         if len(body_ids) != 1:
             raise RuntimeError(
@@ -326,7 +326,7 @@ class PiperRuntime:
 
 def pick(
     env: Any,
-    robot_profile: RobotProfile,
+    robot_profile: RobotConfig,
     *,
     robot: str,
     object_name: str,

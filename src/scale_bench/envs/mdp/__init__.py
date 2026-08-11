@@ -1,1 +1,0 @@
-"""ScaleBench observation term implementations."""
