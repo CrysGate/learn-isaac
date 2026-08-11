@@ -186,10 +186,13 @@ def _prepare_task_layouts(
 
     if base_seed is None:
         raise ValueError("base_seed is required when task_layouts is not provided")
-    return tuple(
+    layouts = tuple(
         task.generate_layout(context, base_seed + env_id)
         for env_id in range(num_envs)
     )
+    for layout in layouts:
+        task.validate_layout(context, layout)
+    return layouts
 
 
 def _camera_update_periods(

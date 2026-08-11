@@ -58,16 +58,15 @@ def build_scene_cfg(
 ) -> DualArmTabletopSceneCfg:
     """Return a fresh native scene cfg from already resolved pure configs."""
 
+    environment_config = _apply_environment_overrides(
+        environment_config,
+        num_envs=num_envs,
+        env_spacing_m=env_spacing_m,
+    )
     table_top_z_m = scene_config.table_top_z_m
     scene_cfg = DualArmTabletopSceneCfg(
-        num_envs=(
-            environment_config.num_envs if num_envs is None else num_envs
-        ),
-        env_spacing=(
-            environment_config.env_spacing_m
-            if env_spacing_m is None
-            else env_spacing_m
-        ),
+        num_envs=environment_config.num_envs,
+        env_spacing=environment_config.env_spacing_m,
         replicate_physics=environment_config.replicate_physics,
         clone_in_fabric=environment_config.clone_in_fabric,
         room=_room_cfg(scene_config.room),
@@ -98,6 +97,22 @@ def build_scene_cfg(
         environment_light=_light_cfg(scene_config.lighting),
     )
     return scene_cfg
+
+
+def _apply_environment_overrides(
+    config: EnvironmentConfig,
+    *,
+    num_envs: int | None,
+    env_spacing_m: float | None,
+) -> EnvironmentConfig:
+    updates = {}
+    if num_envs is not None:
+        updates["num_envs"] = num_envs
+    if env_spacing_m is not None:
+        updates["env_spacing_m"] = env_spacing_m
+    if not updates:
+        return config
+    return EnvironmentConfig.model_validate({**config.model_dump(), **updates})
 
 
 def _room_cfg(spec: RoomConfig) -> AssetBaseCfg:

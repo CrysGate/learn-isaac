@@ -22,6 +22,7 @@ from scale_bench.isaaclab.builders.scene import build_scene_cfg
 from scale_bench.isaaclab.builders.simulation import build_simulation_cfg
 from scale_bench.isaaclab.managers.actions import build_actions_cfg
 from scale_bench.isaaclab.managers.observations import build_observations_cfg
+from scale_bench.tasks.common.layout import AssetPlacement, TaskLayout
 from scale_bench.tasks.common.placement import PlacementContext
 from scale_bench.tasks.common.rigid_object import (
     RigidObjectAssetConfig,
@@ -198,6 +199,30 @@ def test_scene_and_manager_builders_preserve_public_order(
     ]
 
 
+@pytest.mark.parametrize(
+    ("overrides", "field_name"),
+    [
+        ({"num_envs": 0}, "num_envs"),
+        ({"env_spacing_m": -1.0}, "env_spacing_m"),
+    ],
+)
+def test_scene_builder_validates_environment_overrides(
+    robot_config: RobotConfig,
+    scene_config: SceneConfig,
+    environment_config: EnvironmentConfig,
+    overrides: dict,
+    field_name: str,
+) -> None:
+    with pytest.raises(ValueError, match=field_name):
+        build_scene_cfg(
+            left_robot_config=robot_config,
+            right_robot_config=robot_config,
+            scene_config=scene_config,
+            environment_config=environment_config,
+            **overrides,
+        )
+
+
 def test_simulation_and_environment_builders_validate_timing(
     robot_config: RobotConfig,
     scene_config: SceneConfig,
@@ -308,6 +333,53 @@ def test_rigid_object_native_cfg_is_owned_by_task_builder(
             task_layout_seed=7,
             task_builder=MissingAssetBuilder(),
             device="cpu",
+        )
+
+
+def test_seed_generated_layouts_are_validated_before_native_building(
+    robot_config: RobotConfig,
+    scene_config: SceneConfig,
+    simulation_config: SimulationConfig,
+    environment_config: EnvironmentConfig,
+) -> None:
+    class RejectSecondLayoutTask:
+        task_id = "reject_second_layout"
+        instruction = "Generate two layouts."
+
+        def generate_layout(self, context, seed):
+            del context
+            return TaskLayout(
+                task_id=self.task_id,
+                seed=seed,
+                assets={
+                    "object": AssetPlacement(
+                        position_m=(0.0, 0.0, 0.0),
+                        orientation_xyzw=(0.0, 0.0, 0.0, 1.0),
+                    )
+                },
+            )
+
+        def validate_layout(self, context, layout):
+            del context
+            if layout.seed == 8:
+                raise ValueError("generated layout 8 was rejected")
+
+    class UnusedBuilder:
+        def build_assets(self, task, layout):
+            raise AssertionError("builder must not run before layout validation")
+
+    with pytest.raises(ValueError, match="generated layout 8 was rejected"):
+        build_environment_cfg(
+            left_robot_config=robot_config,
+            right_robot_config=robot_config,
+            scene_config=scene_config,
+            simulation_config=simulation_config,
+            environment_config=environment_config,
+            task=RejectSecondLayoutTask(),
+            task_layout_seed=7,
+            task_builder=UnusedBuilder(),
+            device="cpu",
+            num_envs=2,
         )
 
 
