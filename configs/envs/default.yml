@@ -1,4 +1,8 @@
+num_envs: 2
+env_spacing_m: 5.0
 control_decimation: 4
+replicate_physics: true
+clone_in_fabric: false
 arm_action_mode: joint_position
 num_rerenders_on_reset: 1
 wait_for_textures: true

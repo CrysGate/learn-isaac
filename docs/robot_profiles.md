@@ -1,55 +1,42 @@
-# RobotProfile
+# RobotConfig
 
-`RobotProfile` 是机器人 YAML 与 Isaac Lab `ArticulationCfg`、机器人挂载 `CameraCfg` 之间的类型化边界。它负责保存机器人资产、初始状态、运动学语义、执行器、夹爪和相机安装约定，并在创建仿真对象前集中完成校验。
+`RobotConfig` 是纯 Python 机器人配置模型，负责机器人资产引用、初始状态、运动学语义、执行器、夹爪和相机安装约定。它不读取文件，也不创建 Isaac Lab 对象。
 
 ```text
 configs/robots/*.yml
         │
         ▼
-RobotProfile.load() ──► Pydantic 校验 ──► RobotProfile
-                                                │
-                         ┌──────────────────────┴─────────────────────┐
-                         ▼                                            ▼
-           build_articulation_cfg()                     build_camera_cfg()
-                         │                                            │
-                         ▼                                            ▼
-             Isaac Lab ArticulationCfg                    Isaac Lab CameraCfg
+load_config() ──► 路径解析 / Pydantic 校验 ──► RobotConfig
+                                                    │
+                                                    ▼
+                                    scale_bench.api.create_env()
+                                                    │
+                                                    ▼
+                                      内部 Isaac Lab adapter builder
 ```
 
-当前参考配置是 [`configs/robots/piper.yml`](../configs/robots/piper.yml)，实现位于 [`src/scale_bench/robots/robot_profile.py`](../src/scale_bench/robots/robot_profile.py)。
+当前参考配置是 [`configs/robots/piper.yml`](../configs/robots/piper.yml)，纯模型位于 [`src/scale_bench/config/models/robot.py`](../src/scale_bench/config/models/robot.py)。应用代码通过 `load_config()` 获得 `RobotConfig`，再将它传给公共 `create_env()`；旧 `RobotProfile` API 已删除。
 
 ## 加载与使用
 
 只加载和校验 YAML 不需要启动 Isaac Sim：
 
 ```python
-from scale_bench.robots import RobotProfile
+from scale_bench.config.loader import load_config
+from scale_bench.config.models.robot import RobotConfig
 
-profile = RobotProfile.load("configs/robots/piper.yml")
-print(profile.name)
+config = load_config("configs/robots/piper.yml", RobotConfig, asset_root=".")
+print(config.name)
 ```
 
 项目使用 `src` 布局但不安装自身 package，因此独立脚本需要设置 `PYTHONPATH=src`：
 
 ```bash
 PYTHONPATH=src uv run python -c \
-  'from scale_bench.robots import RobotProfile; p = RobotProfile.load("configs/robots/piper.yml"); print(p.name)'
+  'from scale_bench.config.loader import load_config; from scale_bench.config.models.robot import RobotConfig; print(load_config("configs/robots/piper.yml", RobotConfig, asset_root=".").name)'
 ```
 
-`build_articulation_cfg()` 会导入 Isaac Lab 仿真模块，所以调用前必须先通过 `AppLauncher` 初始化 Isaac Sim。仓库中的 [`scripts/preview_scene.py`](../scripts/preview_scene.py) 展示了完整的启动顺序。
-
-在已经启动的 Isaac Lab 进程中：
-
-```python
-from scale_bench.robots import RobotProfile
-
-profile = RobotProfile.load("configs/robots/piper.yml")
-robot_cfg = profile.build_articulation_cfg(
-    prim_path="{ENV_REGEX_NS}/Robot",
-)
-```
-
-每次调用都会创建一份新的 `ArticulationCfg`，因此同一个 profile 可以安全地用于左右机器人或多个场景。`prim_path` 可以省略，由场景模板在挂载机器人时设置。
+Isaac Lab 构造逻辑位于 [`src/scale_bench/isaaclab/builders/robot.py`](../src/scale_bench/isaaclab/builders/robot.py)，是公共 API 内部的适配层。调用方必须先通过 `AppLauncher` 初始化 Isaac Sim，然后把左右 `RobotConfig` 传给 `scale_bench.api.create_env()`。仓库中的 [`scripts/preview_scene.py`](../scripts/preview_scene.py) 展示了完整启动顺序。适配层每次都会创建新的 `ArticulationCfg`，因此同一个 `RobotConfig` 可以安全地用于左右机器人或多个环境。
 
 ## YAML 结构
 
@@ -60,7 +47,6 @@ robot_cfg = profile.build_articulation_cfg(
 | `name` | 是 | 非空机器人标识。当前只作为数据使用，不参与类型分支。 |
 | `usd_path` | 是 | 用于生成 articulation 的 USD 路径。 |
 | `urdf_path` | 否 | 可选 URDF 参考路径；会检查存在性，但当前不用于生成 articulation。 |
-| `scale` | 否 | 三轴正数缩放；缺省时使用 USD 原始尺度。 |
 | `fixed_base` | 否 | 是否固定根节点，默认 `true`。 |
 | `disable_gravity` | 否 | 是否关闭机器人刚体重力，默认 `false`。 |
 | `self_collisions` | 否 | 是否启用自碰撞，默认 `false`。 |
@@ -70,7 +56,7 @@ robot_cfg = profile.build_articulation_cfg(
 | `gripper` | 是 | 平行夹爪状态和命令语义。 |
 | `camera` | 否 | 相机参数 profile 引用及相对机器人资产的安装位姿。 |
 
-所有相对文件路径都从仓库根目录解析。包含 `://` 的路径会作为远端或 Omniverse URI 原样保留，不进行本地文件存在性检查。
+`profile_path` 等配置引用相对于当前机器人 YAML 解析。资产引用在传入 `asset_root` 时相对于该根目录解析，否则相对于当前 YAML 解析。绝对路径原样保留；当前只支持本地路径，并检查资产存在性。
 
 ### `kinematics`
 
@@ -87,7 +73,7 @@ kinematics:
 
 - `arm_joint_names` 的顺序是 benchmark 采用的机械臂关节顺序。
 - `tcp.position_m` 使用米，`orientation_xyzw` 使用 `xyzw` 顺序且必须是单位四元数。
-- `base_body`、`ee_body` 和 TCP 当前保存为下游控制与评测语义；`build_articulation_cfg()` 不会额外创建 TCP frame。
+- `base_body`、`ee_body` 和 TCP 当前保存为下游控制与评测语义；原生 articulation builder 不会额外创建 TCP frame。
 
 ### `actuators`
 
@@ -130,11 +116,11 @@ gripper:
 
 ### `camera`
 
-机器人相机的光学参数继续复用独立 `CameraProfile`，robot profile 只保存安装关系：
+机器人相机的光学参数复用独立 `CameraConfig`，`RobotConfig` 只保存安装关系：
 
 ```yaml
 camera:
-  profile_path: configs/cameras/d435.yml
+  profile_path: ../cameras/d435.yml
   parent_prim_path: link6/camera
   sensor_prim_name: D435Sensor
   position_m: [0.0, 0.0, 0.0]
@@ -148,22 +134,14 @@ camera:
 - `convention` 只能是 `opengl`、`ros` 或 `world`。
 - Piper 的 `link6/camera` 已由资产放置在腕部实际相机安装位，局部绕 X 轴旋转 180 度后符合 USD/OpenGL 相机轴约定。
 
-加载机器人 profile 时会立即加载并校验 `profile_path`。在 Isaac Lab 配置阶段，可按机器人根路径构建传感器：
-
-```python
-camera_cfg = profile.build_camera_cfg(
-    robot_prim_path="{ENV_REGEX_NS}/Robot",
-)
-```
-
-未配置 `camera` 时该方法返回 `None`。
+`load_config()` 会解析 `profile_path`，引用的相机文件在环境装配时按 `CameraConfig` 校验。适配层将机器人根路径、`parent_prim_path` 和 `sensor_prim_name` 组合为传感器 prim path；未配置 `camera` 时不会为该机器人创建相机。
 
 ## 校验约定
 
-`RobotProfile.load()` 会拒绝以下配置：
+`RobotConfig` 和 `load_config()` 会拒绝以下配置：
 
 - 任意模型中出现未声明字段；
-- 空名称、非有限数值、负执行器参数或非正缩放；
+- 空名称、非有限数值或负执行器参数；
 - 机械臂、夹爪或单个 actuator 内部存在重复关节名；
 - 机械臂关节与夹爪关节重叠；
 - `initial_joint_positions` 没有恰好覆盖机械臂和夹爪关节的并集；
@@ -174,16 +152,15 @@ camera_cfg = profile.build_camera_cfg(
 - 两个 finger body 相同，或最大开口不大于最小开口；
 - TCP 或相机四元数不是单位四元数；
 - 相机父 prim 路径不是合法相对路径，传感器 prim 名不合法，或坐标约定不受支持；
-- 相机引用的 camera profile 无法加载或未通过校验；
 - 本地 USD 或 URDF 文件不存在。
 
-YAML 读取和 schema 校验错误会包装为带 profile 路径的 `ValueError`；本地资产检查错误会在 `ValueError` 中给出解析后的资产路径。
+YAML/JSON 读取、schema 校验和本地资产错误统一包装为 `ConfigLoadError`，信息包含源文件、字段位置和解析后的路径。
 
 ## 生成的 `ArticulationCfg`
 
 转换过程会设置：
 
-- `UsdFileCfg` 的 USD 路径和可选缩放；
+- `UsdFileCfg` 的 USD 路径；机器人始终使用资产原始尺寸；
 - `fix_root_link`、`enabled_self_collisions` 和 `disable_gravity`；
 - 按“机械臂关节、夹爪关节”顺序组织的初始关节位置；
 - 每个 YAML actuator 对应的 `ImplicitActuatorCfg`；
@@ -193,7 +170,7 @@ URDF、TCP、末端 body 和 finger body 当前不会直接写入 `ArticulationC
 
 ## 生成的 `CameraCfg`
 
-`build_camera_cfg()` 将机器人根路径、`parent_prim_path` 和 `sensor_prim_name` 拼成完整 prim path，再复用 camera profile 的分辨率、输出类型、针孔内参和裁剪范围，最后写入机器人 YAML 中的局部位姿。场景模板分别传入 `LeftRobot` 与 `RightRobot` 根路径，因此同一份 Piper profile 会生成两台独立、随各自腕部运动的相机。
+相机 builder 将机器人根路径、`parent_prim_path` 和 `sensor_prim_name` 拼成完整 prim path，再复用 `CameraConfig` 的分辨率、输出类型、针孔内参和裁剪范围，最后写入机器人 YAML 中的局部位姿。场景 builder 分别传入 `LeftRobot` 与 `RightRobot` 根路径，因此同一份 Piper config 会生成两台独立、随各自腕部运动的相机。
 
 ## 新增机器人
 
@@ -204,7 +181,7 @@ URDF、TCP、末端 body 和 finger body 当前不会直接写入 `ArticulationC
 
    ```bash
    PYTHONPATH=src uv run python -c \
-     'from scale_bench.robots import RobotProfile; p = RobotProfile.load("configs/robots/my_robot.yml"); print(p.name)'
+     'from scale_bench.config.loader import load_config; from scale_bench.config.models.robot import RobotConfig; print(load_config("configs/robots/my_robot.yml", RobotConfig, asset_root=".").name)'
    ```
 
 5. 在实际场景中执行无界面冒烟验证：
@@ -217,7 +194,7 @@ URDF、TCP、末端 body 和 finger body 当前不会直接写入 `ArticulationC
      --max-steps 2
    ```
 
-仓库目前还没有自动化的 robot profile 契约测试。新增机器人时，至少应验证 profile 加载、相机 profile 引用、USD 挂载 frame，以及左右场景相机的 prim path；实际渲染仍应通过场景冒烟测试验证。
+运行 `uv run pytest tests/config` 可执行纯配置模型、路径和依赖边界测试。新增机器人时还应验证相机配置引用、USD 挂载 frame，以及左右场景相机的 prim path；实际渲染仍应通过场景冒烟测试验证。
 
 ## 当前支持边界
 

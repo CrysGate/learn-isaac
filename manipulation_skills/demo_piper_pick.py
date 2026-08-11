@@ -12,7 +12,9 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT))
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
-from scale_bench.sim import SimConfig
+from scale_bench.config.loader import load_config
+from scale_bench.config.models.recording import RecordingConfig
+from scale_bench.config.models.simulation import SimulationConfig
 
 from isaaclab.app import AppLauncher
 
@@ -23,6 +25,13 @@ parser.add_argument("--object", default="doll_00002")
 parser.add_argument("--seed", type=int, default=44)
 parser.add_argument("--lift-distance", type=float, default=0.10)
 parser.add_argument("--max-steps", type=int, default=900)
+parser.add_argument(
+    "--recording-output-dir",
+    type=Path,
+    default=PROJECT_ROOT / "outputs/datasets",
+)
+parser.add_argument("--dataset-name", default="piper_pick")
+parser.add_argument("--record-cameras", action="store_true")
 AppLauncher.add_app_launcher_args(parser)
 parser.set_defaults(visualizer=["kit"], enable_cameras=True, device=None)
 args = parser.parse_args()
@@ -34,7 +43,15 @@ if args.lift_distance <= 0.0:
 if args.max_steps <= 0:
     parser.error("--max-steps must be positive")
 
-sim_config = SimConfig.load()
+recording_config = RecordingConfig(
+    output_dir=args.recording_output_dir,
+    dataset_name=args.dataset_name,
+    record_camera_observations=args.record_cameras,
+)
+sim_config = load_config(
+    PROJECT_ROOT / "configs/sim/default.yml",
+    SimulationConfig,
+)
 if args.device is None:
     args.device = sim_config.device
 if args.rendering_mode is None:
@@ -44,29 +61,49 @@ app_launcher = AppLauncher(args)
 simulation_app = app_launcher.app
 
 from manipulation_skills import PickConfig, pick
-from scale_bench.envs import EnvRuntimeConfig, ScaleBenchEnv, create_env_cfg
-from scale_bench.robots import RobotProfile
-from scale_bench.scenes import SceneConfig
-from scale_bench.tasks import SortDollsBySize
+from scale_bench.api import create_env
+from scale_bench.config.models.environment import EnvironmentConfig
+from scale_bench.config.models.robot import RobotConfig
+from scale_bench.config.models.scene import SceneConfig
+from scale_bench.tasks.sort_dolls_by_size.config import SortDollsBySizeConfig
+from scale_bench.tasks.sort_dolls_by_size.task import SortDollsBySize
 
 
 def main() -> None:
-    scene_config = SceneConfig.load()
-    profile = RobotProfile.load("configs/robots/piper.yml")
-    task = SortDollsBySize(scene_config=scene_config)
-    env_cfg = create_env_cfg(
-        left_robot_profile=profile,
-        right_robot_profile=profile,
+    scene_config = load_config(
+        PROJECT_ROOT / "configs/scene/default.yml",
+        SceneConfig,
+        asset_root=PROJECT_ROOT,
+    )
+    profile = load_config(
+        PROJECT_ROOT / "configs/robots/piper.yml",
+        RobotConfig,
+        asset_root=PROJECT_ROOT,
+    )
+    environment_config = load_config(
+        PROJECT_ROOT / "configs/envs/default.yml",
+        EnvironmentConfig,
+    )
+    task = SortDollsBySize(
+        load_config(
+            PROJECT_ROOT / "configs/tasks/sort_dolls_by_size.yml",
+            SortDollsBySizeConfig,
+            asset_root=PROJECT_ROOT,
+        )
+    )
+    env = create_env(
+        left_robot_config=profile,
+        right_robot_config=profile,
         scene_config=scene_config,
-        sim_config=sim_config,
-        runtime_config=EnvRuntimeConfig.load(),
+        simulation_config=sim_config,
+        environment_config=environment_config,
+        recording_config=recording_config,
         task=task,
-        task_layout_seed=args.seed,
+        base_seed=args.seed,
         device=args.device,
         num_envs=1,
     )
 
-    env = ScaleBenchEnv(env_cfg)
     try:
         env.reset()
         print("PICK_SETUP stage=environment_reset", flush=True)
@@ -89,6 +126,7 @@ def main() -> None:
                 previous_phase = result.phase
             env.step(result.action)
             if result.done:
+                env.complete_episodes(success=(result.succeeded,))
                 print(
                     f"PICK_RESULT success={result.succeeded} "
                     f"message={result.message!r}",
@@ -97,6 +135,7 @@ def main() -> None:
                 if not result.succeeded:
                     raise RuntimeError(result.message)
                 return
+        env.complete_episodes(success=(False,))
         raise RuntimeError(f"pick did not finish after {args.max_steps} steps")
     except BaseException as error:
         traceback.print_exc()

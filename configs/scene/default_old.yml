@@ -31,7 +31,7 @@ robot_mounts:
     orientation_xyzw: [0.0, 0.0, 0.70710678, 0.70710678]
 
 camera:
-  profile_path: configs/cameras/d435.yml
+  profile_path: ../cameras/d435.yml
   stand_usd_path: Assets/Object/Geometry/camera_stand/00000/object.usd
   stand_position_xy_m: [0.0, -0.47]
   stand_orientation_xyzw: [-0.70710678, 0.0, 0.0, 0.70710678]
@@ -42,9 +42,3 @@ camera:
 lighting:
   texture_path: Assets/Background/brown_photostudio_02_4k.hdr
   intensity: 1000.0
-
-runtime:
-  num_envs: 1
-  env_spacing_m: 5.0
-  replicate_physics: true
-  clone_in_fabric: false

@@ -54,7 +54,7 @@ gripper:
     gripper_joint: 0.05
 
 camera:
-  profile_path: configs/cameras/d435.yml
+  profile_path: ../cameras/d435.yml
   # Piper.usd authors this helper at the physical wrist-camera mount on link6.
   parent_prim_path: link6/camera
   sensor_prim_name: D435Sensor
