@@ -215,8 +215,8 @@ camera:
   stand_usd_path: Assets/Object/Geometry/camera_stand_aloha/aloha_front_camera_stand_realsense_d435.usd
   stand_position_xy_m: [0.0, -0.47]
   stand_orientation_xyzw: [0.0, 0.0, 0.70710678, 0.70710678]
-  sensor_local_position_m: [0.06376095, 0.0003435, 0.55816412]
-  sensor_local_orientation_xyzw: [0.26866805, -0.26866791, -0.65407767, 0.65407754]
+  sensor_local_position_m: [0.06376095, 0.0003435, 0.75816412]
+  sensor_local_orientation_xyzw: [0.18301278, -0.18301262, -0.68301276, 0.68301265]
   convention: opengl
 ```
 

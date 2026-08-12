@@ -58,7 +58,6 @@ camera:
   # Piper.usd authors this helper at the physical wrist-camera mount on link6.
   parent_prim_path: link6/camera
   sensor_prim_name: D435Sensor
-  position_m: [0.0, 0.0, 0.0]
-  # Rotate the helper's optical frame into the USD/OpenGL camera convention.
-  orientation_xyzw: [1.0, 0.0, 0.0, 0.0]
+  position_m: [0.0, -0.025, -0.025]
+  orientation_xyzw: [0.99144486, 0.0, 0.0, 0.13052619]
   convention: opengl

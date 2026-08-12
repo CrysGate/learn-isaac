@@ -336,7 +336,8 @@ def main() -> None:
                 else f"seed {base_seed}"
             )
             layout_message = f"Task assets use {source}. "
-        runtime_descriptor = env.get_IO_descriptors["runtime"]
+        io_descriptors = env.get_IO_descriptors
+        runtime_descriptor = io_descriptors["runtime"]
         print(
             f"Loaded {preview_name} from {args.config} with "
             f"{left_profile.name} (left) and {right_profile.name} (right). "
@@ -348,6 +349,21 @@ def main() -> None:
         action = env.action_manager.action.new_zeros(
             (env.num_envs, env.action_manager.total_action_dim)
         )
+        gripper_profiles = {
+            "left_gripper": left_profile.gripper,
+            "right_gripper": right_profile.gripper,
+        }
+        for descriptor in io_descriptors["actions"]:
+            gripper = gripper_profiles.get(descriptor["name"])
+            if gripper is None:
+                continue
+            action_slice = slice(*descriptor["slice"])
+            action[:, action_slice] = action.new_tensor(
+                [
+                    gripper.open_positions[joint_name]
+                    for joint_name in descriptor["joint_names"]
+                ]
+            )
         step_count = 0
         while simulation_app.is_running():
             env.step(action)
