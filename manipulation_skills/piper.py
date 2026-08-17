@@ -1,4 +1,4 @@
-"""Piper adapter for the generic pick state machine."""
+"""Piper runtime adapter and factories for the atomic skill library."""
 
 from __future__ import annotations
 
@@ -24,6 +24,9 @@ from .pick import (
     Pose,
     ResolvedGrasp,
 )
+
+
+DEFAULT_MAX_JOINT_STEP_RAD = 0.04
 
 
 class _ActionCodec:
@@ -139,7 +142,11 @@ class PiperRuntime:
             )
         return action
 
-    def move_action(self, target_tcp_pose_w: Pose, gripper_open: bool) -> torch.Tensor:
+    def move_action(
+        self,
+        target_tcp_pose_w: Pose,
+        gripper_open: bool | None,
+    ) -> torch.Tensor:
         action = self.codec.hold()
         self.codec.set(
             action,
@@ -147,12 +154,60 @@ class PiperRuntime:
             self.env_id,
             self._arm_target(target_tcp_pose_w),
         )
-        self.codec.set(
-            action,
-            self.gripper_term,
+        if gripper_open is not None:
+            self.codec.set(
+                action,
+                self.gripper_term,
+                self.env_id,
+                self._gripper_target(gripper_open),
+            )
+        return action
+
+    def arm_joint_positions(self) -> torch.Tensor:
+        return self.robot.data.joint_pos.torch[
             self.env_id,
-            self._gripper_target(gripper_open),
+            self.arm_joint_ids,
+        ].clone()
+
+    def home_joint_positions(self) -> torch.Tensor:
+        return torch.tensor(
+            [
+                self.profile.initial_joint_positions[name]
+                for name in self.profile.kinematics.arm_joint_names
+            ],
+            device=self.env.device,
+            dtype=torch.float32,
         )
+
+    def joint_action(
+        self,
+        joint_positions: torch.Tensor,
+        gripper_open: bool | None = None,
+    ) -> torch.Tensor:
+        if joint_positions.shape != (len(self.arm_joint_ids),):
+            raise ValueError(
+                f"expected {len(self.arm_joint_ids)} arm joints, "
+                f"got {tuple(joint_positions.shape)}"
+            )
+        current = self.arm_joint_positions()
+        target = current + (joint_positions.to(current) - current).clamp(
+            -self.max_joint_step_rad,
+            self.max_joint_step_rad,
+        )
+        limits = self.robot.data.soft_joint_pos_limits.torch[
+            self.env_id,
+            self.arm_joint_ids,
+        ]
+        target = target.clamp(limits[:, 0], limits[:, 1])
+        action = self.codec.hold()
+        self.codec.set(action, self.arm_term, self.env_id, target)
+        if gripper_open is not None:
+            self.codec.set(
+                action,
+                self.gripper_term,
+                self.env_id,
+                self._gripper_target(gripper_open),
+            )
         return action
 
     def tcp_pose_w(self) -> Pose:
@@ -352,6 +407,203 @@ def pick(
     )
 
 
+def move_to_pose(
+    env: Any,
+    robot_profile: RobotConfig,
+    *,
+    robot: str,
+    target_pose_w: Pose,
+    env_id: int = 0,
+    gripper_open: bool | None = None,
+    config: Any = None,
+    max_joint_step_rad: float = DEFAULT_MAX_JOINT_STEP_RAD,
+) -> Any:
+    """Create a Cartesian move skill for one Piper arm."""
+
+    from .motion import MoveToPoseSkill
+
+    runtime = PiperRuntime(
+        env,
+        robot_profile,
+        robot,
+        env_id,
+        max_joint_step_rad,
+    )
+    return MoveToPoseSkill(
+        runtime,
+        target_pose_w,
+        gripper_open=gripper_open,
+        config=config,
+    )
+
+
+def open_gripper(
+    env: Any,
+    robot_profile: RobotConfig,
+    *,
+    robot: str,
+    env_id: int = 0,
+    config: Any = None,
+) -> Any:
+    """Create an open-gripper skill for one Piper arm."""
+
+    from .gripper import OpenGripperSkill
+
+    runtime = PiperRuntime(
+        env,
+        robot_profile,
+        robot,
+        env_id,
+        DEFAULT_MAX_JOINT_STEP_RAD,
+    )
+    return OpenGripperSkill(runtime, config=config)
+
+
+def close_gripper(
+    env: Any,
+    robot_profile: RobotConfig,
+    *,
+    robot: str,
+    env_id: int = 0,
+    require_contact: bool = False,
+    config: Any = None,
+) -> Any:
+    """Create a close-gripper skill for one Piper arm."""
+
+    from .gripper import CloseGripperSkill
+
+    runtime = PiperRuntime(
+        env,
+        robot_profile,
+        robot,
+        env_id,
+        DEFAULT_MAX_JOINT_STEP_RAD,
+    )
+    return CloseGripperSkill(
+        runtime,
+        require_contact=require_contact,
+        config=config,
+    )
+
+
+def place(
+    env: Any,
+    robot_profile: RobotConfig,
+    *,
+    robot: str,
+    object_name: str,
+    target_object_pose_w: Pose,
+    env_id: int = 0,
+    placement_direction_w: torch.Tensor | None = None,
+    config: Any = None,
+    max_joint_step_rad: float = DEFAULT_MAX_JOINT_STEP_RAD,
+) -> Any:
+    """Create a place skill for an object currently held by one Piper arm."""
+
+    from .place import PlaceSkill
+
+    runtime = PiperRuntime(
+        env,
+        robot_profile,
+        robot,
+        env_id,
+        max_joint_step_rad,
+    )
+    return PlaceSkill(
+        runtime,
+        object_name,
+        target_object_pose_w,
+        placement_direction_w=placement_direction_w,
+        config=config,
+    )
+
+
+def insert(
+    env: Any,
+    robot_profile: RobotConfig,
+    *,
+    robot: str,
+    object_name: str,
+    target_object_pose_w: Pose,
+    insertion_direction_w: torch.Tensor,
+    env_id: int = 0,
+    config: Any = None,
+    max_joint_step_rad: float = DEFAULT_MAX_JOINT_STEP_RAD,
+) -> Any:
+    """Create a straight-line insertion skill for one Piper arm."""
+
+    from .insert import InsertSkill
+
+    runtime = PiperRuntime(
+        env,
+        robot_profile,
+        robot,
+        env_id,
+        max_joint_step_rad,
+    )
+    return InsertSkill(
+        runtime,
+        object_name,
+        target_object_pose_w,
+        insertion_direction_w,
+        config=config,
+    )
+
+
+def rotate(
+    env: Any,
+    robot_profile: RobotConfig,
+    *,
+    robot: str,
+    object_name: str,
+    target_object_orientation_wxyz: torch.Tensor,
+    env_id: int = 0,
+    config: Any = None,
+    max_joint_step_rad: float = DEFAULT_MAX_JOINT_STEP_RAD,
+) -> Any:
+    """Create an in-hand object rotation skill for one Piper arm."""
+
+    from .rotate import RotateSkill
+
+    runtime = PiperRuntime(
+        env,
+        robot_profile,
+        robot,
+        env_id,
+        max_joint_step_rad,
+    )
+    return RotateSkill(
+        runtime,
+        object_name,
+        target_object_orientation_wxyz,
+        config=config,
+    )
+
+
+def home(
+    env: Any,
+    robot_profile: RobotConfig,
+    *,
+    robot: str,
+    env_id: int = 0,
+    gripper_open: bool | None = None,
+    config: Any = None,
+    max_joint_step_rad: float = DEFAULT_MAX_JOINT_STEP_RAD,
+) -> Any:
+    """Create a joint-space home skill for one Piper arm."""
+
+    from .motion import HomeSkill
+
+    runtime = PiperRuntime(
+        env,
+        robot_profile,
+        robot,
+        env_id,
+        max_joint_step_rad,
+    )
+    return HomeSkill(runtime, gripper_open=gripper_open, config=config)
+
+
 def _robot_name(robot: str) -> str:
     aliases = {
         "left": "left_robot",
@@ -365,4 +617,15 @@ def _robot_name(robot: str) -> str:
         raise ValueError("robot must be left, right, left_robot, or right_robot") from error
 
 
-__all__ = ["PiperRuntime", "pick"]
+__all__ = [
+    "DEFAULT_MAX_JOINT_STEP_RAD",
+    "PiperRuntime",
+    "close_gripper",
+    "home",
+    "insert",
+    "move_to_pose",
+    "open_gripper",
+    "pick",
+    "place",
+    "rotate",
+]
