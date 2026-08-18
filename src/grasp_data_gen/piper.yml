@@ -1,0 +1,40 @@
+name: piper
+robot_profile: ../../configs/robots/piper.yml
+source_root_prim: /Piper
+base_link: link6
+link_names: [link6, link7, link8]
+joint_scope: joints
+tcp_prim_path: link6/gripper_center
+material_prim_paths: [Looks]
+
+sampler:
+  sampler_type: antipodal
+  num_candidates: 2040
+  num_orientations: 20
+  standoff_axis_base: [0.0, 0.0, 1.0]
+  gripper_approach_direction: [0.0, 0.0, 1.0]
+  grasp_align_axis: [0.0, 1.0, 0.0]
+  orientation_sample_axis: [0.0, 1.0, 0.0]
+  approach_axis_tcp: [1.0, 0.0, 0.0]
+  lateral_sigma: 0.0
+  random_seed: 0
+
+tabletop_filter:
+  enabled: true
+  up_axis_object: [0.0, 0.0, 1.0]
+  maximum_approach_up_dot: 0.0
+  gripper_clearance_m: 0.003
+  approach_distance_m: 0.10
+  require_camera_above_tcp: true
+  minimum_camera_height_above_tcp_m: 0.0
+  minimum_camera_side_up_dot: 0.0
+
+validation:
+  close_steps: 60
+  hold_steps: 60
+  physics_dt: 0.016666666666666666
+  minimum_residual_aperture_m: 0.002
+  minimum_closure_travel_m: 0.002
+  maximum_command_openness_spread: 0.15
+  hold_position_tolerance_m: 0.02
+  hold_orientation_tolerance_rad: 0.35

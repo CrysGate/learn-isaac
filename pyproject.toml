@@ -29,6 +29,19 @@ dependencies = [
     "pyyaml",
 ]
 
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+grasp_data_gen = ["README.md", "*.yml"]
+
 [tool.uv.sources]
 torch = { index = "pytorch-cu128" }
 torchaudio = { index = "pytorch-cu128" }
@@ -62,10 +75,10 @@ override-dependencies = [
     "torchaudio==2.10.0",
     "torchvision==0.25.0",
 ]
-package = false
+package = true
 
 [tool.pytest.ini_options]
-pythonpath = ["src"]
+pythonpath = ["src", "."]
 testpaths = ["tests"]
 
 [[tool.uv.index]]
