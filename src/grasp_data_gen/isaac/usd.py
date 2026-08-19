@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Iterable
-
 import omni.usd
 from pxr import Gf, PhysxSchema, Sdf, Usd, UsdGeom, UsdPhysics
+
+POSE_OP_SUFFIX = "graspDataGenPose"
 
 
 def new_stage(world_path: str = "/World") -> Usd.Stage:
@@ -81,8 +82,14 @@ def set_local_pose(
 
     xformable = UsdGeom.Xformable(prim)
     xformable.ClearXformOpOrder()
-    xformable.AddTranslateOp(UsdGeom.XformOp.PrecisionDouble).Set(position)
-    xformable.AddOrientOp(UsdGeom.XformOp.PrecisionDouble).Set(orientation)
+    xformable.AddTranslateOp(
+        UsdGeom.XformOp.PrecisionDouble,
+        POSE_OP_SUFFIX,
+    ).Set(position)
+    xformable.AddOrientOp(
+        UsdGeom.XformOp.PrecisionDouble,
+        POSE_OP_SUFFIX,
+    ).Set(orientation)
 
 
 def configure_dynamic_body(prim: Usd.Prim) -> None:

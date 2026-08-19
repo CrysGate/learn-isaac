@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path
 import traceback
 from typing import Any, Sequence
@@ -15,6 +17,13 @@ from scale_bench.config.models.robot import RobotConfig
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 MODULE_ROOT = Path(__file__).resolve().parent
 DEFAULT_CONFIG = MODULE_ROOT / "piper.yml"
+USD_EXTENSIONS = frozenset({".usd", ".usda", ".usdc", ".usdz"})
+
+
+@dataclass(frozen=True)
+class GenerationJob:
+    object_usd: Path
+    output_dir: Path
 
 
 def _positive_int(value: str) -> int:
@@ -24,31 +33,110 @@ def _positive_int(value: str) -> int:
     return parsed
 
 
+def _find_object_usds(object_dir: Path) -> tuple[Path, ...]:
+    """Recursively find supported USD assets in a stable order."""
+
+    return tuple(
+        path
+        for path in sorted(object_dir.rglob("*"))
+        if path.is_file() and path.suffix.lower() in USD_EXTENSIONS
+    )
+
+
+def _build_batch_jobs(
+    object_dir: Path,
+    output_dir: Path,
+    object_usds: Sequence[Path],
+) -> tuple[GenerationJob, ...]:
+    """Map input assets to non-overlapping output directories."""
+
+    relative_paths = tuple(path.relative_to(object_dir) for path in object_usds)
+    files_per_parent = Counter(path.parent for path in relative_paths)
+    jobs = []
+    for object_usd, relative_path in zip(object_usds, relative_paths, strict=True):
+        is_only_asset = files_per_parent[relative_path.parent] == 1
+        if relative_path.parent != Path(".") and is_only_asset:
+            relative_output = relative_path.parent
+        else:
+            relative_output = relative_path.with_suffix("")
+        jobs.append(
+            GenerationJob(
+                object_usd=object_usd,
+                output_dir=output_dir / relative_output,
+            )
+        )
+
+    output_dirs = [job.output_dir for job in jobs]
+    if len(output_dirs) != len(set(output_dirs)):
+        raise ValueError(
+            "input assets map to duplicate output directories; "
+            "place same-named assets in separate directories"
+        )
+    return tuple(jobs)
+
+
 def _parse_args(
     generation: GraspGenerationConfig,
     argv: Sequence[str] | None = None,
 ) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Generate and physically validate configured grasp poses.",
+        description=(
+            "Generate and physically validate grasp poses for one USD asset or "
+            "all USD assets in a directory."
+        ),
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
-    parser.add_argument("--object-usd", type=Path, required=True)
-    parser.add_argument("--output-dir", type=Path, default=(PROJECT_ROOT / "outputs/grasp_data" / generation.name / "00000"))
+    inputs = parser.add_mutually_exclusive_group(required=True)
+    inputs.add_argument("--object-usd", type=Path, help="One object USD asset.")
+    inputs.add_argument("--object-dir", type=Path, help="Directory searched recursively for object USD assets.")
+    parser.add_argument("--output-dir", type=Path, help="Output directory. Batch outputs are placed in subdirectories.")
     parser.add_argument("--num-candidates", type=_positive_int, default=generation.sampler.num_candidates)
     parser.add_argument("--num-orientations", type=_positive_int, default=generation.sampler.num_orientations)
     parser.add_argument("--seed", type=int, default=generation.sampler.random_seed)
     parser.add_argument("--gui", action="store_true", help="Open a lit viewport that follows grasp physics evaluation.")
 
     args = parser.parse_args(argv)
-    args.object_usd = args.object_usd.expanduser().resolve()
-    args.output_dir = args.output_dir.expanduser().resolve()
-    if not args.object_usd.is_file():
-        parser.error(f"--object-usd does not exist: {args.object_usd}")
+    default_output = PROJECT_ROOT / "outputs/grasp_data" / generation.name
+    if args.object_usd is not None:
+        args.object_usd = args.object_usd.expanduser().resolve()
+        if not args.object_usd.is_file():
+            parser.error(f"--object-usd does not exist: {args.object_usd}")
+        output_dir = args.output_dir or default_output / "00000"
+        args.jobs = (
+            GenerationJob(
+                object_usd=args.object_usd,
+                output_dir=output_dir.expanduser().resolve(),
+            ),
+        )
+    else:
+        args.object_dir = args.object_dir.expanduser().resolve()
+        if not args.object_dir.is_dir():
+            parser.error(f"--object-dir does not exist: {args.object_dir}")
+        output_dir = (args.output_dir or default_output).expanduser().resolve()
+        if output_dir == args.object_dir or output_dir.is_relative_to(args.object_dir):
+            parser.error("--output-dir must be outside --object-dir")
+        object_usds = _find_object_usds(args.object_dir)
+        if not object_usds:
+            supported = ", ".join(sorted(USD_EXTENSIONS))
+            parser.error(
+                f"--object-dir contains no supported USD assets ({supported}): "
+                f"{args.object_dir}"
+            )
+        try:
+            args.jobs = _build_batch_jobs(
+                args.object_dir,
+                output_dir,
+                object_usds,
+            )
+        except ValueError as error:
+            parser.error(str(error))
+    args.output_dir = output_dir.expanduser().resolve()
     return args
 
 
-def _run(
+def _run_job(
     args: argparse.Namespace,
+    job: GenerationJob,
     generation: GraspGenerationConfig,
     robot: RobotConfig,
     simulation_app: Any,
@@ -65,7 +153,7 @@ def _run(
     robot_usd = Path(robot.usd_path)
     scene = build_evaluation_scene(
         robot_usd,
-        args.object_usd,
+        job.object_usd,
         generation,
         robot,
     )
@@ -73,7 +161,7 @@ def _run(
         from grasp_data_gen.isaac.viewer import configure_evaluation_preview
         configure_evaluation_preview(scene, simulation_app)
     scene.gripper.open()
-    export_stage(scene, args.output_dir / "evaluation_stage.usda")
+    export_stage(scene, job.output_dir / "evaluation_stage.usda")
     manager = create_grasping_manager(scene)
     candidates = generate_candidates(
         scene,
@@ -96,7 +184,7 @@ def _run(
         robot=robot,
         generation_config_path=DEFAULT_CONFIG,
         robot_usd=robot_usd,
-        object_usd=args.object_usd,
+        object_usd=job.object_usd,
         base_to_tcp=to_pose_data(scene.gripper.base_to_tcp),
         sampler_config=manager.sampler_config,
         records=evaluated.records,
@@ -105,7 +193,7 @@ def _run(
         support_height=candidates.support_height_m,
     )
     write_results(
-        args.output_dir,
+        job.output_dir,
         metadata,
         evaluated.records,
         evaluated.successful,
@@ -115,10 +203,41 @@ def _run(
         f"generated={len(evaluated.records)} "
         f"task_feasible={len(candidates.feasible)} "
         f"evaluated={len(candidates.feasible)} "
-        f"accepted={len(evaluated.successful)} output={args.output_dir}",
+        f"accepted={len(evaluated.successful)} output={job.output_dir}",
         flush=True,
     )
     return 0
+
+
+def _run_jobs(
+    args: argparse.Namespace,
+    generation: GraspGenerationConfig,
+    robot: RobotConfig,
+    simulation_app: Any,
+) -> int:
+    if args.object_dir is None:
+        job = args.jobs[0]
+        job.output_dir.mkdir(parents=True, exist_ok=True)
+        return _run_job(args, job, generation, robot, simulation_app)
+
+    failed_count = 0
+    total = len(args.jobs)
+    for index, job in enumerate(args.jobs, start=1):
+        print(f"[{index}/{total}] Generating grasps for {job.object_usd}", flush=True)
+        job.output_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            _run_job(args, job, generation, robot, simulation_app)
+        except Exception:
+            failed_count += 1
+            traceback.print_exc()
+
+    print(
+        "GRASP_BATCH_RESULT "
+        f"total={total} succeeded={total - failed_count} "
+        f"failed={failed_count} output={args.output_dir}",
+        flush=True,
+    )
+    return 1 if failed_count else 0
 
 
 def _enable_extension(extension_manager: Any, name: str) -> None:
@@ -135,7 +254,6 @@ def _enable_grasping_extension() -> None:
 def main(argv: Sequence[str] | None = None) -> int:
     generation, robot = load_grasp_config(DEFAULT_CONFIG, asset_root=PROJECT_ROOT)
     args = _parse_args(generation, argv)
-    args.output_dir.mkdir(parents=True, exist_ok=True)
 
     from isaacsim import SimulationApp
 
@@ -145,7 +263,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     simulation_app = SimulationApp(launch_config=launch_config)
     try:
         _enable_grasping_extension()
-        result = _run(args, generation, robot, simulation_app)
+        result = _run_jobs(args, generation, robot, simulation_app)
     except BaseException:
         traceback.print_exc()
         simulation_app.close(exit_code=1)

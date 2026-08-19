@@ -34,6 +34,22 @@ Generation is headless by default. Use `--gui` to watch the physics evaluation.
 The CLI also accepts `--num-orientations` and `--seed`; run it with `--help` for
 the current defaults.
 
+Use `--object-dir` instead of `--object-usd` to process a directory of objects:
+
+```bash
+uv run python -m grasp_data_gen.generate_grasps \
+  --object-dir Assets/Object/Rigid/matryoshka_dolls \
+  --output-dir outputs/grasp_data/piper
+```
+
+The directory is searched recursively for `.usd`, `.usda`, `.usdc`, and `.usdz`
+files, and each object gets an independent output subdirectory. For example,
+`00000/object.usdz` maps to `00000/`, while a flat `mug.usd` maps to `mug/`.
+The output directory must be outside the input directory so generated stages
+cannot become inputs on a later run. Failure of one object does not stop the
+remaining batch; the command prints a summary at the end and returns a non-zero
+exit code if any object failed.
+
 ## Outputs
 
 - `evaluation_stage.usda`: the assembled gripper/object evaluation stage.

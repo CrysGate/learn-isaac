@@ -31,6 +31,20 @@ uv run python -m grasp_data_gen.generate_grasps \
 生成过程默认以无界面模式运行；添加 `--gui` 可观察物理评估。命令还支持
 `--num-orientations` 和 `--seed`，使用 `--help` 可查看当前默认值。
 
+批量处理一个目录下的物体时，使用 `--object-dir` 代替 `--object-usd`：
+
+```bash
+uv run python -m grasp_data_gen.generate_grasps \
+  --object-dir Assets/Object/Rigid/matryoshka_dolls \
+  --output-dir outputs/grasp_data/piper
+```
+
+程序会递归查找 `.usd`、`.usda`、`.usdc` 和 `.usdz` 文件，并为每个物体创建
+独立的输出子目录。比如输入 `00000/object.usdz` 会输出到 `00000/`；平铺的
+`mug.usd` 会输出到 `mug/`。输出目录必须位于输入目录之外，避免再次运行时把
+生成的评估场景当成输入。单个物体失败不会中断批次中的其他物体，命令会在结束时
+打印成功/失败汇总，并在存在失败时返回非零退出码。
+
 ## 输出文件
 
 - `evaluation_stage.usda`：组装后的夹爪与物体评估场景。
