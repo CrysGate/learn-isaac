@@ -10,6 +10,7 @@ dependencies = [
     "torchaudio==2.10.0",
     "torchvision==0.25.0",
     "modelscope",
+    "pymeshlab",
     "nvidia-curobo[cu12]",
     "isaaclab",
     "isaaclab-assets",

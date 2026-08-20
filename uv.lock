@@ -2307,6 +2307,7 @@ dependencies = [
     { name = "modelscope" },
     { name = "nvidia-curobo", extra = ["cu12"] },
     { name = "pydantic" },
+    { name = "pymeshlab" },
     { name = "pyyaml" },
     { name = "torch" },
     { name = "torchaudio" },
@@ -2333,6 +2334,7 @@ requires-dist = [
     { name = "modelscope" },
     { name = "nvidia-curobo", extras = ["cu12"], editable = "third_parties/curobo" },
     { name = "pydantic" },
+    { name = "pymeshlab" },
     { name = "pyyaml" },
     { name = "torch", specifier = "==2.10.0", index = "https://download.pytorch.org/whl/cu128" },
     { name = "torchaudio", specifier = "==2.10.0", index = "https://download.pytorch.org/whl/cu128" },
@@ -3586,6 +3588,21 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/2c/ba/a4bc465d36f6aafbff89da1bf67bcc6a97475b1d2300a74a778dcb293cef/pyliblzfse-0.4.1.tar.gz", hash = "sha256:bb0b899b3830c02fdf3dbde48ea59611833f366fef836e5c32cf8145134b7d3d", size = 47666, upload-time = "2020-07-09T02:50:17.52Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/e0/62/f7e7a5b3c38759410a98e875239f413d472dd29a68c02e9efbeb427f6cdf/pyliblzfse-0.4.1-cp312-cp312-macosx_10_13_universal2.whl", hash = "sha256:c655027b34156cd96340a344b94d90584de67e5b70327cd47aeff69e6d3525fa", size = 40952, upload-time = "2025-05-03T08:53:30.608Z" },
+]
+
+[[package]]
+name = "pymeshlab"
+version = "2025.7.post1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/ae/c1/a8db8ba66b5c51e700ba0eccea2c81f68a3223b775b0afe7b30a3da9a2ec/pymeshlab-2025.7.post1-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:693101c1ade7aadbad114878626307bf434fe607de873449fbe6b6b95a30cd01", size = 64995577, upload-time = "2026-01-30T08:40:55.627Z" },
+    { url = "https://files.pythonhosted.org/packages/f8/0d/6692ef6d96fa27763899665562c11ee6411eba55b2bddcda6799213dadac/pymeshlab-2025.7.post1-cp312-cp312-macosx_11_0_x86_64.whl", hash = "sha256:265503a06968420c8eb6934e3db78ff0767518000d8afd46ef3c976a506cfcf7", size = 54506925, upload-time = "2026-01-30T08:40:58.707Z" },
+    { url = "https://files.pythonhosted.org/packages/6b/8d/6082aa85f8c918901221d1a7e1e810cb5b56eecbed59a5e688feea92c148/pymeshlab-2025.7.post1-cp312-cp312-manylinux_2_35_aarch64.whl", hash = "sha256:d39fbaac1274adbbdf75cd999710d2ba48bd4d9087f34815afbdedb99dd3ded6", size = 65341068, upload-time = "2026-01-30T08:41:02.003Z" },
+    { url = "https://files.pythonhosted.org/packages/a3/4c/b0b1b5ad425acd80abcff4632f0241ca490c52ef9c48013d71f573680a2a/pymeshlab-2025.7.post1-cp312-cp312-manylinux_2_35_x86_64.whl", hash = "sha256:bc453d89b114671affc747991a939b257d2320b71885b31213190c64081f5c35", size = 106530409, upload-time = "2026-01-30T08:41:05.155Z" },
+    { url = "https://files.pythonhosted.org/packages/4f/06/66b91d2d77fbb2bf729dfe58692957bad3cea706ecb3fe51fca4b07c0c95/pymeshlab-2025.7.post1-cp312-cp312-win_amd64.whl", hash = "sha256:fc04cb2206e8d0194b2c8f61ea6ef54505bbe3d217e7f1960ee9608464f9bfad", size = 55211790, upload-time = "2026-01-30T08:41:08.339Z" },
 ]
 
 [[package]]
