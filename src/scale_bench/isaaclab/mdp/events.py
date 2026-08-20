@@ -11,6 +11,7 @@ from isaaclab.envs import ManagerBasedEnv
 from isaaclab.managers import EventTermCfg, ManagerTermBase
 
 from scale_bench.tasks.common.layout import TaskLayout
+from scale_bench.tasks.common.placement import PlacementContext
 from scale_bench.tasks.common.task import Task
 
 
@@ -21,6 +22,7 @@ class ResetTaskLayout(ManagerTermBase):
         super().__init__(cfg, env)
         self._task: Task = cfg.params["task"]
         self._layouts: tuple[TaskLayout, ...] = cfg.params["layouts"]
+        self._context: PlacementContext = cfg.params["context"]
         if len(self._layouts) != env.num_envs:
             raise ValueError(
                 f"expected {env.num_envs} task layouts, got {len(self._layouts)}"
@@ -31,15 +33,40 @@ class ResetTaskLayout(ManagerTermBase):
         self,
         env: ManagerBasedEnv,
         env_ids: Sequence[int] | torch.Tensor | slice | None,
-        task: Task,
-        layouts: tuple[TaskLayout, ...],
+        **_: Any,
     ) -> None:
-        del task, layouts
         resolved_env_ids = resolve_env_ids(env_ids, env.num_envs)
         if not resolved_env_ids:
             return
         selected_layouts = [self._layouts[env_id] for env_id in resolved_env_ids]
         self._write_layouts(env, resolved_env_ids, selected_layouts)
+
+    def assign_layouts(
+        self,
+        env_ids: Sequence[int] | torch.Tensor | slice | None,
+        layouts: Sequence[TaskLayout],
+    ) -> None:
+        """Assign validated layouts to the next reset of selected environments."""
+
+        resolved_env_ids = resolve_env_ids(env_ids, self.num_envs)
+        resolved_layouts = tuple(layouts)
+        if len(resolved_layouts) == 1 and len(resolved_env_ids) > 1:
+            resolved_layouts *= len(resolved_env_ids)
+        if len(resolved_layouts) != len(resolved_env_ids):
+            raise ValueError(
+                "task_layouts must contain one layout or one per selected "
+                f"environment ({len(resolved_env_ids)}); got {len(resolved_layouts)}"
+            )
+        for layout in resolved_layouts:
+            self._task.validate_layout(self._context, layout)
+        updated = list(self._layouts)
+        for env_id, layout in zip(
+            resolved_env_ids,
+            resolved_layouts,
+            strict=True,
+        ):
+            updated[env_id] = layout
+        self._layouts = tuple(updated)
 
     def episode_info(
         self,

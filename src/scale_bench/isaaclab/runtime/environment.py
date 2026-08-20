@@ -11,24 +11,19 @@ from isaaclab.envs.common import VecEnvObs
 
 from scale_bench.isaaclab.builders.environment import ScaleBenchEnvCfg
 from scale_bench.isaaclab.mdp.events import ResetTaskLayout, resolve_env_ids
-from scale_bench.isaaclab.runtime.io_descriptors import (
-    build_io_descriptors,
-    validate_io_descriptors,
-)
+from scale_bench.isaaclab.runtime.io_descriptors import build_io_descriptors, validate_io_descriptors
+from scale_bench.tasks.common.layout import TaskLayout
 
 
 class ScaleBenchEnv(ManagerBasedEnv):
     """Own the simulation lifecycle and expose runtime-derived metadata."""
 
     def __init__(self, cfg: ScaleBenchEnvCfg) -> None:
-        self._task_layout_reset: ResetTaskLayout | None = None
+        self._task_layout_reset: ResetTaskLayout
         super().__init__(cfg)
 
-        if cfg.events.task_layout is not None:
-            term = self.event_manager.get_term_cfg("task_layout").func
-            if not isinstance(term, ResetTaskLayout):
-                raise RuntimeError("task_layout event did not initialize correctly")
-            self._task_layout_reset = term
+        term = self.event_manager.get_term_cfg("task_layout").func
+        self._task_layout_reset = term
         validate_io_descriptors(self, self.get_IO_descriptors)
 
     def load_managers(self) -> None:
@@ -61,6 +56,7 @@ class ScaleBenchEnv(ManagerBasedEnv):
         seed: int | None = None,
         env_ids: Sequence[int] | torch.Tensor | None = None,
         options: dict[str, Any] | None = None,
+        task_layouts: Sequence[TaskLayout] | None = None,
     ) -> tuple[VecEnvObs, dict]:
         resolved_env_ids = (
             None if env_ids is None else resolve_env_ids(env_ids, self.num_envs)
@@ -74,6 +70,8 @@ class ScaleBenchEnv(ManagerBasedEnv):
                 dtype=torch.int32,
             )
         )
+        if task_layouts is not None:
+            self._task_layout_reset.assign_layouts(resolved_env_ids, task_layouts)
         observation, info = super().reset(
             seed=seed,
             env_ids=env_id_tensor,

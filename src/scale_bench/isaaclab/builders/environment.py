@@ -108,6 +108,7 @@ def build_environment_cfg(
             params={
                 "task": task,
                 "layouts": layouts,
+                "context": placement_context,
             },
         )
 
