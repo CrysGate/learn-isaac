@@ -4,7 +4,7 @@
 
 ScaleBench 是一组配置优先的 Isaac Lab 基础组件，用于构建尺度相关的双臂操作场景。
 
-项目将机器人语义、相机、场景、任务、仿真和环境参数保存在 YAML 中，在边界处严格校验，再将其编译为原生 Isaac Lab 配置对象。当前实现提供可复用的场景构建、一个由 seed/layout 驱动的任务和正式的 manager-based 运行时入口，但还不是完整的策略或评测流水线。
+项目将机器人语义、相机、场景、任务、仿真和环境参数保存在 YAML 中，在边界处严格校验，再将其编译为原生 Isaac Lab 配置对象。当前实现提供可复用的场景构建、一个支持最终状态评测的 seed/layout 驱动任务和正式的 manager-based 运行时入口，但还不是完整的策略或 benchmark 流水线。
 
 ## 已实现能力
 
@@ -17,11 +17,12 @@ ScaleBench 是一组配置优先的 Isaac Lab 基础组件，用于构建尺度�
 - **Manager-based 环境入口**：通过可安全导入的公共 API 创建 `ScaleBenchEnv`，应用启动仍由调用方管理。
 - **Profile 驱动的 action**：左右机械臂与夹爪均使用动态维度、物理单位的绝对命令关节目标。
 - **具名 policy observation**：按 profile 顺序提供机器人状态和已配置相机的原始 RGB-D，不混入任务或评测真值。
+- **任务专属评测 observation**：每个任务可以注册所需的具名仿真真值 term，并通过统一的环境方法评测指定环境。
 - **纹理正确的程序化表面**：`UvCuboidCfg` 会写入 face-varying UV，使 MDL 材质能在长方体表面正确平铺。
 - **可直接运行的场景预览**：既可以在 Isaac Sim 中查看放置区域与相机视锥，也可以执行短时间无界面冒烟验证。
 
 > [!NOTE]
-> 关节空间 Action、policy Observation 与可选 Recorder Manager term 已接入。末端控制、Evaluator、episode 调度和 benchmark 报告仍留待后续实现。
+> 关节空间 Action、policy/evaluator Observation、任务专属最终状态评测与可选 Recorder Manager term 已接入。末端控制、episode 调度和 benchmark 报告仍留待后续实现。
 
 ## 架构
 
@@ -197,8 +198,11 @@ env = create_env(
 )
 try:
     observation, info = env.reset()
-    # 执行 policy/evaluator 循环，并在再次 reset 前导出这些环境。
-    env.complete_episodes(success=[True] * env.num_envs)
+    # 执行 policy，用最新最终状态评测，并在 reset 前导出。
+    results = env.evaluate()
+    env.complete_episodes(
+        success=[results[env_id].success for env_id in range(env.num_envs)]
+    )
 finally:
     env.close()
     simulation_app.close()
@@ -286,7 +290,7 @@ instruction = task.instruction
 target_order = task.target_order_small_to_large
 ```
 
-调用 `task.resolve_layout(context, layout_path=...)` 会恢复并校验保存的精确位姿。将该 layout 传给 `create_env(..., task=task, layouts=(layout,))` 后，environment builder 会从 `SceneConfig` 派生同一上下文，选择内置 TaskBuilder 并注册新的原生资产 cfg。要改用其他任务 YAML，应先将其加载为 `SortDollsBySizeConfig`。Piper/cuRobo 规划、机器人分工、数据记录、成功评测和应用生命周期仍留在 Task 层之外。
+调用 `task.resolve_layout(context, layout_path=...)` 会恢复并校验保存的精确位姿。将该 layout 传给 `create_env(..., task=task, layouts=(layout,))` 后，environment builder 会从 `SceneConfig` 派生同一上下文，选择内置 TaskBuilder，并注册新的原生资产和 evaluator observation cfg。要改用其他任务 YAML，应先将其加载为 `SortDollsBySizeConfig`。Piper/cuRobo 规划、机器人分工、数据记录和应用生命周期仍留在 Task 层之外；任务专属的成功评测由 Task 自身实现。
 
 ### UV 长方体
 

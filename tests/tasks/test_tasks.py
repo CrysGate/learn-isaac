@@ -10,6 +10,7 @@ import pytest
 from pydantic import ValidationError
 
 from scale_bench.tasks.common.layout import AssetPlacement, TaskLayout
+from scale_bench.tasks.common.evaluation import EvaluationResult
 from scale_bench.tasks.common.placement import PlacementContext
 from scale_bench.tasks.common.rigid_object import (
     RigidObjectAssetConfig,
@@ -20,6 +21,7 @@ from scale_bench.tasks.common.rigid_object import (
 from scale_bench.tasks.sort_dolls_by_size.config import (
     DollAssetConfig,
     SortDollsBySizeConfig,
+    TargetSlotsConfig,
 )
 from scale_bench.tasks.sort_dolls_by_size.task import SortDollsBySize
 
@@ -176,6 +178,10 @@ def test_sort_dolls_target_order_comes_from_metadata(tmp_path: Path) -> None:
         instruction="Sort the dolls.",
         physics=RigidObjectPhysicsConfig(restitution=0.01),
         dolls=tuple(dolls),
+        target_slots=TargetSlotsConfig(
+            x_m=0.0,
+            y_positions_m=(-0.1, 0.0, 0.1),
+        ),
     )
     task = SortDollsBySize(config)
 
@@ -193,6 +199,10 @@ def test_task_models_reject_invalid_values() -> None:
         SortDollsBySizeConfig(
             instruction="Sort the dolls.",
             physics=RigidObjectPhysicsConfig(restitution=0.01),
+            target_slots=TargetSlotsConfig(
+                x_m=0.0,
+                y_positions_m=(-0.1, 0.1),
+            ),
             dolls=(
                 DollAssetConfig(
                     asset_id="00000",
@@ -206,3 +216,84 @@ def test_task_models_reject_invalid_values() -> None:
                 ),
             ),
         )
+
+
+def test_evaluation_result_validates_and_freezes_metrics() -> None:
+    result = EvaluationResult(
+        success=False,
+        progress=0.5,
+        metrics={"placed_count": 1.0},
+        failure_reason="incomplete",
+    )
+
+    with pytest.raises(TypeError):
+        result.metrics["placed_count"] = 2.0  # type: ignore[index]
+    with pytest.raises(ValueError, match="between 0 and 1"):
+        EvaluationResult(success=False, progress=1.1)
+    with pytest.raises(ValueError, match="failure reason"):
+        EvaluationResult(
+            success=True,
+            progress=1.0,
+            failure_reason="unexpected",
+        )
+
+
+def test_sort_dolls_evaluates_task_specific_final_state(tmp_path: Path) -> None:
+    dolls = []
+    for asset_id, height in (("00000", 0.30), ("00001", 0.10)):
+        metadata_path = tmp_path / f"{asset_id}.json"
+        _write_metadata(metadata_path, size=(0.05, 0.05, height))
+        dolls.append(
+            DollAssetConfig(
+                asset_id=asset_id,
+                usd_path=str(tmp_path / f"{asset_id}.usd"),
+                metadata_path=str(metadata_path),
+            )
+        )
+    task = SortDollsBySize(
+        SortDollsBySizeConfig(
+            instruction="Sort the dolls.",
+            physics=RigidObjectPhysicsConfig(restitution=0.01),
+            dolls=tuple(dolls),
+            target_slots=TargetSlotsConfig(
+                x_m=0.0,
+                y_positions_m=(-0.1, 0.1),
+            ),
+        )
+    )
+    targets = tuple(
+        placement.position_m
+        for placement in task.target_layout(
+            PlacementContext(
+                table_top_z_m=0.75,
+                x_range_m=(-0.4, 0.4),
+                y_range_m=(-0.5, 0.5),
+            )
+        ).assets.values()
+    )
+    successful = task.evaluate(
+        {
+            "object_positions_m": targets,
+            "object_orientations_xyzw": ((0.0, 0.0, 0.0, 1.0),) * 2,
+            "target_positions_m": targets,
+        }
+    )
+
+    assert successful.success is True
+    assert successful.progress == 1.0
+    assert successful.placed_count == 2
+
+    misplaced = list(targets)
+    misplaced[1] = (targets[1][0] + 0.1, *targets[1][1:])
+    failed = task.evaluate(
+        {
+            "object_positions_m": misplaced,
+            "object_orientations_xyzw": ((0.0, 0.0, 0.0, 1.0),) * 2,
+            "target_positions_m": targets,
+        }
+    )
+
+    assert failed.success is False
+    assert failed.progress == 0.5
+    assert failed.placed_count == 1
+    assert failed.failure_reason == "one or more dolls are misplaced"

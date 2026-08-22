@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 from typing import Annotated, Self
+from pydantic import Field, field_validator, model_validator
 
-from pydantic import Field, model_validator
-
+from scale_bench.config.base import FiniteFloat, FrozenModel, PositiveFloat
 from scale_bench.tasks.common.rigid_object import (
     RigidObjectAssetConfig,
     RigidObjectTaskConfig,
@@ -21,17 +21,40 @@ class DollAssetConfig(RigidObjectAssetConfig):
     asset_id: AssetId
 
 
+class TargetSlotsConfig(FrozenModel):
+    """Fixed tabletop slots ordered in the positive Y direction."""
+
+    x_m: FiniteFloat
+    y_positions_m: tuple[FiniteFloat, ...] = Field(min_length=2)
+    position_tolerance_m: PositiveFloat = 0.025
+    height_tolerance_m: PositiveFloat = 0.015
+    upright_tolerance_rad: PositiveFloat = 0.10
+
+    @field_validator("y_positions_m")
+    @classmethod
+    def _validate_y_positions(
+        cls,
+        value: tuple[float, ...],
+    ) -> tuple[float, ...]:
+        if any(left >= right for left, right in zip(value, value[1:])):
+            raise ValueError("y_positions_m must be strictly increasing")
+        return value
+
+
 class SortDollsBySizeConfig(RigidObjectTaskConfig):
     """Typed task configuration and nesting-doll constraints."""
 
     dolls: tuple[DollAssetConfig, ...] = Field(min_length=2)
+    target_slots: TargetSlotsConfig
 
     @model_validator(mode="after")
     def _validate_dolls(self) -> Self:
         ids = tuple(doll.asset_id for doll in self.dolls)
         if len(ids) != len(set(ids)):
             raise ValueError("doll asset_id values must be unique")
+        if len(ids) != len(self.target_slots.y_positions_m):
+            raise ValueError("the number of dolls must match the number of target slots")
         return self
 
 
-__all__ = ["DollAssetConfig", "SortDollsBySizeConfig"]
+__all__ = ["DollAssetConfig", "SortDollsBySizeConfig", "TargetSlotsConfig"]

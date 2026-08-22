@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 import torch
@@ -12,18 +12,22 @@ from isaaclab.envs.common import VecEnvObs
 from scale_bench.isaaclab.builders.environment import ScaleBenchEnvCfg
 from scale_bench.isaaclab.mdp.events import ResetTaskLayout, resolve_env_ids
 from scale_bench.isaaclab.runtime.io_descriptors import build_io_descriptors, validate_io_descriptors
+from scale_bench.tasks.common.evaluation import EvaluationResult
 from scale_bench.tasks.common.layout import TaskLayout
+from scale_bench.tasks.common.task import Task
 
 
 class ScaleBenchEnv(ManagerBasedEnv):
     """Own the simulation lifecycle and expose runtime-derived metadata."""
 
     def __init__(self, cfg: ScaleBenchEnvCfg) -> None:
-        self._task_layout_reset: ResetTaskLayout
+        self._task_layout_reset: ResetTaskLayout | None = None
+        self._task: Task | None = cfg.task
         super().__init__(cfg)
 
-        term = self.event_manager.get_term_cfg("task_layout").func
-        self._task_layout_reset = term
+        if self._task is not None:
+            term = self.event_manager.get_term_cfg("task_layout").func
+            self._task_layout_reset = term
         validate_io_descriptors(self, self.get_IO_descriptors)
 
     def load_managers(self) -> None:
@@ -51,6 +55,29 @@ class ScaleBenchEnv(ManagerBasedEnv):
             )
         return super().step(action)
 
+    def evaluate(
+        self,
+        env_ids: Sequence[int] | torch.Tensor | None = None,
+    ) -> dict[int, EvaluationResult]:
+        """Evaluate the latest observation for each selected environment."""
+
+        if self._task is None:
+            raise RuntimeError("environment has no task to evaluate")
+        evaluator_observation = self.obs_buf.get("evaluator")
+        if not isinstance(evaluator_observation, Mapping):
+            raise RuntimeError("evaluator observations are unavailable; reset or step the environment first")
+        resolved_env_ids = resolve_env_ids(env_ids, self.num_envs)
+        results = {}
+        for env_id in resolved_env_ids:
+            result = self._task.evaluate(
+                {
+                    name: value[env_id]
+                    for name, value in evaluator_observation.items()
+                }
+            )
+            results[env_id] = result
+        return results
+
     def reset(
         self,
         seed: int | None = None,
@@ -71,6 +98,8 @@ class ScaleBenchEnv(ManagerBasedEnv):
             )
         )
         if task_layouts is not None:
+            if self._task_layout_reset is None:
+                raise RuntimeError("task_layouts cannot be assigned without an environment task")
             self._task_layout_reset.assign_layouts(resolved_env_ids, task_layouts)
         observation, info = super().reset(
             seed=seed,

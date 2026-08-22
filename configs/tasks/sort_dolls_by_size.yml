@@ -3,6 +3,10 @@ spawn_clearance_m: 0.003
 minimum_object_gap_m: 0.02
 sampling_attempts_per_object: 1000
 
+target_slots:
+  x_m: 0.0
+  y_positions_m: [-0.31, -0.20, -0.09, 0.02, 0.13]
+
 physics:
   restitution: 0.01
   linear_damping: 0.10

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 import torch
 from isaaclab.assets import Articulation
 from isaaclab.envs import ManagerBasedEnv
@@ -72,4 +74,78 @@ def gripper_joint_pos(
     return asset.data.joint_pos.torch[:, asset_cfg.joint_ids]
 
 
-__all__ = ["camera_image", "gripper_joint_pos"]
+def _record_batch_shape(
+    output: torch.Tensor,
+    descriptor: GenericObservationIODescriptor,
+    **_: object,
+) -> None:
+    descriptor.shape = tuple(output.shape[1:])
+    descriptor.dtype = str(output.dtype)
+
+
+@generic_io_descriptor(
+    observation_type="RigidObjectPosition",
+    on_inspect=_record_batch_shape,
+    units="m",
+)
+def rigid_object_root_pos(
+    env: ManagerBasedEnv,
+    asset_cfgs: Sequence[SceneEntityCfg],
+) -> torch.Tensor:
+    """Return ordered task-object positions in local environment frames."""
+
+    return torch.stack(
+        tuple(
+            env.scene[cfg.name].data.root_pos_w.torch - env.scene.env_origins
+            for cfg in asset_cfgs
+        ),
+        dim=1,
+    )
+
+
+@generic_io_descriptor(
+    observation_type="RigidObjectOrientation",
+    on_inspect=_record_batch_shape,
+    units="unit quaternion xyzw",
+)
+def rigid_object_root_quat(
+    env: ManagerBasedEnv,
+    asset_cfgs: Sequence[SceneEntityCfg],
+) -> torch.Tensor:
+    """Return ordered task-object root orientations as XYZW quaternions."""
+
+    return torch.stack(
+        tuple(
+            env.scene[cfg.name].data.root_quat_w.torch
+            for cfg in asset_cfgs
+        ),
+        dim=1,
+    )
+
+
+@generic_io_descriptor(
+    observation_type="FixedTaskTargetPosition",
+    on_inspect=_record_batch_shape,
+    units="m",
+)
+def fixed_positions(
+    env: ManagerBasedEnv,
+    positions_m: Sequence[Sequence[float]],
+) -> torch.Tensor:
+    """Broadcast fixed environment-local target positions to all environments."""
+
+    values = torch.as_tensor(
+        positions_m,
+        device=env.device,
+        dtype=torch.float32,
+    )
+    return values.unsqueeze(0).expand(env.num_envs, -1, -1).clone()
+
+
+__all__ = [
+    "camera_image",
+    "fixed_positions",
+    "gripper_joint_pos",
+    "rigid_object_root_pos",
+    "rigid_object_root_quat",
+]

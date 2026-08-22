@@ -1,15 +1,21 @@
-"""Common simulator-independent task contract."""
+"""Common task contract and evaluator observation types."""
 
 from __future__ import annotations
 
-from typing import Protocol
+from collections.abc import Mapping
+from typing import Protocol, TypeAlias
 
+from .evaluation import EvaluationResult
 from .layout import TaskLayout
 from .placement import PlacementContext
 
 
+EvaluatorTerms: TypeAlias = Mapping[str, object]
+EvaluatorObservation: TypeAlias = Mapping[str, object]
+
+
 class Task(Protocol):
-    """Identity, instruction, and deterministic layout behavior for a task."""
+    """Identity, layout behavior, and task-specific evaluation contract."""
 
     @property
     def task_id(self) -> str: ...
@@ -29,5 +35,19 @@ class Task(Protocol):
         layout: TaskLayout,
     ) -> None: ...
 
+    def build_evaluator_terms(
+        self,
+        context: PlacementContext,
+    ) -> EvaluatorTerms: ...
 
-__all__ = ["Task"]
+    def evaluate(
+        self,
+        observation: EvaluatorObservation,
+    ) -> EvaluationResult: ...
+
+
+__all__ = [
+    "EvaluatorObservation",
+    "EvaluatorTerms",
+    "Task",
+]

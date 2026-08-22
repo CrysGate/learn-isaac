@@ -50,6 +50,7 @@ class ScaleBenchEnvCfg(ManagerBasedEnvCfg):
     actions: ActionsCfg = MISSING
     observations: ObservationsCfg = MISSING
     events: EventsCfg = EventsCfg()
+    task: Task | None = None
 
 
 def build_environment_cfg(
@@ -89,6 +90,7 @@ def build_environment_cfg(
         env_spacing_m=env_spacing_m,
     )
     events = EventsCfg()
+    evaluator_terms = None
     if task is not None:
         placement_context = PlacementContext.from_scene_config(scene_config)
         layouts = _prepare_task_layouts(
@@ -111,11 +113,13 @@ def build_environment_cfg(
                 "context": placement_context,
             },
         )
+        evaluator_terms = task.build_evaluator_terms(placement_context)
 
     observations = build_observations_cfg(
         left_robot_config=left_robot_config,
         right_robot_config=right_robot_config,
         scene_cfg=scene_cfg,
+        evaluator_terms=evaluator_terms,
     )
     cfg = ScaleBenchEnvCfg(
         scene=scene_cfg,
@@ -133,6 +137,7 @@ def build_environment_cfg(
         num_rerenders_on_reset=environment_config.num_rerenders_on_reset,
         wait_for_textures=environment_config.wait_for_textures,
         events=events,
+        task=task,
     )
     cfg.validate()
     _validate_runtime_timing(cfg)

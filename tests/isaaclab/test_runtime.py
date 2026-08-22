@@ -15,6 +15,7 @@ from scale_bench.isaaclab.runtime.io_descriptors import (
     build_io_descriptors,
     validate_io_descriptors,
 )
+from scale_bench.tasks.common.evaluation import EvaluationResult
 
 
 def _runtime_fixture():
@@ -143,6 +144,24 @@ def test_environment_accepts_contract_compliant_action(monkeypatch) -> None:
     result = env.step(torch.zeros((2, 4), dtype=torch.float32))
 
     assert result == expected
+
+
+def test_environment_evaluates_selected_latest_observations() -> None:
+    env = _environment_for_action_validation()
+
+    class Task:
+        def evaluate(self, observation):
+            value = float(observation["score"].item())
+            return EvaluationResult(success=value >= 0.5, progress=value)
+
+    env._task = Task()
+    env.obs_buf = {"evaluator": {"score": torch.tensor([[0.25], [0.75]])}}
+
+    results = env.evaluate(env_ids=(1,))
+
+    assert tuple(results) == (1,)
+    assert results[1].success is True
+    assert results[1].progress == pytest.approx(0.75)
 
 
 @pytest.mark.parametrize(

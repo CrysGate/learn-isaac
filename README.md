@@ -4,7 +4,7 @@
 
 Configuration-first Isaac Lab building blocks for scale-aware, dual-arm manipulation scenes.
 
-ScaleBench keeps robot semantics, camera, scene, task, simulation, and environment parameters in YAML, validates them at the boundary, and compiles them into native Isaac Lab configuration objects. The current implementation provides reusable scene construction, one seed/layout-driven task, and a formal manager-based runtime entry, but not a complete policy or evaluation pipeline.
+ScaleBench keeps robot semantics, camera, scene, task, simulation, and environment parameters in YAML, validates them at the boundary, and compiles them into native Isaac Lab configuration objects. The current implementation provides reusable scene construction, one seed/layout-driven task with final-state evaluation, and a formal manager-based runtime entry, but not a complete policy or benchmark pipeline.
 
 ## What is implemented
 
@@ -17,11 +17,12 @@ ScaleBench keeps robot semantics, camera, scene, task, simulation, and environme
 - **A manager-based environment entry** — create `ScaleBenchEnv` through a safe public API while keeping application startup under caller control.
 - **Profile-driven actions** — control both arms and grippers with dynamically sized absolute command-joint targets in physical units.
 - **Named policy observations** — expose ordered robot state and raw RGB-D from configured cameras without leaking task or evaluation ground truth.
+- **Task-specific evaluation observations** — let each task register named simulator truth terms and evaluate selected environments through one runtime method.
 - **Texture-correct procedural surfaces** — `UvCuboidCfg` authors face-varying UV coordinates so MDL materials tile correctly on cuboids.
 - **A runnable scene preview** — launch the default scene with placement-area and camera-frustum overlays, or run a short headless smoke test.
 
 > [!NOTE]
-> Joint-space Action, policy Observation, and opt-in Recorder Manager terms are connected. End-effector control, evaluators, episode orchestration, and benchmark reporting remain future work.
+> Joint-space Action, policy/evaluator Observation, task-specific final-state evaluation, and opt-in Recorder Manager terms are connected. End-effector control, episode orchestration, and benchmark reporting remain future work.
 
 ## Architecture
 
@@ -197,8 +198,11 @@ env = create_env(
 )
 try:
     observation, info = env.reset()
-    # Run the policy/evaluator loop, then export before resetting these envs.
-    env.complete_episodes(success=[True] * env.num_envs)
+    # Run the policy, evaluate its latest final state, then export before reset.
+    results = env.evaluate()
+    env.complete_episodes(
+        success=[results[env_id].success for env_id in range(env.num_envs)]
+    )
 finally:
     env.close()
     simulation_app.close()
@@ -286,7 +290,7 @@ instruction = task.instruction
 target_order = task.target_order_small_to_large
 ```
 
-Calling `task.resolve_layout(context, layout_path=...)` restores and validates the exact saved poses. Pass it through `create_env(..., task=task, layouts=(layout,))`; the environment builder derives the same context from `SceneConfig`, selects the built-in TaskBuilder, and registers fresh native asset cfgs. To use another task YAML, load it into `SortDollsBySizeConfig` first. Piper/curobo planning, robot assignment, recording, success evaluation, and the application lifecycle remain outside this task layer.
+Calling `task.resolve_layout(context, layout_path=...)` restores and validates the exact saved poses. Pass it through `create_env(..., task=task, layouts=(layout,))`; the environment builder derives the same context from `SceneConfig`, selects the built-in TaskBuilder, and registers fresh native asset and evaluator observation cfgs. To use another task YAML, load it into `SortDollsBySizeConfig` first. Piper/curobo planning, robot assignment, recording, and the application lifecycle remain outside this task layer; task-specific success evaluation lives on the Task.
 
 ### UV cuboids
 

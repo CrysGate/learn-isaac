@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import MISSING
 
 import isaaclab.envs.mdp as mdp
@@ -40,14 +40,25 @@ class ObservationsCfg:
 
     policy: PolicyCfg = MISSING
 
+    @configclass
+    class EvaluatorCfg(ObservationGroupCfg):
+        """Named, uncorrupted simulator truth used only for evaluation."""
+
+        def __post_init__(self) -> None:
+            self.concatenate_terms = False
+            self.enable_corruption = False
+
+    evaluator: EvaluatorCfg | None = None
+
 
 def build_observations_cfg(
     *,
     left_robot_config: RobotConfig,
     right_robot_config: RobotConfig,
     scene_cfg: InteractiveSceneCfg,
+    evaluator_terms: Mapping[str, ObservationTermCfg] | None = None,
 ) -> ObservationsCfg:
-    """Build policy observation terms in their fixed public order."""
+    """Build fixed policy terms and optional task-specific evaluator terms."""
 
     terms = {
         **_robot_observation_terms("left", left_robot_config),
@@ -60,7 +71,39 @@ def build_observations_cfg(
         camera_names.append("right_robot_camera")
     camera_names.append("overhead_camera")
     terms.update(_camera_observation_terms(scene_cfg, camera_names))
-    return ObservationsCfg(policy=ObservationsCfg.PolicyCfg(**terms))
+    return ObservationsCfg(
+        policy=ObservationsCfg.PolicyCfg(**terms),
+        evaluator=_build_evaluator_cfg(evaluator_terms),
+    )
+
+
+def _build_evaluator_cfg(
+    terms: Mapping[str, ObservationTermCfg] | None,
+) -> ObservationsCfg.EvaluatorCfg | None:
+    """Create a dynamic named group without imposing a universal term schema."""
+
+    if terms is None:
+        return None
+    if not terms:
+        raise ValueError("evaluator observation group must contain at least one term")
+
+    reserved_names = {
+        "concatenate_terms",
+        "concatenate_dim",
+        "enable_corruption",
+        "history_length",
+        "flatten_history_dim",
+    }
+    group = ObservationsCfg.EvaluatorCfg()
+    for name, term_cfg in terms.items():
+        if not isinstance(name, str) or not name.isidentifier():
+            raise ValueError("evaluator observation names must be valid Python identifiers")
+        if name in reserved_names:
+            raise ValueError(f"evaluator observation name {name!r} is reserved")
+        if not isinstance(term_cfg, ObservationTermCfg):
+            raise TypeError(f"evaluator observation {name!r} must be an ObservationTermCfg")
+        setattr(group, name, term_cfg)
+    return group
 
 
 def _robot_observation_terms(

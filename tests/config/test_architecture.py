@@ -24,12 +24,14 @@ FORBIDDEN_ROOTS = {
 }
 
 
-def test_pure_layers_have_no_simulator_or_tensor_imports() -> None:
+def test_pure_layers_have_no_eager_simulator_or_tensor_imports() -> None:
     violations: list[str] = []
     for root in (CONFIG_ROOT, TASKS_ROOT):
         for path in root.rglob("*.py"):
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
-            for node in ast.walk(tree):
+            # Task methods may construct native evaluator terms through delayed
+            # imports. Only module-level imports affect pure-layer import safety.
+            for node in tree.body:
                 names: list[str] = []
                 if isinstance(node, ast.Import):
                     names = [alias.name for alias in node.names]

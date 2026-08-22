@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from isaaclab.managers import ObservationTermCfg
 
 from scale_bench.config.models.camera import CameraConfig
 from scale_bench.config.models.environment import EnvironmentConfig
@@ -24,6 +25,7 @@ from scale_bench.isaaclab.builders.scene import build_scene_cfg
 from scale_bench.isaaclab.builders.simulation import build_simulation_cfg
 from scale_bench.isaaclab.managers.actions import build_actions_cfg
 from scale_bench.isaaclab.managers.observations import build_observations_cfg
+from scale_bench.isaaclab.mdp.observations import fixed_positions
 from scale_bench.isaaclab.managers.recorders import build_recorders_cfg
 from scale_bench.tasks.common.layout import AssetPlacement, TaskLayout
 from scale_bench.tasks.common.placement import PlacementContext
@@ -243,6 +245,51 @@ def test_scene_and_manager_builders_preserve_public_order(
         "overhead_camera_rgb",
         "overhead_camera_depth",
     ]
+    assert observations.evaluator is None
+
+
+def test_observation_builder_adds_dynamic_named_evaluator_group(
+    robot_config: RobotConfig,
+    scene_config: SceneConfig,
+    environment_config: EnvironmentConfig,
+) -> None:
+    scene_cfg = build_scene_cfg(
+        left_robot_config=robot_config,
+        right_robot_config=robot_config,
+        scene_config=scene_config,
+        environment_config=environment_config,
+    )
+    term = ObservationTermCfg(
+        func=fixed_positions,
+        params={"positions_m": ((0.0, 0.0, 0.0),)},
+    )
+
+    observations = build_observations_cfg(
+        left_robot_config=robot_config,
+        right_robot_config=robot_config,
+        scene_cfg=scene_cfg,
+        evaluator_terms={"target_position_m": term},
+    )
+
+    assert observations.evaluator.target_position_m is not term
+    assert observations.evaluator.target_position_m.func is fixed_positions
+    assert observations.evaluator.target_position_m.params == term.params
+    assert observations.evaluator.concatenate_terms is False
+    assert observations.evaluator.enable_corruption is False
+    with pytest.raises(ValueError, match="valid Python identifiers"):
+        build_observations_cfg(
+            left_robot_config=robot_config,
+            right_robot_config=robot_config,
+            scene_cfg=scene_cfg,
+            evaluator_terms={"invalid-name": term},
+        )
+    with pytest.raises(ValueError, match="reserved"):
+        build_observations_cfg(
+            left_robot_config=robot_config,
+            right_robot_config=robot_config,
+            scene_cfg=scene_cfg,
+            evaluator_terms={"history_length": term},
+        )
 
 
 def test_recorder_builder_is_opt_in_and_excludes_cameras_by_default(
@@ -532,6 +579,20 @@ def test_rigid_object_native_cfg_is_owned_by_task_builder(
 ) -> None:
     class ExampleTask(RigidObjectTask):
         TASK_ID = "example"
+
+        def build_evaluator_terms(self, context):
+            del context
+            from isaaclab.managers import ObservationTermCfg
+
+            return {
+                "target_position_m": ObservationTermCfg(
+                    func=fixed_positions,
+                    params={"positions_m": ((0.0, 0.0, 0.0),)},
+                )
+            }
+
+        def evaluate(self, observation):
+            raise NotImplementedError
 
     metadata_path = tmp_path / "metadata.json"
     metadata_path.write_text(

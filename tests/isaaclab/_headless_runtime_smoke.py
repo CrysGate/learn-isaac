@@ -93,6 +93,10 @@ def main(asset_root: Path) -> None:
             torch,
             check_image_content=True,
         )
+        _assert_evaluator_observation(observation["evaluator"], torch)
+        initial_evaluations = env.evaluate()
+        assert tuple(initial_evaluations) == (0, 1)
+        assert all(result.total_count == 5 for result in initial_evaluations.values())
         _assert_camera_frames_updated(env, (0, 1), torch)
         _assert_descriptors(descriptors)
         layouts = tuple(
@@ -119,6 +123,8 @@ def main(asset_root: Path) -> None:
         _assert_policy_observation(
             partial_observation["policy"], descriptors, torch
         )
+        _assert_evaluator_observation(partial_observation["evaluator"], torch)
+        assert tuple(env.evaluate(env_ids=(1,))) == (1,)
         _assert_camera_frames_updated(env, (1,), torch)
         reset_poses = asset.data.root_pose_w.torch
         torch.testing.assert_close(reset_poses[0], perturbed_poses[0])
@@ -230,6 +236,18 @@ def _assert_camera_frames_updated(env, env_ids: tuple[int, ...], torch) -> None:
     for sensor in env.scene.sensors.values():
         frames = sensor.frame.torch[list(env_ids)]
         assert torch.all(frames > 0).item()
+
+
+def _assert_evaluator_observation(evaluator: dict, torch) -> None:
+    assert set(evaluator) == {
+        "object_positions_m",
+        "object_orientations_xyzw",
+        "target_positions_m",
+    }
+    assert evaluator["object_positions_m"].shape == (2, 5, 3)
+    assert evaluator["object_orientations_xyzw"].shape == (2, 5, 4)
+    assert evaluator["target_positions_m"].shape == (2, 5, 3)
+    assert all(value.dtype == torch.float32 for value in evaluator.values())
 
 
 def _fill_action_from_observation(
