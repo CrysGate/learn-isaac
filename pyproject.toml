@@ -78,10 +78,6 @@ override-dependencies = [
 ]
 package = true
 
-[tool.pytest.ini_options]
-pythonpath = ["src", "."]
-testpaths = ["tests"]
-
 [[tool.uv.index]]
 name = "pytorch-cu128"
 url = "https://download.pytorch.org/whl/cu128"
