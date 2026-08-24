@@ -1,0 +1,7 @@
+torch>=2.4.0
+accelerate>=0.34.0
+transformers>=4.57.0
+git+https://github.com/huggingface/diffusers
+huggingface_hub>=0.30.0
+pillow>=10.0.0
+safetensors>=0.4.5

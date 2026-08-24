@@ -1,0 +1,30 @@
+# Local tooling
+**/.codex
+**/.codex/
+
+# Hugging Face staging (object_description/download_models.sh)
+.hf_home/
+.hf_hub_cache/
+
+# Hunyuan3D weights (assets_build/utils/checkpoints_download.py default)
+checkpoints_download/
+
+# Python caches
+__pycache__/
+*.py[cod]
+
+# OS-generated files
+.DS_Store
+*.swp
+
+# images2obj 运行时产物（勿提交）
+assets_build/images2obj/logs/
+assets_build/images2obj/tencent_state.json
+
+sample
+selenium_web
+*.sh
+
+.vscode/
+
+assets/
