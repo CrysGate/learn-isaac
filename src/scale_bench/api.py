@@ -22,7 +22,7 @@ def create_env(
     simulation_config: SimulationConfig,
     environment_config: EnvironmentConfig,
     recording_config: RecordingConfig | None = None,
-    task: Task | None = None,
+    task: Task,
     base_seed: int | None = None,
     layouts: Sequence[TaskLayout] | None = None,
     task_builder: Any = None,
@@ -30,7 +30,7 @@ def create_env(
     num_envs: int | None = None,
     env_spacing_m: float | None = None,
 ) -> Any:
-    """Build and return an environment after the caller has launched Isaac Sim."""
+    """Build a task-bound benchmark environment after Isaac Sim has launched."""
 
     from scale_bench.isaaclab.builders.environment import build_environment_cfg
     from scale_bench.isaaclab.runtime.environment import ScaleBenchEnv

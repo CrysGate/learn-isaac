@@ -1,4 +1,4 @@
-"""Preview a common or task-extended YAML scene in Isaac Sim."""
+"""Preview a task-bound YAML scene in Isaac Sim."""
 
 import argparse
 import sys
@@ -39,8 +39,8 @@ parser.add_argument(
 parser.add_argument(
     "--task",
     choices=SUPPORTED_TASK_IDS,
-    default=None,
-    help="Preview a task scene by its task ID; omit to preview the common scene.",
+    required=True,
+    help="Task ID whose assets and evaluator are included in the preview.",
 )
 layout_source = parser.add_mutually_exclusive_group()
 layout_source.add_argument(
@@ -92,11 +92,6 @@ if args.camera_frustum_length_m <= 0.0:
     parser.error("--camera-frustum-length-m must be positive")
 if args.seed is not None and args.seed < 0:
     parser.error("--seed must be non-negative")
-if args.task is None and (
-    args.seed is not None or args.layout is not None or args.export_layout is not None
-):
-    parser.error("--seed, --layout, and --export-layout require --task")
-
 try:
     sim_config = load_config(args.sim_config, SimulationConfig)
 except ValueError as error:
@@ -271,36 +266,31 @@ def main() -> None:
         asset_root=args.asset_root,
     )
     runtime_config = load_config(args.env_config, EnvironmentConfig)
-    task = (
-        SortDollsBySize(
-            load_config(
-                PROJECT_ROOT / "configs/tasks/sort_dolls_by_size.yml",
-                SortDollsBySizeConfig,
-                asset_root=args.asset_root,
-            )
+    task = SortDollsBySize(
+        load_config(
+            PROJECT_ROOT / "configs/tasks/sort_dolls_by_size.yml",
+            SortDollsBySizeConfig,
+            asset_root=args.asset_root,
         )
-        if args.task is not None
-        else None
     )
     base_seed = None
     layouts = None
     imported_layout = None
-    if task is not None:
-        if args.layout is None:
-            base_seed = 0 if args.seed is None else args.seed
-        else:
-            imported_layout = task.resolve_layout(
-                placement_context,
-                layout_path=args.layout,
-            )
-            layouts = (imported_layout,)
+    if args.layout is None:
+        base_seed = 0 if args.seed is None else args.seed
+    else:
+        imported_layout = task.resolve_layout(
+            placement_context,
+            layout_path=args.layout,
+        )
+        layouts = (imported_layout,)
 
-        if args.export_layout is not None:
-            export_layout = imported_layout or task.generate_layout(
-                placement_context,
-                base_seed,
-            )
-            export_layout.save(args.export_layout)
+    if args.export_layout is not None:
+        export_layout = imported_layout or task.generate_layout(
+            placement_context,
+            base_seed,
+        )
+        export_layout.save(args.export_layout)
 
     env = create_env(
         left_robot_config=left_profile,
@@ -327,15 +317,13 @@ def main() -> None:
             else None
         )
 
-        preview_name = f"task '{task.task_id}'" if task is not None else "common scene"
-        layout_message = ""
-        if task is not None:
-            source = (
-                f"layout {args.layout}"
-                if args.layout is not None
-                else f"seed {base_seed}"
-            )
-            layout_message = f"Task assets use {source}. "
+        preview_name = f"task '{task.task_id}'"
+        source = (
+            f"layout {args.layout}"
+            if args.layout is not None
+            else f"seed {base_seed}"
+        )
+        layout_message = f"Task assets use {source}. "
         io_descriptors = env.get_IO_descriptors
         runtime_descriptor = io_descriptors["runtime"]
         print(

@@ -50,7 +50,7 @@ class ScaleBenchEnvCfg(ManagerBasedEnvCfg):
     actions: ActionsCfg = MISSING
     observations: ObservationsCfg = MISSING
     events: EventsCfg = EventsCfg()
-    task: Task | None = None
+    task: Task = MISSING
 
 
 def build_environment_cfg(
@@ -61,7 +61,7 @@ def build_environment_cfg(
     simulation_config: SimulationConfig,
     environment_config: EnvironmentConfig,
     recording_config: RecordingConfig | None = None,
-    task: Task | None = None,
+    task: Task,
     task_layout_seed: int | None = None,
     task_layouts: Sequence[TaskLayout] | None = None,
     task_builder: TaskBuilder | None = None,
@@ -71,16 +71,10 @@ def build_environment_cfg(
 ) -> ScaleBenchEnvCfg:
     """Build a complete native environment cfg from resolved inputs."""
 
-    if task is None and (
-        task_layout_seed is not None
-        or task_layouts is not None
-        or task_builder is not None
-    ):
-        raise ValueError("task layout inputs and task_builder require a task")
-    if task is not None and (task_layout_seed is None) == (task_layouts is None):
-        raise ValueError(
-            "task requires exactly one of task_layout_seed or task_layouts"
-        )
+    if task is None:
+        raise TypeError("task must be a concrete Task")
+    if (task_layout_seed is None) == (task_layouts is None):
+        raise ValueError("task requires exactly one of task_layout_seed or task_layouts")
     scene_cfg = build_scene_cfg(
         left_robot_config=left_robot_config,
         right_robot_config=right_robot_config,
@@ -89,31 +83,29 @@ def build_environment_cfg(
         num_envs=num_envs,
         env_spacing_m=env_spacing_m,
     )
+    placement_context = PlacementContext.from_scene_config(scene_config)
+    layouts = _prepare_task_layouts(
+        task=task,
+        context=placement_context,
+        num_envs=scene_cfg.num_envs,
+        base_seed=task_layout_seed,
+        task_layouts=task_layouts,
+    )
+    builder = resolve_task_builder(task, task_builder)
+    asset_cfgs = builder.build_assets(task, layouts[0])
+    _validate_task_asset_names(layouts[0], asset_cfgs)
+    _add_task_assets(scene_cfg, asset_cfgs)
     events = EventsCfg()
-    evaluator_terms = None
-    if task is not None:
-        placement_context = PlacementContext.from_scene_config(scene_config)
-        layouts = _prepare_task_layouts(
-            task=task,
-            context=placement_context,
-            num_envs=scene_cfg.num_envs,
-            base_seed=task_layout_seed,
-            task_layouts=task_layouts,
-        )
-        builder = resolve_task_builder(task, task_builder)
-        asset_cfgs = builder.build_assets(task, layouts[0])
-        _validate_task_asset_names(layouts[0], asset_cfgs)
-        _add_task_assets(scene_cfg, asset_cfgs)
-        events.task_layout = EventTerm(
-            func=ResetTaskLayout,
-            mode="reset",
-            params={
-                "task": task,
-                "layouts": layouts,
-                "context": placement_context,
-            },
-        )
-        evaluator_terms = task.build_evaluator_terms(placement_context)
+    events.task_layout = EventTerm(
+        func=ResetTaskLayout,
+        mode="reset",
+        params={
+            "task": task,
+            "layouts": layouts,
+            "context": placement_context,
+        },
+    )
+    evaluator_terms = task.build_evaluator_terms(placement_context)
 
     observations = build_observations_cfg(
         left_robot_config=left_robot_config,
