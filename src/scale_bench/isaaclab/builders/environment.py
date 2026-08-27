@@ -49,7 +49,7 @@ class ScaleBenchEnvCfg(ManagerBasedEnvCfg):
     arm_action_mode: ArmActionMode = MISSING
     actions: ActionsCfg = MISSING
     observations: ObservationsCfg = MISSING
-    events: EventsCfg = EventsCfg()
+    events: EventsCfg = MISSING
     task: Task = MISSING
 
 
@@ -95,15 +95,16 @@ def build_environment_cfg(
     asset_cfgs = builder.build_assets(task, layouts[0])
     _validate_task_asset_names(layouts[0], asset_cfgs)
     _add_task_assets(scene_cfg, asset_cfgs)
-    events = EventsCfg()
-    events.task_layout = EventTerm(
-        func=ResetTaskLayout,
-        mode="reset",
-        params={
-            "task": task,
-            "layouts": layouts,
-            "context": placement_context,
-        },
+    events = EventsCfg(
+        task_layout=EventTerm(
+            func=ResetTaskLayout,
+            mode="reset",
+            params={
+                "task": task,
+                "layouts": layouts,
+                "context": placement_context,
+            },
+        ),
     )
     evaluator_terms = task.build_evaluator_terms(placement_context)
 

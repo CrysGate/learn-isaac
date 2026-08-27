@@ -23,7 +23,7 @@ from isaaclab.utils.configclass import configclass
 from scale_bench.config.models.recording import RecordingConfig
 from scale_bench.isaaclab.managers.observations import ObservationsCfg
 from scale_bench.isaaclab.mdp.observations import camera_image, gripper_joint_pos
-from scale_bench.isaaclab.mdp.recorders import PolicyObservationsRecorder
+from scale_bench.isaaclab.mdp.recorders import PolicyObservationsRecorder, SemanticEventsRecorder
 
 _EXPORT_MODES = {
     "all": DatasetExportMode.EXPORT_ALL,
@@ -42,6 +42,13 @@ class PolicyObservationsRecorderCfg(RecorderTermCfg):
 
 
 @configclass
+class SemanticEventsRecorderCfg(RecorderTermCfg):
+    """Configuration for per-frame skill and command text."""
+
+    class_type: type[SemanticEventsRecorder] = SemanticEventsRecorder
+
+
+@configclass
 class RecordersCfg(RecorderManagerBaseCfg):
     """Recorder terms enabled for one ScaleBench environment."""
 
@@ -50,6 +57,7 @@ class RecordersCfg(RecorderManagerBaseCfg):
     processed_actions: PostStepProcessedActionsRecorderCfg | None = None
     policy_observations: PolicyObservationsRecorderCfg | None = None
     scene_state: PostStepStatesRecorderCfg | None = None
+    semantic_events: SemanticEventsRecorderCfg | None = None
 
 
 def build_recorders_cfg(
@@ -104,6 +112,11 @@ def build_recorders_cfg(
             if recording_config.record_scene_state
             else None
         ),
+        semantic_events=(
+            SemanticEventsRecorderCfg()
+            if recording_config.record_semantic_events
+            else None
+        ),
     )
 
 
@@ -154,5 +167,6 @@ def _resolve_dataset_name(
 __all__ = [
     "PolicyObservationsRecorderCfg",
     "RecordersCfg",
+    "SemanticEventsRecorderCfg",
     "build_recorders_cfg",
 ]

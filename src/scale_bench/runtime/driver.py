@@ -44,7 +44,7 @@ class DriverEnvironment(Protocol):
 
     def step(self, action: Tensor) -> tuple[object, dict]: ...
 
-    def complete_episodes(
+    def export_episodes(
         self,
         *,
         success: Sequence[bool] | Tensor,
@@ -259,7 +259,7 @@ class EpisodeDriver:
             _evaluator_observation(self._observation),
         )
         if env_ids and self._env.recording_enabled:
-            self._env.complete_episodes(
+            self._env.export_episodes(
                 env_ids=env_ids,
                 success=tuple(evaluations[env_id].success for env_id in env_ids),
                 demo_ids=tuple(

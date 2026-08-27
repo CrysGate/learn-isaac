@@ -9,6 +9,17 @@ from typing import Mapping
 
 
 @dataclass(frozen=True, slots=True)
+class EpisodeEvaluatorSpec:
+    """Task-owned stateful success semantics."""
+
+    success_stability_steps: int = 1
+
+    def __post_init__(self) -> None:
+        if self.success_stability_steps <= 0:
+            raise ValueError("success_stability_steps must be positive")
+
+
+@dataclass(frozen=True, slots=True)
 class EvaluationResult:
     """Success, progress, and diagnostics for one environment."""
 
@@ -31,4 +42,4 @@ class EvaluationResult:
         object.__setattr__(self, "metrics", MappingProxyType(dict(self.metrics)))
 
 
-__all__ = ["EvaluationResult"]
+__all__ = ["EpisodeEvaluatorSpec", "EvaluationResult"]

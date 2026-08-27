@@ -30,6 +30,7 @@ class RecordingConfig(FrozenModel):
     record_joint_observations: StrictBool = True
     record_camera_observations: StrictBool = False
     record_scene_state: StrictBool = False
+    record_semantic_events: StrictBool = True
 
     @model_validator(mode="after")
     def validate_active_terms(self) -> "RecordingConfig":
@@ -42,6 +43,7 @@ class RecordingConfig(FrozenModel):
             self.record_joint_observations,
             self.record_camera_observations,
             self.record_scene_state,
+            self.record_semantic_events,
         )
         if not any(term_flags):
             raise ValueError("recording must enable at least one recorder term")

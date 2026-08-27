@@ -31,8 +31,8 @@ class ObservationsCfg:
         left_robot_camera_depth: ObservationTermCfg | None = None
         right_robot_camera_rgb: ObservationTermCfg | None = None
         right_robot_camera_depth: ObservationTermCfg | None = None
-        overhead_camera_rgb: ObservationTermCfg | None = None
-        overhead_camera_depth: ObservationTermCfg | None = None
+        overhead_camera_rgb: ObservationTermCfg = MISSING
+        overhead_camera_depth: ObservationTermCfg = MISSING
 
         def __post_init__(self) -> None:
             self.concatenate_terms = False
@@ -48,7 +48,7 @@ class ObservationsCfg:
             self.concatenate_terms = False
             self.enable_corruption = False
 
-    evaluator: EvaluatorCfg | None = None
+    evaluator: EvaluatorCfg = MISSING
 
 
 def build_observations_cfg(
@@ -56,9 +56,9 @@ def build_observations_cfg(
     left_robot_config: RobotConfig,
     right_robot_config: RobotConfig,
     scene_cfg: InteractiveSceneCfg,
-    evaluator_terms: Mapping[str, ObservationTermCfg] | None = None,
+    evaluator_terms: Mapping[str, ObservationTermCfg],
 ) -> ObservationsCfg:
-    """Build fixed policy terms and optional task-specific evaluator terms."""
+    """Build fixed policy terms and required task-specific evaluator terms."""
 
     terms = {
         **_robot_observation_terms("left", left_robot_config),
@@ -78,12 +78,10 @@ def build_observations_cfg(
 
 
 def _build_evaluator_cfg(
-    terms: Mapping[str, ObservationTermCfg] | None,
-) -> ObservationsCfg.EvaluatorCfg | None:
+    terms: Mapping[str, ObservationTermCfg],
+) -> ObservationsCfg.EvaluatorCfg:
     """Create a dynamic named group without imposing a universal term schema."""
 
-    if terms is None:
-        return None
     if not terms:
         raise ValueError("evaluator observation group must contain at least one term")
 

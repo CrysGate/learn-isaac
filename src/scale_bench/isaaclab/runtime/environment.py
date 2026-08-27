@@ -8,11 +8,14 @@ from typing import Any
 import torch
 from isaaclab.envs import ManagerBasedEnv
 from isaaclab.envs.common import VecEnvObs
+from isaaclab.envs.mdp.actions import JointPositionAction
 
 from scale_bench.isaaclab.builders.environment import ScaleBenchEnvCfg
-from scale_bench.isaaclab.mdp.events import ResetTaskLayout, resolve_env_ids
+from scale_bench.isaaclab.mdp.events import resolve_env_ids
 from scale_bench.isaaclab.runtime.io_descriptors import build_io_descriptors, validate_io_descriptors
-from scale_bench.tasks.common.evaluation import EvaluationResult
+
+from scale_bench.runtime.episodes import EpisodeTermination
+from scale_bench.runtime.recording import StepSemantics
 from scale_bench.tasks.common.layout import TaskLayout
 from scale_bench.tasks.common.task import Task
 
@@ -21,13 +24,14 @@ class ScaleBenchEnv(ManagerBasedEnv):
     """Own the simulation lifecycle and expose runtime-derived metadata."""
 
     def __init__(self, cfg: ScaleBenchEnvCfg) -> None:
-        self._task_layout_reset: ResetTaskLayout | None = None
-        self._task: Task | None = cfg.task
+        self._task: Task = cfg.task
+        self._step_semantics: tuple[StepSemantics | None, ...] = (
+            (None,) * cfg.scene.num_envs
+        )
         super().__init__(cfg)
 
-        if self._task is not None:
-            term = self.event_manager.get_term_cfg("task_layout").func
-            self._task_layout_reset = term
+        term = self.event_manager.get_term_cfg("task_layout").func
+        self._task_layout_reset = term
         validate_io_descriptors(self, self.get_IO_descriptors)
 
     def load_managers(self) -> None:
@@ -43,40 +47,59 @@ class ScaleBenchEnv(ManagerBasedEnv):
 
         return build_io_descriptors(self, super().get_IO_descriptors)
 
+    @property
+    def recording_enabled(self) -> bool:
+        """Whether this environment has active episode recorder terms."""
+
+        return bool(self.recorder_manager.active_terms)
+
+    @property
+    def task(self) -> Task:
+        """Return the task whose evaluator semantics drive this environment."""
+
+        return self._task
+
     def step(self, action: torch.Tensor) -> tuple[VecEnvObs, dict]:
-        """Validate and execute one action under the public environment contract."""
+        """Execute one action under the public environment contract."""
 
-        expected_shape = (self.num_envs, self.action_manager.total_action_dim)
-        if not isinstance(action, torch.Tensor):
-            raise TypeError("action must be a torch.Tensor")
-        if action.shape != expected_shape:
-            raise ValueError(
-                f"action shape must be {expected_shape}, got {tuple(action.shape)}"
-            )
-        return super().step(action)
+        try:
+            return super().step(action)
+        finally:
+            self._step_semantics = (None,) * self.num_envs
 
-    def evaluate(
+    @property
+    def step_semantics(self) -> tuple[StepSemantics | None, ...]:
+        """Return staged events; None marks slots with no semantic event."""
+
+        return self._step_semantics
+
+    def set_step_semantics(
         self,
-        env_ids: Sequence[int] | torch.Tensor | None = None,
-    ) -> dict[int, EvaluationResult]:
-        """Evaluate the latest observation for each selected environment."""
+        events: Mapping[int, StepSemantics],
+    ) -> None:
+        """Stage semantic values for exactly the next environment step."""
 
-        if self._task is None:
-            raise RuntimeError("environment has no task to evaluate")
-        evaluator_observation = self.obs_buf.get("evaluator")
-        if not isinstance(evaluator_observation, Mapping):
-            raise RuntimeError("evaluator observations are unavailable; reset or step the environment first")
-        resolved_env_ids = resolve_env_ids(env_ids, self.num_envs)
-        results = {}
+        resolved_env_ids = resolve_env_ids(tuple(events), self.num_envs)
+        staged: list[StepSemantics | None] = [None] * self.num_envs
         for env_id in resolved_env_ids:
-            result = self._task.evaluate(
-                {
-                    name: value[env_id]
-                    for name, value in evaluator_observation.items()
-                }
+            event = events[env_id]
+            staged[env_id] = event
+        self._step_semantics = tuple(staged)
+
+    def hold_action(self) -> torch.Tensor:
+        """Build absolute joint targets that hold every robot at its current pose."""
+
+        targets = []
+        for term_name in self.action_manager.active_terms:
+            term = self.action_manager.get_term(term_name)
+            asset = self.scene[term.cfg.asset_name]
+            joint_ids, _ = asset.find_joints(
+                term.cfg.joint_names,
+                preserve_order=term.cfg.preserve_order,
             )
-            results[env_id] = result
-        return results
+            targets.append(asset.data.joint_pos.torch[:, joint_ids])
+        hold = torch.cat(targets, dim=-1)
+        return hold
 
     def reset(
         self,
@@ -98,39 +121,34 @@ class ScaleBenchEnv(ManagerBasedEnv):
             )
         )
         if task_layouts is not None:
-            if self._task_layout_reset is None:
-                raise RuntimeError("task_layouts cannot be assigned without an environment task")
             self._task_layout_reset.assign_layouts(resolved_env_ids, task_layouts)
         observation, info = super().reset(
             seed=seed,
             env_ids=env_id_tensor,
             options=options,
         )
-        if self._task_layout_reset is not None:
-            episode_info = self._task_layout_reset.episode_info(
-                resolved_env_ids
-            )
-            info["episode"] = episode_info
-            if self.recorder_manager.active_terms:
-                for env_id, layout_seed in zip(
-                    episode_info["env_ids"],
-                    episode_info["layout_seeds"],
-                    strict=True,
-                ):
-                    self.recorder_manager.get_episode(env_id).seed = layout_seed
+        episode_info = self._task_layout_reset.episode_info(resolved_env_ids)
+        info["episode"] = episode_info
+        if self.recorder_manager.active_terms:
+            for env_id, layout_seed in zip(
+                episode_info["env_ids"],
+                episode_info["layout_seeds"],
+                strict=True,
+            ):
+                self.recorder_manager.get_episode(env_id).seed = layout_seed
         return observation, info
 
-    def complete_episodes(
+    def export_episodes(
         self,
         *,
         success: Sequence[bool] | torch.Tensor,
         env_ids: Sequence[int] | torch.Tensor | None = None,
-        demo_ids: Sequence[int] | None = None,
+        demo_ids: Sequence[str | int] | None = None,
+        terminations: Sequence[EpisodeTermination] | None = None,
+        step_counts: Sequence[int] | torch.Tensor | None = None,
     ) -> None:
-        """Mark and export completed episodes before their next reset."""
+        """Add completion metadata and export recorded episodes before reset."""
 
-        if not self.recorder_manager.active_terms:
-            raise RuntimeError("episode recording is not enabled")
         resolved_env_ids = resolve_env_ids(env_ids, self.num_envs)
         success_tensor = _resolve_success_values(
             success,
@@ -142,11 +160,71 @@ class ScaleBenchEnv(ManagerBasedEnv):
             device=self.device,
             dtype=torch.int32,
         )
+        if terminations is not None:
+            resolved_terminations = tuple(terminations)
+            self.recorder_manager.add_to_episodes(
+                "termination/reason",
+                _encode_episode_text(
+                    tuple(
+                        termination.reason.value
+                        for termination in resolved_terminations
+                    ),
+                    device=self.device,
+                ),
+                env_id_tensor,
+            )
+            self.recorder_manager.add_to_episodes(
+                "termination/retryable",
+                torch.tensor(
+                    tuple(
+                        termination.retryable
+                        for termination in resolved_terminations
+                    ),
+                    dtype=torch.bool,
+                    device=self.device,
+                ),
+                env_id_tensor,
+            )
+            self.recorder_manager.add_to_episodes(
+                "termination/message",
+                _encode_episode_text(
+                    tuple(
+                        termination.message for termination in resolved_terminations
+                    ),
+                    device=self.device,
+                ),
+                env_id_tensor,
+            )
+        if step_counts is not None:
+            resolved_step_counts = torch.as_tensor(
+                step_counts,
+                dtype=torch.long,
+                device=self.device,
+            )
+            self.recorder_manager.add_to_episodes(
+                "termination/step_count",
+                resolved_step_counts,
+                env_id_tensor,
+            )
         self.recorder_manager.set_success_to_episodes(
             env_id_tensor,
             success_tensor,
         )
         self.recorder_manager.export_episodes(env_id_tensor, demo_ids=demo_ids)
+
+    def discard_episode_buffers(
+        self,
+        env_ids: Sequence[int] | torch.Tensor,
+    ) -> None:
+        """Clear unexported recorder data for inactive environments."""
+
+        resolved_env_ids = resolve_env_ids(env_ids, self.num_envs)
+        env_id_tensor = torch.tensor(
+            resolved_env_ids,
+            device=self.device,
+            dtype=torch.int32,
+        )
+        self.recorder_manager.reset(env_id_tensor)
 
     def close(self) -> None:
         """Close dataset handles deterministically, then release the simulation."""
@@ -165,22 +243,37 @@ def _resolve_success_values(
     device: str,
 ) -> torch.Tensor:
     if isinstance(success, torch.Tensor):
-        if success.dtype != torch.bool:
-            raise TypeError("success must contain boolean values")
-        if success.ndim != 1:
-            raise ValueError("success must be one-dimensional")
         values = success.to(device=device)
     else:
         raw_values = tuple(success)
-        if any(type(value) is not bool for value in raw_values):
-            raise TypeError("success must contain boolean values")
         values = torch.tensor(raw_values, device=device, dtype=torch.bool)
-    if values.shape != (count,):
-        raise ValueError(
-            f"success must contain one value per environment ({count}), "
-            f"got shape {tuple(values.shape)}"
-        )
     return values
+
+
+def _encode_episode_text(
+    values: Sequence[str | None],
+    *,
+    device: str,
+) -> torch.Tensor:
+    """Encode per-episode UTF-8 text as zero-padded uint8 rows."""
+
+    raw_values = tuple(
+        b"" if value is None else value.encode("utf-8") for value in values
+    )
+    width = max((len(value) for value in raw_values), default=0)
+    encoded = torch.zeros(
+        (len(raw_values), max(1, width)),
+        dtype=torch.uint8,
+        device=device,
+    )
+    for index, raw in enumerate(raw_values):
+        if raw:
+            encoded[index, : len(raw)] = torch.tensor(
+                tuple(raw),
+                dtype=torch.uint8,
+                device=device,
+            )
+    return encoded
 
 
 __all__ = ["ScaleBenchEnv"]

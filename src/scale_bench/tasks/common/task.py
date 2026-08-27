@@ -5,13 +5,16 @@ from __future__ import annotations
 from collections.abc import Mapping
 from typing import Protocol, TypeAlias
 
-from .evaluation import EvaluationResult
+from torch import Tensor
+
+from .evaluation import EpisodeEvaluatorSpec, EvaluationResult
 from .layout import TaskLayout
 from .placement import PlacementContext
 
 
 EvaluatorTerms: TypeAlias = Mapping[str, object]
-EvaluatorObservation: TypeAlias = Mapping[str, object]
+EvaluatorObservation: TypeAlias = Mapping[str, Tensor]
+BatchedEvaluatorObservation: TypeAlias = Mapping[str, Tensor]
 
 
 class Task(Protocol):
@@ -22,6 +25,9 @@ class Task(Protocol):
 
     @property
     def instruction(self) -> str: ...
+
+    @property
+    def evaluator_spec(self) -> EpisodeEvaluatorSpec: ...
 
     def generate_layout(
         self,
@@ -40,6 +46,11 @@ class Task(Protocol):
         context: PlacementContext,
     ) -> EvaluatorTerms: ...
 
+    def check_success(
+        self,
+        observation: BatchedEvaluatorObservation,
+    ) -> Tensor: ...
+
     def evaluate(
         self,
         observation: EvaluatorObservation,
@@ -47,6 +58,7 @@ class Task(Protocol):
 
 
 __all__ = [
+    "BatchedEvaluatorObservation",
     "EvaluatorObservation",
     "EvaluatorTerms",
     "Task",

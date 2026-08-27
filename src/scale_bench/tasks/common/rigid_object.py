@@ -20,6 +20,7 @@ from scale_bench.config.base import (
     UnitIntervalFloat,
 )
 
+from .evaluation import EpisodeEvaluatorSpec
 from .layout import TaskLayout
 from .placement import (
     PlacementContext,
@@ -52,6 +53,7 @@ class RigidObjectTaskConfig(FrozenModel):
     spawn_clearance_m: NonNegativeFloat = 0.003
     minimum_object_gap_m: NonNegativeFloat = 0.02
     sampling_attempts_per_object: PositiveInt = 1000
+    success_stability_steps: PositiveInt = 1
     physics: RigidObjectPhysicsConfig
 
 
@@ -107,6 +109,12 @@ class RigidObjectTask:
     @property
     def instruction(self) -> str:
         return self._config.instruction
+
+    @property
+    def evaluator_spec(self) -> EpisodeEvaluatorSpec:
+        return EpisodeEvaluatorSpec(
+            success_stability_steps=self._config.success_stability_steps,
+        )
 
     @property
     def config(self) -> RigidObjectTaskConfig:

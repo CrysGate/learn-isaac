@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Annotated, Self
+
 from pydantic import Field, field_validator, model_validator
 
 from scale_bench.config.base import FiniteFloat, FrozenModel, PositiveFloat
@@ -24,7 +25,7 @@ class DollAssetConfig(RigidObjectAssetConfig):
 class TargetSlotsConfig(FrozenModel):
     """Fixed tabletop slots ordered in the positive Y direction."""
 
-    x_m: FiniteFloat
+    x_positions_m: tuple[FiniteFloat, ...] = Field(min_length=2)
     y_positions_m: tuple[FiniteFloat, ...] = Field(min_length=2)
     position_tolerance_m: PositiveFloat = 0.025
     height_tolerance_m: PositiveFloat = 0.015
@@ -39,6 +40,12 @@ class TargetSlotsConfig(FrozenModel):
         if any(left >= right for left, right in zip(value, value[1:])):
             raise ValueError("y_positions_m must be strictly increasing")
         return value
+
+    @model_validator(mode="after")
+    def _validate_slot_counts(self) -> Self:
+        if len(self.x_positions_m) != len(self.y_positions_m):
+            raise ValueError("x_positions_m and y_positions_m must have equal length")
+        return self
 
 
 class SortDollsBySizeConfig(RigidObjectTaskConfig):

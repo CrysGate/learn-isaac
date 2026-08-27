@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import MISSING
+
 import isaaclab.envs.mdp as mdp
 from isaaclab.envs.manager_based_env_cfg import DefaultEventManagerCfg
 from isaaclab.managers import EventTermCfg as EventTerm
@@ -17,7 +19,7 @@ class EventsCfg(DefaultEventManagerCfg):
         mode="reset",
         params={"reset_joint_targets": True},
     )
-    task_layout: EventTerm | None = None
+    task_layout: EventTerm = MISSING
 
 
 __all__ = ["EventsCfg"]

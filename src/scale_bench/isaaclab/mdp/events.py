@@ -33,8 +33,11 @@ class ResetTaskLayout(ManagerTermBase):
         self,
         env: ManagerBasedEnv,
         env_ids: Sequence[int] | torch.Tensor | slice | None,
-        **_: Any,
+        task: Task,
+        layouts: Sequence[TaskLayout],
+        context: PlacementContext,
     ) -> None:
+        del task, layouts, context
         resolved_env_ids = resolve_env_ids(env_ids, env.num_envs)
         if not resolved_env_ids:
             return
