@@ -37,15 +37,3 @@ class SimulationConfig(FrozenModel):
     render_interval: PositiveInt = 4
     render: RenderConfig = RenderConfig()
     physx: PhysxConfig = PhysxConfig()
-
-    @property
-    def physics_frequency_hz(self) -> float:
-        return 1.0 / self.physics_dt_s
-
-    @property
-    def render_dt_s(self) -> float:
-        return self.physics_dt_s * self.render_interval
-
-    @property
-    def render_frequency_hz(self) -> float:
-        return 1.0 / self.render_dt_s

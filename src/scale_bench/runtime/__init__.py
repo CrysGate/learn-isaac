@@ -9,7 +9,7 @@ from .episodes import (
     EpisodeTermination,
     TerminationReason,
 )
-from .scheduler import BenchmarkRunResult, BenchmarkScheduler, EpisodeStatus
+from .scheduler import BenchmarkRunResult, BenchmarkScheduler
 from .policy import (
     EpisodeContext,
     PolicyController,
@@ -39,7 +39,6 @@ __all__ = [
     "EpisodeSpec",
     "EpisodeState",
     "EpisodeTermination",
-    "EpisodeStatus",
     "PolicyController",
     "PolicyOutput",
     "PolicyRolloutRunner",

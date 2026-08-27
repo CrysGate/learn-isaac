@@ -8,7 +8,6 @@ from typing import Any
 import torch
 from isaaclab.envs import ManagerBasedEnv
 from isaaclab.envs.common import VecEnvObs
-from isaaclab.envs.mdp.actions import JointPositionAction
 
 from scale_bench.isaaclab.builders.environment import ScaleBenchEnvCfg
 from scale_bench.isaaclab.mdp.events import resolve_env_ids
@@ -141,7 +140,7 @@ class ScaleBenchEnv(ManagerBasedEnv):
     def export_episodes(
         self,
         *,
-        success: Sequence[bool] | torch.Tensor,
+        success: tuple[bool, ...],
         env_ids: Sequence[int] | torch.Tensor | None = None,
         demo_ids: Sequence[str | int] | None = None,
         terminations: Sequence[EpisodeTermination] | None = None,
@@ -237,16 +236,21 @@ class ScaleBenchEnv(ManagerBasedEnv):
 
 
 def _resolve_success_values(
-    success: Sequence[bool] | torch.Tensor,
+    success: tuple[bool, ...],
     *,
     count: int,
     device: str,
 ) -> torch.Tensor:
-    if isinstance(success, torch.Tensor):
-        values = success.to(device=device)
-    else:
-        raw_values = tuple(success)
-        values = torch.tensor(raw_values, device=device, dtype=torch.bool)
+    """Validate Driver booleans and move them to the recorder device."""
+
+    if any(type(value) is not bool for value in success):
+        raise TypeError("success must contain boolean values")
+    values = torch.tensor(success, device=device, dtype=torch.bool)
+    if values.shape != (count,):
+        raise ValueError(
+            f"success must contain one value per selected environment ({count}), "
+            f"got shape {tuple(values.shape)}"
+        )
     return values
 
 

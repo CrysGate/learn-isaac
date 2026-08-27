@@ -6,7 +6,6 @@ from typing import Annotated, Self
 from pydantic import Field, model_validator
 
 from scale_bench.config.base import (
-    CameraConvention,
     FiniteFloat,
     FrozenModel,
     Name,

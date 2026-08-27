@@ -47,7 +47,7 @@ class DriverEnvironment(Protocol):
     def export_episodes(
         self,
         *,
-        success: Sequence[bool] | Tensor,
+        success: tuple[bool, ...],
         env_ids: Sequence[int] | Tensor | None = None,
         demo_ids: Sequence[str | int] | None = None,
         terminations: Sequence[EpisodeTermination] | None = None,
@@ -70,13 +70,10 @@ class DriverSnapshot:
     """Observable driver state returned after reset or one batched step."""
 
     observation: object
-    info: Mapping[str, object]
     active_mask: Tensor
     completed: Mapping[str, EpisodeResult]
-    batch_step: int
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "info", MappingProxyType(dict(self.info)))
         object.__setattr__(
             self,
             "completed",
@@ -112,15 +109,6 @@ class EpisodeDriver:
             device=env.device,
         )
         self._observation: object | None = None
-        self._info: Mapping[str, object] = {}
-        self._batch_step = 0
-        self._started = False
-
-    @property
-    def active_mask(self) -> Tensor:
-        """Device-resident mask of slots whose episode is still running."""
-
-        return self._active_mask
 
     @property
     def is_active(self) -> bool:
@@ -151,17 +139,14 @@ class EpisodeDriver:
             dtype=torch.long,
             device=self._env.device,
         )
-        self._batch_step = 0
-        self._started = True
         for state in resolved_states:
             state.step_count = 0
 
-        observation, info = self._env.reset(
+        observation, _ = self._env.reset(
             env_ids=env_ids,
             task_layouts=tuple(state.spec.layout for state in resolved_states),
         )
         self._observation = observation
-        self._info = info
 
         self._evaluator.reset(env_id_tensor)
         return self._snapshot({})
@@ -187,13 +172,11 @@ class EpisodeDriver:
         stepped_mask = self._active_mask.clone()
         self._env.set_step_semantics(semantic_events or {})
         try:
-            observation, info = self._env.step(action)
+            observation, _ = self._env.step(action)
         except Exception:
             self.abort()
             raise
         self._observation = observation
-        self._info = info
-        self._batch_step += 1
         self._step_counts += stepped_mask.to(dtype=torch.long)
 
         inactive_env_ids = torch.nonzero(
@@ -290,10 +273,8 @@ class EpisodeDriver:
     def _snapshot(self, completed: Mapping[str, EpisodeResult]) -> DriverSnapshot:
         return DriverSnapshot(
             observation=self._observation,
-            info=self._info,
             active_mask=self._active_mask.clone(),
             completed=completed,
-            batch_step=self._batch_step,
         )
 
 

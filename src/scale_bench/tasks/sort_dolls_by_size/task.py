@@ -55,18 +55,6 @@ class SortDollsProgress(EvaluationResult):
 
     statuses: tuple[DollPlacementStatus, ...] = ()
 
-    @property
-    def placed_count(self) -> int:
-        return sum(status.placed for status in self.statuses)
-
-    @property
-    def total_count(self) -> int:
-        return len(self.statuses)
-
-    @property
-    def succeeded(self) -> bool:
-        return self.success
-
 
 class SortDollsBySize(RigidObjectTask):
     """Place nesting dolls and expose their target size ordering."""
