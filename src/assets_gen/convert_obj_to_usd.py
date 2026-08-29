@@ -850,7 +850,7 @@ def _bake_mesh_transform(
     scale_values: Dict[str, float],
     z_up_rotation: Gf.Rotation,
 ) -> None:
-    """Bake source hierarchy, physical scale, and up-axis into mesh data."""
+    """Bake transforms and center the aligned mesh on the rigid-body root."""
 
     mesh = UsdGeom.Mesh(mesh_prim)
     points = mesh.GetPointsAttr().Get(Usd.TimeCode.Default())
@@ -861,7 +861,7 @@ def _bake_mesh_transform(
         _transform_point(point, source_to_world, scale_values, z_up_rotation)
         for point in points
     ]
-    mesh.GetPointsAttr().Set(transformed_points)
+    _center_mesh_points(mesh, transformed_points)
 
     normals = mesh.GetNormalsAttr().Get(Usd.TimeCode.Default())
     if normals:
@@ -878,14 +878,26 @@ def _bake_mesh_transform(
             ]
         )
 
+    UsdGeom.Xformable(mesh_prim).ClearXformOpOrder()
+
+
+def _center_mesh_points(mesh: UsdGeom.Mesh, points: Sequence[Gf.Vec3f]) -> None:
+    """Author points and extent with their aligned AABB centered at zero."""
+
     minimum = Gf.Vec3f(
-        *(min(float(point[axis]) for point in transformed_points) for axis in range(3))
+        *(min(float(point[axis]) for point in points) for axis in range(3))
     )
     maximum = Gf.Vec3f(
-        *(max(float(point[axis]) for point in transformed_points) for axis in range(3))
+        *(max(float(point[axis]) for point in points) for axis in range(3))
     )
-    mesh.CreateExtentAttr().Set([minimum, maximum])
-    UsdGeom.Xformable(mesh_prim).ClearXformOpOrder()
+    aabb_center = Gf.Vec3f(
+        *(
+            (float(minimum[axis]) + float(maximum[axis])) / 2.0
+            for axis in range(3)
+        )
+    )
+    mesh.GetPointsAttr().Set([point - aabb_center for point in points])
+    mesh.CreateExtentAttr().Set([minimum - aabb_center, maximum - aabb_center])
 
 
 def _remap_property_paths(prim: Usd.Prim, path_map: Dict[Sdf.Path, Sdf.Path]) -> None:
@@ -946,7 +958,7 @@ def create_standard_structure_and_move_mesh(
     stage: Usd.Stage,
     scale_values: Dict[str, float],
 ) -> Usd.Prim:
-    """Create /root/{_materials,visual,collision} and bake one merged mesh."""
+    """Create the standard hierarchy and center one baked merged mesh."""
 
     source_meshes = [prim for prim in stage.Traverse() if prim.IsA(UsdGeom.Mesh)]
     if len(source_meshes) != 1:

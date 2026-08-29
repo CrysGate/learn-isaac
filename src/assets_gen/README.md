@@ -36,7 +36,8 @@ portable relative paths rather than machine-specific user paths.
    corresponding metadata record.
 5. Create `/root/{_materials,visual,collision}`. Source hierarchy transforms,
    physical dimension scaling, and up-axis alignment are baked into the visual
-   and collision meshes.
+   and collision meshes. The baked mesh AABB is then centered on `/root`, so
+   the rigid-body root represents the geometry center.
 6. Author rigid-body properties, mass, and `scale_x/scale_y/scale_z` on
    `/root`; apply PhysX convex-decomposition colliders to the collision mesh;
    then author `real_x/real_y/real_z` on `/root`.

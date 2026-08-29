@@ -33,7 +33,8 @@ uv run python src/assets_gen/convert_obj_to_usd.py \
 3. 使用 MeshLab 将超过 `--target-faces` 的网格简化。
 4. 使用 Asset Converter 生成 USD，测量源 AABB，并读取匹配的元数据。
 5. 创建固定拓扑：`/root/{_materials,visual,collision}`。源层级变换、物理尺寸缩放
-   和 up-axis 对齐会烘焙进 visual/collision 网格。
+   和 up-axis 对齐会烘焙进 visual/collision 网格；随后将网格 AABB 中心平移到
+   `/root` 原点，使刚体 root 表示几何中心。
 6. 在 `/root` 写入刚体、质量和 `scale_x/scale_y/scale_z`；在 collision 网格上设置
    PhysX 凸分解碰撞体；在 `/root` 写入 `real_x/real_y/real_z`。
 7. 保存 `Aligned.usd`，并导出对应的 `Aligned.obj`。
