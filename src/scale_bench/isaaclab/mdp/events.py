@@ -115,6 +115,28 @@ class ResetTaskLayout(ManagerTermBase):
             )
 
 
+def synchronize_tensor_pose_resets_for_rtx(
+    env: ManagerBasedEnv,
+    env_ids: torch.Tensor,
+) -> None:
+    """Publish reset-time tensor pose writes before the first RTX frame.
+
+    Isaac Sim 6.0 does not finalize PhysX tensor pose writes for Fabric in
+    ``SimulationContext.forward()``.  The native update keeps Isaac Lab's
+    public physics-step count unchanged while making the reset poses available
+    to the subsequent Fabric forward and RTX render. Native PhysX step
+    callbacks still run; ScaleBench does not attach episode logic to them.
+    """
+
+    del env_ids
+    if not env.has_rtx_sensors or not env.cfg.sim.use_fabric:
+        return
+
+    import omni.physx
+
+    omni.physx.get_physx_interface().update_simulation(env.physics_dt, 0.0)
+
+
 def resolve_env_ids(
     env_ids: Sequence[int] | torch.Tensor | slice | None,
     num_envs: int,
@@ -152,4 +174,4 @@ def resolve_env_ids(
     return resolved
 
 
-__all__ = ["ResetTaskLayout", "resolve_env_ids"]
+__all__ = ["ResetTaskLayout", "resolve_env_ids", "synchronize_tensor_pose_resets_for_rtx"]

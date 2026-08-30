@@ -4,6 +4,6 @@ control_decimation: 4
 replicate_physics: true
 clone_in_fabric: false
 arm_action_mode: joint_position
-num_rerenders_on_reset: 1
+num_rerenders_on_reset: 10
 wait_for_textures: true
 seed: 0
