@@ -57,6 +57,14 @@ class RigidObjectTaskConfig(FrozenModel):
     physics: RigidObjectPhysicsConfig
 
 
+class TargetPlacementConfig(FrozenModel):
+    """Success tolerances shared by fixed tabletop target slots."""
+
+    position_tolerance_m: PositiveFloat = 0.025
+    height_tolerance_m: PositiveFloat = 0.015
+    upright_tolerance_rad: PositiveFloat = 0.10
+
+
 class _MetadataModel(BaseModel):
     model_config = ConfigDict(extra="ignore", frozen=True)
 
@@ -212,5 +220,6 @@ __all__ = [
     "RigidObjectPhysicsConfig",
     "RigidObjectTask",
     "RigidObjectTaskConfig",
+    "TargetPlacementConfig",
     "load_rigid_object_metadata",
 ]

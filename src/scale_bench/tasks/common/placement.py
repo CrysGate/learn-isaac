@@ -11,6 +11,7 @@ from pydantic import field_validator
 
 from scale_bench.config.base import FiniteFloat, FrozenModel
 from scale_bench.config.models.scene import SceneConfig
+from scale_bench.skills.geometry import quaternion_xyzw_from_rpy
 
 from .layout import AssetPlacement, TaskLayout
 
@@ -77,7 +78,7 @@ def generate_tabletop_layout(
             ):
                 continue
 
-            yaw = rng.uniform(-math.pi, math.pi)
+            yaw_env_rad = rng.uniform(-math.pi, math.pi)
             placements[name] = AssetPlacement(
                 position_m=(
                     x_m,
@@ -86,11 +87,10 @@ def generate_tabletop_layout(
                     + asset_sizes_m[name][2] / 2.0
                     + spawn_clearance_m,
                 ),
-                orientation_xyzw=(
+                orientation_xyzw=quaternion_xyzw_from_rpy(
                     0.0,
                     0.0,
-                    math.sin(yaw / 2.0),
-                    math.cos(yaw / 2.0),
+                    yaw_env_rad,
                 ),
             )
             break

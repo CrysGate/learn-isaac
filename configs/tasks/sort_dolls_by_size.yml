@@ -1,11 +1,12 @@
 instruction: "Arrange the five nesting dolls in a straight line along the center of the table, ordered from smallest to largest in the positive Y direction."
 spawn_clearance_m: 0.003
-minimum_object_gap_m: 0.02
+minimum_object_gap_m: 0.06
 sampling_attempts_per_object: 1000
+success_stability_steps: 10
 
 target_slots:
-  x_m: 0.0
-  y_positions_m: [-0.31, -0.20, -0.09, 0.02, 0.13]
+  x_positions_m: [0.0, 0.0, 0.0, 0.0, 0.0]
+  y_positions_m: [-0.275000, -0.155000, -0.055000, 0.005000, 0.105000]
 
 physics:
   restitution: 0.01

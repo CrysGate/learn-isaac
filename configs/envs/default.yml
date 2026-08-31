@@ -1,4 +1,4 @@
-num_envs: 2
+num_envs: 1
 env_spacing_m: 5.0
 control_decimation: 4
 replicate_physics: true

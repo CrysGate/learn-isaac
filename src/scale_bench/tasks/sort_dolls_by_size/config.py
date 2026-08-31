@@ -6,10 +6,11 @@ from typing import Annotated, Self
 
 from pydantic import Field, field_validator, model_validator
 
-from scale_bench.config.base import FiniteFloat, FrozenModel, PositiveFloat
+from scale_bench.config.base import FiniteFloat
 from scale_bench.tasks.common.rigid_object import (
     RigidObjectAssetConfig,
     RigidObjectTaskConfig,
+    TargetPlacementConfig,
 )
 
 
@@ -22,14 +23,11 @@ class DollAssetConfig(RigidObjectAssetConfig):
     asset_id: AssetId
 
 
-class TargetSlotsConfig(FrozenModel):
+class TargetSlotsConfig(TargetPlacementConfig):
     """Fixed tabletop slots ordered in the positive Y direction."""
 
     x_positions_m: tuple[FiniteFloat, ...] = Field(min_length=2)
     y_positions_m: tuple[FiniteFloat, ...] = Field(min_length=2)
-    position_tolerance_m: PositiveFloat = 0.025
-    height_tolerance_m: PositiveFloat = 0.015
-    upright_tolerance_rad: PositiveFloat = 0.10
 
     @field_validator("y_positions_m")
     @classmethod
@@ -60,7 +58,9 @@ class SortDollsBySizeConfig(RigidObjectTaskConfig):
         if len(ids) != len(set(ids)):
             raise ValueError("doll asset_id values must be unique")
         if len(ids) != len(self.target_slots.y_positions_m):
-            raise ValueError("the number of dolls must match the number of target slots")
+            raise ValueError(
+                "the number of dolls must match the number of target slots"
+            )
         return self
 
 

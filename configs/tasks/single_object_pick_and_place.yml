@@ -1,0 +1,20 @@
+instruction: "Pick up the bottle and place it upright in the fixed target slot."
+spawn_clearance_m: 0.003
+minimum_object_gap_m: 0.02
+sampling_attempts_per_object: 1000
+success_stability_steps: 10
+
+target_slot:
+  position_xy_m: [0.0, -0.275]
+
+physics:
+  restitution: 0.0
+  linear_damping: 0.10
+  angular_damping: 0.10
+  sleep_threshold: 0.005
+  stabilization_threshold: 0.001
+
+object:
+  name: bottle
+  usd_path: Assets/Object/Rigid/bottle/bottle.usd
+  metadata_path: Assets/Object/Rigid/bottle/bottle.json
