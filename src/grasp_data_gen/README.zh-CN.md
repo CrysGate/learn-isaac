@@ -73,3 +73,22 @@ uv run python -m grasp_data_gen.visualize_grasps \
 
 查看器默认显示得分最高的抓取。使用上一项/下一项控件逐个浏览，或点击 `All`
 叠加显示全部有效位姿。
+
+## 导出 ScaleBench catalog
+
+使用显式的物体名映射，将生成结果转换为运行时使用的紧凑 schema。源文件候选数超过
+上限时，导出器先保留最高分姿态，再按姿态角覆盖选择其余项，最后恢复得分顺序：
+
+```bash
+uv run python -m grasp_data_gen.export_scale_bench_catalog \
+  --robot-config configs/robots/piper.yml \
+  --output outputs/grasp_data/piper/catalog_candidate.yml \
+  --max-candidates-per-object 32 \
+  --object-grasp doll_00000=outputs/grasp_data/piper/00000/successful_grasps.yaml \
+  --object-grasp doll_00001=outputs/grasp_data/piper/00001/successful_grasps.yaml
+```
+
+任务需要的每个物体都必须传一项 `--object-grasp`。导出器会拒绝机器人 TCP 父帧、
+位置、方向或接近距离不一致的生成结果。导出文件只是待验证 catalog：孤立夹爪评估
+分数不等价于完整操作质量，只有通过多 seed 真实 PickAndPlace 后才能将它配置为机器人
+的默认 catalog。

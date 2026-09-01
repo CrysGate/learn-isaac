@@ -8,7 +8,10 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
 # Kept lightweight so argparse can reject unknown tasks before Isaac Sim starts.
-SUPPORTED_TASK_IDS = ("sort_dolls_by_size",)
+SUPPORTED_TASK_IDS = (
+    "sort_dolls_by_size",
+    "single_object_pick_and_place",
+)
 
 from scale_bench.config.loader import load_config
 from scale_bench.config.models.simulation import SimulationConfig
@@ -35,12 +38,6 @@ parser.add_argument(
     type=Path,
     default=Path("configs/envs/default.yml"),
     help="Environment control and reset runtime preset.",
-)
-parser.add_argument(
-    "--task",
-    choices=SUPPORTED_TASK_IDS,
-    required=True,
-    help="Task ID whose assets and evaluator are included in the preview.",
 )
 layout_source = parser.add_mutually_exclusive_group()
 layout_source.add_argument(
@@ -84,6 +81,12 @@ parser.add_argument(
     help="Visual length of camera frustums in metres.",
 )
 AppLauncher.add_app_launcher_args(parser)
+parser.add_argument(
+    "--task",
+    choices=SUPPORTED_TASK_IDS,
+    required=True,
+    help="Task ID whose assets and evaluator are included in the preview.",
+)
 parser.set_defaults(visualizer=["kit"], enable_cameras=True, device=None)
 args = parser.parse_args()
 if args.max_steps is not None and args.max_steps <= 0:
@@ -118,18 +121,25 @@ if preview_overlays_enabled:
     from isaacsim.util.debug_draw import _debug_draw
     from pxr import Gf
 
+from scale_bench.api import create_env
 from scale_bench.config.models.environment import EnvironmentConfig
 from scale_bench.config.models.robot import RobotConfig
 from scale_bench.config.models.scene import SceneConfig
-from scale_bench.api import create_env
+from scale_bench.isaaclab.runtime.target_slot_visualization import (
+    Color,
+    Line,
+    Point,
+    target_slot_line_groups,
+)
 from scale_bench.tasks.common.placement import PlacementContext
+from scale_bench.tasks.single_object_pick_and_place.config import (
+    SingleObjectPickAndPlaceConfig,
+)
+from scale_bench.tasks.single_object_pick_and_place.task import (
+    SingleObjectPickAndPlace,
+)
 from scale_bench.tasks.sort_dolls_by_size.config import SortDollsBySizeConfig
 from scale_bench.tasks.sort_dolls_by_size.task import SortDollsBySize
-
-
-Point = tuple[float, float, float]
-Line = tuple[Point, Point]
-Color = tuple[float, float, float, float]
 
 
 def _camera_frustum_lines(camera, length_m: float) -> list[Line]:
@@ -164,7 +174,7 @@ def _camera_frustum_lines(camera, length_m: float) -> list[Line]:
 
 
 class ScenePreviewOverlay:
-    """Draw optional placement-area and camera-frustum overlays."""
+    """Draw optional placement-area, target-slot, and camera overlays."""
 
     CAMERA_COLORS: dict[str, Color] = {
         "left_robot_camera": (0.0, 0.75, 1.0, 1.0),
@@ -176,21 +186,27 @@ class ScenePreviewOverlay:
         self,
         scene: InteractiveScene,
         scene_config: SceneConfig,
+        target_positions_m: tuple[Point, ...],
         frustum_length_m: float,
     ) -> None:
         self._scene = scene
         self._scene_config = scene_config
+        self._target_positions_m = target_positions_m
         self._frustum_length_m = frustum_length_m
         self._draw = _debug_draw.acquire_debug_draw_interface()
         self._area_model = omni.ui.SimpleBoolModel(True)
+        self._target_slots_model = omni.ui.SimpleBoolModel(True)
         self._frustum_model = omni.ui.SimpleBoolModel(True)
 
-        self._window = omni.ui.Window("Scene overlays", width=280, height=90)
+        self._window = omni.ui.Window("Scene overlays", width=280, height=120)
         with self._window.frame:
             with omni.ui.VStack(spacing=4):
                 with omni.ui.HStack(height=24):
                     omni.ui.Label("Placement area")
                     omni.ui.CheckBox(model=self._area_model, width=24)
+                with omni.ui.HStack(height=24):
+                    omni.ui.Label("Target slots")
+                    omni.ui.CheckBox(model=self._target_slots_model, width=24)
                 with omni.ui.HStack(height=24):
                     omni.ui.Label("Camera frustums")
                     omni.ui.CheckBox(model=self._frustum_model, width=24)
@@ -220,6 +236,18 @@ class ScenePreviewOverlay:
                     for index in range(4)
                 )
             groups.append((area_lines, (0.2, 1.0, 0.2, 1.0), 4.0))
+
+        if self._target_slots_model.as_bool:
+            env_origins_m = tuple(
+                tuple(origin) for origin in self._scene.env_origins.tolist()
+            )
+            groups.extend(
+                target_slot_line_groups(
+                    self._target_positions_m,
+                    env_origins_m,
+                    self._scene_config.table_top_z_m,
+                )
+            )
 
         if self._frustum_model.as_bool:
             for camera_name, color in self.CAMERA_COLORS.items():
@@ -266,12 +294,26 @@ def main() -> None:
         asset_root=args.asset_root,
     )
     runtime_config = load_config(args.env_config, EnvironmentConfig)
-    task = SortDollsBySize(
-        load_config(
-            PROJECT_ROOT / "configs/tasks/sort_dolls_by_size.yml",
-            SortDollsBySizeConfig,
-            asset_root=args.asset_root,
+    if args.task == "single_object_pick_and_place":
+        task = SingleObjectPickAndPlace(
+            load_config(
+                PROJECT_ROOT
+                / "configs/tasks/single_object_pick_and_place.yml",
+                SingleObjectPickAndPlaceConfig,
+                asset_root=args.asset_root,
+            )
         )
+    else:
+        task = SortDollsBySize(
+            load_config(
+                PROJECT_ROOT / "configs/tasks/sort_dolls_by_size.yml",
+                SortDollsBySizeConfig,
+                asset_root=args.asset_root,
+            )
+        )
+    target_layout = task.target_layout(placement_context)
+    target_positions_m = tuple(
+        placement.position_m for placement in target_layout.assets.values()
     )
     base_seed = None
     layouts = None
@@ -311,6 +353,7 @@ def main() -> None:
             ScenePreviewOverlay(
                 env.scene,
                 scene_config,
+                target_positions_m,
                 camera_frustum_length_m,
             )
             if preview_overlays_enabled

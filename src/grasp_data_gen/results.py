@@ -94,6 +94,7 @@ def build_metadata(
         tcp_definition={
             "parent_frame": robot.kinematics.tcp.parent_frame,
             "offset_in_parent_m": robot.kinematics.tcp.position_m,
+            "tcp_orientation_parent_xyzw": robot.kinematics.tcp.orientation_xyzw,
             "base_to_tcp": base_to_tcp,
             "approach_axis_tcp": generation.sampler.approach_axis_tcp,
         },

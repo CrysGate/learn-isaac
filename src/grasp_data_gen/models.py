@@ -95,6 +95,8 @@ class GripperDefinition(_Model):
 class TcpDefinition(_Model):
     parent_frame: str
     offset_in_parent_m: Vector3
+    # Generator files created before this field all used Piper's identity TCP orientation.
+    tcp_orientation_parent_xyzw: Quaternion = (0.0, 0.0, 0.0, 1.0)
     base_to_tcp: PoseData
     approach_axis_tcp: Vector3
 

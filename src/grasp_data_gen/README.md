@@ -79,3 +79,26 @@ uv run python -m grasp_data_gen.visualize_grasps \
 
 The viewer opens the highest-scoring grasp. Use the previous/next controls to
 step through results, or `All` to overlay every accepted pose.
+
+## Export a ScaleBench catalog
+
+Convert generated files into the compact runtime schema with an explicit object
+mapping. When a source contains more than the requested limit, the exporter
+retains the highest-scoring grasp and selects the remaining entries by
+orientation coverage before restoring score order:
+
+```bash
+uv run python -m grasp_data_gen.export_scale_bench_catalog \
+  --robot-config configs/robots/piper.yml \
+  --output outputs/grasp_data/piper/catalog_candidate.yml \
+  --max-candidates-per-object 32 \
+  --object-grasp doll_00000=outputs/grasp_data/piper/00000/successful_grasps.yaml \
+  --object-grasp doll_00001=outputs/grasp_data/piper/00001/successful_grasps.yaml
+```
+
+Pass one `--object-grasp` entry for every object required by the task. The
+exporter rejects mismatched robot TCP parent frames, positions, orientations,
+and approach distances.
+Treat the result as a staging catalog: isolated gripper validation scores are
+not comparable to complete manipulation quality. Configure it as the robot's
+default catalog only after real multi-seed pick-and-place validation.
