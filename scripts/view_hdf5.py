@@ -28,6 +28,8 @@ from nicegui.elements.label import Label
 BLOCK_SIZE = 16
 TILE_WIDTH = 320
 CAMERA_ORDER = ("left_robot", "overhead", "right_robot")
+PLAYBACK_UI_FPS = 30.0
+INSPECTOR_UI_FPS = 10.0
 
 
 def parse_args() -> argparse.Namespace:
@@ -810,11 +812,16 @@ class ViewerPage:
         self.generation = 0
         self.clock_frame = 0
         self.clock_started_at = time.monotonic()
+        self.syncing_transport_controls = False
+        self.inspector_updated_at = 0.0
         self.state_value_labels: dict[str, Label] = {}
         self.state_rows: list[tuple[str, Element]] = []
         self.joint_charts: list[tuple[EChart, Label, list[float]]] = []
         self._build()
-        ui.timer(0.05, self._tick_data_playback)
+        ui.timer(
+            1.0 / min(self.fps, PLAYBACK_UI_FPS),
+            self._tick_data_playback,
+        )
         ui.timer(0.0, self._load_initial_episode, once=True)
 
     def _build(self) -> None:
@@ -940,11 +947,23 @@ class ViewerPage:
                 with ui.element("div").classes("media-stage") as self.media_stage:
                     self.video = ui.video("", controls=False).classes("w-full")
                     self.video.on(
-                        "timeupdate",
-                        js_handler="(event) => emitEvent('hdf5_video_time', event.target.currentTime)",
-                    )
-                    self.video.on(
-                        "play", js_handler="() => emitEvent('hdf5_video_play')"
+                        "play",
+                        js_handler="""(event) => {
+                            const video = event.target;
+                            if (!video.hdf5PlaybackSyncRunning) {
+                                video.hdf5PlaybackSyncRunning = true;
+                                const syncPlayback = () => {
+                                    if (video.paused || video.ended) {
+                                        video.hdf5PlaybackSyncRunning = false;
+                                        return;
+                                    }
+                                    emitEvent('hdf5_video_time', video.currentTime);
+                                    requestAnimationFrame(syncPlayback);
+                                };
+                                requestAnimationFrame(syncPlayback);
+                            }
+                            emitEvent('hdf5_video_play');
+                        }""",
                     )
                     self.video.on(
                         "pause", js_handler="() => emitEvent('hdf5_video_pause')"
@@ -1007,7 +1026,11 @@ class ViewerPage:
                     self.joint_summary = ui.label("").classes("section-summary")
                 self.joint_container = ui.element("div")
 
-        ui.on("hdf5_video_time", self._on_video_time, throttle=0.05)
+        ui.on(
+            "hdf5_video_time",
+            self._on_video_time,
+            throttle=1.0 / PLAYBACK_UI_FPS,
+        )
         ui.on("hdf5_video_play", self._on_video_play)
         ui.on("hdf5_video_pause", self._on_video_pause)
         ui.on("hdf5_video_ended", self._on_video_ended)
@@ -1316,8 +1339,26 @@ class ViewerPage:
         last_frame = int(self.episode["frame_count"]) - 1
         frame = min(max(frame, 0), last_frame)
         self.frame = frame
-        self.timeline.set_value(frame)
-        self.frame_input.set_value(frame)
+        self.syncing_transport_controls = True
+        try:
+            self.timeline.set_value(frame)
+        finally:
+            self.syncing_transport_controls = False
+
+        now = time.monotonic()
+        update_inspector = (
+            not self.playing
+            or frame == last_frame
+            or now - self.inspector_updated_at >= 1.0 / INSPECTOR_UI_FPS
+        )
+        if not update_inspector:
+            return
+        self.inspector_updated_at = now
+        self.syncing_transport_controls = True
+        try:
+            self.frame_input.set_value(frame)
+        finally:
+            self.syncing_transport_controls = False
         self.time_label.set_text(
             f"{_timecode(frame, self.fps)} / {_timecode(last_frame, self.fps)}"
         )
@@ -1345,6 +1386,7 @@ class ViewerPage:
             return
         last_frame = int(self.episode["frame_count"]) - 1
         frame = min(max(frame, 0), last_frame)
+        self.inspector_updated_at = 0.0
         self._set_frame(frame)
         if self.episode["cameras"]:
             self.video.seek(frame / self.fps)
@@ -1359,9 +1401,13 @@ class ViewerPage:
         self._seek(self.frame + 1)
 
     def _on_timeline_change(self, event: events.ValueChangeEventArguments) -> None:
+        if self.syncing_transport_controls:
+            return
         self._seek(round(float(event.value)))
 
     def _on_frame_input(self, event: events.ValueChangeEventArguments) -> None:
+        if self.syncing_transport_controls:
+            return
         # A number input briefly reports None while the user replaces its text.
         if event.value is not None:
             self._seek(round(float(event.value)))
@@ -1399,6 +1445,7 @@ class ViewerPage:
         self.playing = False
         self.play_button.set_icon("play_arrow")
         self.play_tooltip.set_text("播放")
+        self._set_frame(self.frame)
 
     def _tick_data_playback(self) -> None:
         if not self.ready or not self.playing or self.episode["cameras"]:
@@ -1427,6 +1474,7 @@ class ViewerPage:
         self.playing = False
         self.play_button.set_icon("play_arrow")
         self.play_tooltip.set_text("播放")
+        self._set_frame(self.frame)
 
     def _on_video_ended(self) -> None:
         self._set_frame(int(self.episode["frame_count"]) - 1)
