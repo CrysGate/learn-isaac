@@ -30,6 +30,7 @@ dependencies = [
     "pydantic",
     "pyyaml",
     "rich",
+    "nicegui",
 ]
 
 [build-system]
