@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from scale_bench.config.base import (
-    ConfigReference,
     Name,
     Position2,
 )
@@ -18,7 +17,6 @@ class PickObjectConfig(RigidObjectAssetConfig):
     """The one rigid object manipulated by every episode."""
 
     name: Name
-    metadata_path: ConfigReference
 
 
 class TargetSlotConfig(TargetPlacementConfig):

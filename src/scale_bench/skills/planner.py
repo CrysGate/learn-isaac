@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import logging
 import math
+from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Protocol
@@ -151,6 +152,8 @@ class OperationSkillPlanner:
             EmptyTool(),
         )  # exclude the object in the pre_grasp to grasp stage
         failures: list[str] = []
+        failure_stage_counts: Counter[str] = Counter()
+        attempt_count = 0
         for candidate_index, candidate in enumerate(
             sorted(candidates, key=lambda item: item.score, reverse=True)
         ):
@@ -165,11 +168,13 @@ class OperationSkillPlanner:
                     "smaller_wrist_rotation",
                     "larger_wrist_rotation",
                 )[symmetry_index]
+                symmetry_label = ("small", "large")[symmetry_index]
                 pre_grasp_tcp_pose_env = approach_start_pose(
                     grasp_tcp_pose_env,
                     candidate.approach_axis_tcp,
                     candidate.approach_distance_m,
                 )
+                attempt_count += 1
                 try:
                     pre_grasp = self._move(
                         selected_arm,
@@ -187,16 +192,26 @@ class OperationSkillPlanner:
                     )
                 except PlanningError as error:
                     failures.append(f"{error.stage}: {error.reason}")
-                    LOGGER.info(
-                        "Rejected unreachable grasp arm=%s object=%s "
-                        "candidate=%d symmetry=%s score=%.6f stage=%s reason=%s",
-                        selected_arm,
-                        object_name,
+                    failure_stage_counts[error.stage] += 1
+                    LOGGER.debug(
+                        "candidate=%d symmetry=%s score=%.4f stage=%s rejected: %s",
                         candidate_index,
-                        symmetry_variant,
+                        symmetry_label,
                         candidate.score,
                         error.stage,
                         error.reason,
+                        extra={
+                            "event": "PLAN-TRY",
+                            "event_fields": {
+                                "object": object_name,
+                                "arm": selected_arm,
+                                "candidate_index": candidate_index,
+                                "symmetry_variant": symmetry_variant,
+                                "score": candidate.score,
+                                "stage": error.stage,
+                                "reason": error.reason,
+                            },
+                        },
                     )
                     continue
 
@@ -211,17 +226,30 @@ class OperationSkillPlanner:
                         )
                     )
                 )
+                tcp_position_env_m = tuple(
+                    round(value, 4) for value in grasp_tcp_pose_env.position_m
+                )
                 LOGGER.info(
-                    "Selected reachable grasp arm=%s object=%s candidate=%d "
-                    "symmetry=%s score=%.6f grasp_position=%s "
-                    "base_distance_m=%.6f",
-                    selected_arm,
-                    object_name,
+                    "selected #%d/%s score=%.3f tries=%d",
                     candidate_index,
-                    symmetry_variant,
+                    symmetry_label,
                     candidate.score,
-                    tuple(round(value, 4) for value in grasp_tcp_pose_env.position_m),
-                    base_distance_m,
+                    attempt_count,
+                    extra={
+                        "event": "PLAN",
+                        "event_fields": {
+                            "object": object_name,
+                            "arm": selected_arm,
+                            "candidate_count": len(candidates),
+                            "candidate_index": candidate_index,
+                            "symmetry_variant": symmetry_variant,
+                            "score": candidate.score,
+                            "attempt_count": attempt_count,
+                            "failure_stage_counts": dict(failure_stage_counts),
+                            "base_distance_m": base_distance_m,
+                            "tcp_position_env_m": tcp_position_env_m,
+                        },
+                    },
                 )
                 return PickPlan(
                     source_object.name,
@@ -231,6 +259,22 @@ class OperationSkillPlanner:
                     grasp,
                 )
 
+        LOGGER.warning(
+            "unreachable candidates=%d tries=%d",
+            len(candidates),
+            attempt_count,
+            extra={
+                "event": "PLAN",
+                "event_fields": {
+                    "object": object_name,
+                    "arm": selected_arm,
+                    "candidate_count": len(candidates),
+                    "attempt_count": attempt_count,
+                    "failure_stage_counts": dict(failure_stage_counts),
+                    "last_failure": failures[-1],
+                },
+            },
+        )
         raise SkillError(
             f"{selected_arm} arm could not reach any of {len(candidates)} valid "
             f"{object_name!r} grasps; last failure: {failures[-1]}"

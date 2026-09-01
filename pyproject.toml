@@ -29,6 +29,7 @@ dependencies = [
     "isaaclab-visualizers",
     "pydantic",
     "pyyaml",
+    "rich",
 ]
 
 [build-system]
