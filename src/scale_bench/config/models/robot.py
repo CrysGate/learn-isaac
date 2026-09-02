@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from typing import Annotated, Self, TypeAlias
+
 from pydantic import Field, StrictBool, model_validator
 
 from scale_bench.config.base import (
@@ -14,6 +15,7 @@ from scale_bench.config.base import (
     Name,
     NonNegativeFloat,
     OptionalAssetReference,
+    OptionalConfigReference,
     PositiveFloat,
     Position3,
     Quaternion,
@@ -84,6 +86,8 @@ class ParallelJawGripperConfig(FrozenModel):
     finger_body_names: tuple[Name, Name]
     min_aperture_m: NonNegativeFloat
     max_aperture_m: PositiveFloat
+    aperture_joint_multipliers: dict[str, FiniteFloat]
+    minimum_grasp_aperture_m: PositiveFloat
     closed_positions: dict[str, FiniteFloat]
     open_positions: dict[str, FiniteFloat]
 
@@ -95,9 +99,21 @@ class ParallelJawGripperConfig(FrozenModel):
             raise ValueError("finger_body_names must contain two different bodies")
         if self.max_aperture_m <= self.min_aperture_m:
             raise ValueError("max_aperture_m must be greater than min_aperture_m")
+        if not (
+            self.min_aperture_m
+            < self.minimum_grasp_aperture_m
+            < self.max_aperture_m
+        ):
+            raise ValueError(
+                "minimum_grasp_aperture_m must be inside the aperture range"
+            )
 
         state_joints = set(self.joint_names)
         command_joints = set(self.command_joint_names)
+        if set(self.aperture_joint_multipliers) != state_joints:
+            raise ValueError(
+                "aperture_joint_multipliers must exactly cover gripper joint_names"
+            )
         if not command_joints <= state_joints:
             raise ValueError("command_joint_names must be a subset of joint_names")
         for field_name in ("closed_positions", "open_positions"):
@@ -124,6 +140,8 @@ class RobotConfig(FrozenModel):
     name: Name
     usd_path: AssetReference
     urdf_path: OptionalAssetReference = None
+    curobo_config_path: ConfigReference
+    grasp_catalog_path: OptionalConfigReference = None
     fixed_base: StrictBool = True
     disable_gravity: StrictBool = False
     self_collisions: StrictBool = False

@@ -20,6 +20,7 @@ from scale_bench.config.base import (
     UnitIntervalFloat,
     require_unit_quaternion,
 )
+from scale_bench.config.models.grasp import AnyGraspConfig
 
 
 class RoomConfig(FrozenModel):
@@ -50,6 +51,10 @@ class RobotMountConfig(FrozenModel):
 class RobotMountsConfig(FrozenModel):
     left: RobotMountConfig
     right: RobotMountConfig
+
+
+class ManipulationConfig(FrozenModel):
+    lift_height_m: PositiveFloat
 
 
 class OverheadCameraConfig(FrozenModel):
@@ -99,7 +104,9 @@ class SceneConfig(FrozenModel):
     table: SurfaceConfig
     task_object_placement_area: TaskObjectPlacementArea
     robot_mounts: RobotMountsConfig
+    manipulation: ManipulationConfig
     camera: OverheadCameraConfig
+    anygrasp: AnyGraspConfig | None = None
     lighting: LightingConfig
 
     @property

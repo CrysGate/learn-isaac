@@ -1,0 +1,11 @@
+model: Intel RealSense D435 (smoke resolution)
+width: 160
+height: 120
+update_period_s: 0.03333333333333333
+data_types: [rgb, distance_to_image_plane]
+focal_length_mm: 1.93
+intrinsic_source: aligned_to_color_scaled_1_4
+intrinsic_matrix_px: [151.125, 0.0, 80.0, 0.0, 151.125, 60.0, 0.0, 0.0, 1.0]
+distortion_model: plumb_bob
+distortion_coefficients: [0.0, 0.0, 0.0, 0.0, 0.0]
+clipping_range_m: [0.01, 10.0]

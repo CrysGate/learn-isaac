@@ -1,0 +1,122 @@
+{
+  "authoritative_urdf": "Assets/Robots/piper/piper_description/urdf/piper.urdf",
+  "base_mount_clip": {
+    "base_link": [
+      "z",
+      0.0
+    ]
+  },
+  "collision_pruning_enabled": false,
+  "full_curobo_cuda_load_validated": true,
+  "generator": "scripts/generate_curobo_robot_config.py",
+  "links": {
+    "base_link": {
+      "coverage": 0.2583000063896179,
+      "max_uncovered_gap": 0.047910433262586594,
+      "num_spheres": 2,
+      "protrusion": 0.9199999570846558,
+      "protrusion_dist_mean": 0.00930271577090025,
+      "protrusion_dist_p95": 0.01857290044426918,
+      "surface_gap_mean": 0.017849303781986237,
+      "surface_gap_p95": 0.03566974401473999,
+      "volume_ratio": 0.28818946353123237
+    },
+    "link1": {
+      "coverage": 0.9802999496459961,
+      "max_uncovered_gap": 0.0064089857041835785,
+      "num_spheres": 2,
+      "protrusion": 0.8574999570846558,
+      "protrusion_dist_mean": 0.005958896595984697,
+      "protrusion_dist_p95": 0.01352171041071415,
+      "surface_gap_mean": 0.00014647189527750015,
+      "surface_gap_p95": 0.0012173724826425314,
+      "volume_ratio": 1.1538578601766447
+    },
+    "link2": {
+      "coverage": 0.8626075983047485,
+      "max_uncovered_gap": 0.01648883894085884,
+      "num_spheres": 17,
+      "protrusion": 0.8011764287948608,
+      "protrusion_dist_mean": 0.0046345447190105915,
+      "protrusion_dist_p95": 0.014392292127013206,
+      "surface_gap_mean": 0.00063576694810763,
+      "surface_gap_p95": 0.0046082125045359135,
+      "volume_ratio": 0.3372393880976703
+    },
+    "link3": {
+      "coverage": 0.9666083455085754,
+      "max_uncovered_gap": 0.007039893418550491,
+      "num_spheres": 12,
+      "protrusion": 0.7095833420753479,
+      "protrusion_dist_mean": 0.0028520948253571987,
+      "protrusion_dist_p95": 0.009494748897850513,
+      "surface_gap_mean": 0.00015546965005341917,
+      "surface_gap_p95": 0.001229128916747868,
+      "volume_ratio": 0.6094546740561594
+    },
+    "link4": {
+      "coverage": 0.979699969291687,
+      "max_uncovered_gap": 0.005589168518781662,
+      "num_spheres": 2,
+      "protrusion": 0.7450000047683716,
+      "protrusion_dist_mean": 0.003801075741648674,
+      "protrusion_dist_p95": 0.01025724969804287,
+      "surface_gap_mean": 0.00014179029676597565,
+      "surface_gap_p95": 0.0009450133075006306,
+      "volume_ratio": 0.8827160993635711
+    },
+    "link5": {
+      "coverage": 0.9610045552253723,
+      "max_uncovered_gap": 0.008410841226577759,
+      "num_spheres": 5,
+      "protrusion": 0.7610000371932983,
+      "protrusion_dist_mean": 0.00471959263086319,
+      "protrusion_dist_p95": 0.014160117134451866,
+      "surface_gap_mean": 0.00017517832748126239,
+      "surface_gap_p95": 0.0014073282945901155,
+      "volume_ratio": 0.8395771202467147
+    },
+    "link6": {
+      "coverage": 0.9344836473464966,
+      "max_uncovered_gap": 0.008259161375463009,
+      "num_spheres": 6,
+      "protrusion": 0.8341667056083679,
+      "protrusion_dist_mean": 0.0048075788654387,
+      "protrusion_dist_p95": 0.015027230605483055,
+      "surface_gap_mean": 0.0003198283084202558,
+      "surface_gap_p95": 0.0028584199026226997,
+      "volume_ratio": 0.4612736461464742
+    },
+    "link7": {
+      "coverage": 0.9073497653007507,
+      "max_uncovered_gap": 0.00542517751455307,
+      "num_spheres": 4,
+      "protrusion": 0.76624995470047,
+      "protrusion_dist_mean": 0.004725845996290445,
+      "protrusion_dist_p95": 0.010972708463668823,
+      "surface_gap_mean": 0.00027340443921275437,
+      "surface_gap_p95": 0.002140573225915432,
+      "volume_ratio": 0.8105995264604593
+    },
+    "link8": {
+      "coverage": 0.9259670376777649,
+      "max_uncovered_gap": 0.005875257775187492,
+      "num_spheres": 4,
+      "protrusion": 0.9649999737739563,
+      "protrusion_dist_mean": 0.004546070005744696,
+      "protrusion_dist_p95": 0.012618920765817165,
+      "surface_gap_mean": 0.0002275256993016228,
+      "surface_gap_p95": 0.0017753321444615722,
+      "volume_ratio": 0.8600623997419337
+    }
+  },
+  "refit_links": [
+    "link8:2.0"
+  ],
+  "reused_generated_source": null,
+  "robot_config": "configs/robots/piper.yml",
+  "seed": 42,
+  "sphere_density": 1.0,
+  "stale_refit_non_neighbor_ignores_removed": false,
+  "total_fitted_spheres": 54
+}

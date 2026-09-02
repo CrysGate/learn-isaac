@@ -1,7 +1,7 @@
 """Simulator-independent episode runtime primitives."""
 
+from .demo_generation import DemoGenerationRunner
 from .driver import DriverSnapshot, EpisodeDriver
-from .evaluator import EpisodeEvaluator, TaskEpisodeEvaluator
 from .episodes import (
     EpisodeResult,
     EpisodeSpec,
@@ -9,7 +9,12 @@ from .episodes import (
     EpisodeTermination,
     TerminationReason,
 )
-from .scheduler import BenchmarkRunResult, BenchmarkScheduler
+from .evaluator import EpisodeEvaluator, TaskEpisodeEvaluator
+from .grasp_collection import (
+    SingleCandidateSkillContext,
+    append_physics_validated_grasps,
+    grasp_annotation_path,
+)
 from .policy import (
     EpisodeContext,
     PolicyController,
@@ -23,19 +28,19 @@ from .replay import (
     RecordedEpisode,
     ReplayEnvironment,
 )
-from .demo_generation import DemoGenerationRunner
+from .scheduler import BenchmarkRunResult, BenchmarkScheduler
 
 __all__ = [
     "BenchmarkRunResult",
     "BenchmarkScheduler",
-    "DriverSnapshot",
-    "EpisodeDriver",
-    "EpisodeContext",
     "DemoGenerationRunner",
+    "DriverSnapshot",
+    "EpisodeContext",
+    "EpisodeDriver",
     "EpisodeEvaluator",
-    "EpisodeResult",
     "EpisodeReplayResult",
     "EpisodeReplayRunner",
+    "EpisodeResult",
     "EpisodeSpec",
     "EpisodeState",
     "EpisodeTermination",
@@ -44,7 +49,10 @@ __all__ = [
     "PolicyRolloutRunner",
     "RecordedEpisode",
     "ReplayEnvironment",
+    "SingleCandidateSkillContext",
     "StepSemantics",
-    "TerminationReason",
     "TaskEpisodeEvaluator",
+    "TerminationReason",
+    "append_physics_validated_grasps",
+    "grasp_annotation_path",
 ]

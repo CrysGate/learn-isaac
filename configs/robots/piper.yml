@@ -1,6 +1,8 @@
 name: piper
 usd_path: Assets/Robots/piper/Piper.usd
 urdf_path: Assets/Robots/piper/piper_description/urdf/piper.urdf
+curobo_config_path: curobo/piper.yml
+grasp_catalog_path: ../grasps/piper_matryoshka_dolls.yml
 fixed_base: true
 disable_gravity: false
 self_collisions: false
@@ -23,7 +25,7 @@ kinematics:
     # The authored gripper_center is at the distal finger plane. This offset
     # moves the benchmark TCP to the physical centre of the fingers.
     parent_frame: gripper_center
-    position_m: [-0.02, 0.0, 0.0]
+    position_m: [-0.04, 0.0, 0.0]
     orientation_xyzw: [0.0, 0.0, 0.0, 1.0]
 
 actuators:
@@ -48,6 +50,12 @@ gripper:
   finger_body_names: [link7, link8]
   min_aperture_m: 0.0
   max_aperture_m: 0.1
+  aperture_joint_multipliers:
+    gripper_joint: 1.0
+    joint8: 1.0
+  # Below 2 mm total opening, both fingers have reached their closed limit and
+  # no benchmark object remains between them.
+  minimum_grasp_aperture_m: 0.002
   closed_positions:
     gripper_joint: 0.0
   open_positions:
@@ -58,6 +66,6 @@ camera:
   # Piper.usd authors this helper at the physical wrist-camera mount on link6.
   parent_prim_path: link6/camera
   sensor_prim_name: D435Sensor
-  position_m: [0.0, -0.025, -0.025]
-  orientation_xyzw: [0.99144486, 0.0, 0.0, 0.13052619]
+  position_m: [0.0, 0.0, 0.0]
+  orientation_xyzw: [0.99619470, 0.0, 0.0, 0.08715574]
   convention: opengl

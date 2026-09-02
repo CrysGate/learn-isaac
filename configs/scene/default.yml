@@ -19,8 +19,8 @@ table:
   restitution: 0.0
 
 task_object_placement_area:
-  x_range_m: [-0.35, 0.35]
-  y_range_m: [-0.10, 0.10]
+  x_range_m: [-0.33, 0.33]
+  y_range_m: [-0.20, 0.10]
 
 robot_mounts:
   left:
@@ -30,6 +30,9 @@ robot_mounts:
     position_xy_m: [0.3, -0.45]
     orientation_xyzw: [0.0, 0.0, 0.70710678, 0.70710678]
 
+manipulation:
+  lift_height_m: 0.10
+
 camera:
   profile_path: ../cameras/d435.yml
   stand_usd_path: Assets/Object/Geometry/camera_stand_aloha/aloha_front_camera_stand_realsense_d435.usd
@@ -38,6 +41,27 @@ camera:
   sensor_local_position_m: [0.06376095, 0.0003435, 0.95816412]
   sensor_local_orientation_xyzw: [0.12278780, -0.12278780, -0.69636424, 0.69636424]
   convention: opengl
+
+# The external model is reached through the local SSH tunnel. Isaac Lab depth
+# is already in metres; the client sends scale=1.0 to the service.
+anygrasp:
+  service_url: http://127.0.0.1:5001
+  request_timeout_s: 60.0
+  # Capture 0.4 m from the target on the selected arm's side at 45 degrees.
+  # If too few target points are visible, retry once from directly overhead.
+  capture_distance_m: 0.4
+  depth_trunc_m: 2.0
+  # Request a wide hypothesis pool, then plan geometry-valid poses by score.
+  top_k: 200
+  min_score: 0.0
+  collision_detection: true
+  dense_grasp: false
+  approach_distance_m: 0.08
+  target_margin_m: 0.015
+  minimum_target_points: 128
+  minimum_point_height_above_table_m: 0.002
+  minimum_tcp_height_above_table_m: 0.015
+  maximum_open_axis_vertical_dot: 0.35
 
 lighting:
   texture_path: Assets/Background/brown_photostudio_02_4k.hdr

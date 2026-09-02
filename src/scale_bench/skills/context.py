@@ -59,6 +59,7 @@ class SceneSnapshot:
     left_robot: RobotState
     right_robot: RobotState
     table: SceneObject
+    camera_stand: tuple[SceneObject, ...]
     objects: tuple[SceneObject, ...]
 
     def robot(self, arm: Arm) -> RobotState:
@@ -126,6 +127,7 @@ class PlanningScene:
     """All collision facts required to plan one arm segment."""
 
     table: SceneObject
+    camera_stand: tuple[SceneObject, ...]
     objects: tuple[SceneObject, ...]
     other_arm: Arm
     other_robot: RobotState

@@ -69,6 +69,33 @@ anygrasp:
 6. Planner 对候选及其平行夹爪 180 度等价姿态做 IK 和碰撞检查，选择分数最高的完整可行轨迹。
 7. 闭合后从实时物体与 TCP 位姿重测 `T_object_tcp`，再规划搬运和放置。
 
+## 物理保真抓取标注采集
+
+`single_object_pick_and_place` 可以把一次 AnyGrasp 返回的全部几何有效候选
+分别放入独立仿真 episode，逐条完成规划和实际 pick-and-place：
+
+```bash
+HEADLESS=1 uv run python scripts/run_demo_generation.py \
+  --task single_object_pick_and_place \
+  --program collect-grasps \
+  --base-seed 101 \
+  --episodes 1 \
+  --num-envs 1 \
+  --max-steps 1200 \
+  --viz kit
+```
+
+`--grasp-arm` 默认是 `auto`：每个 seed 按物体到左右 robot base 的距离选臂，
+并将该臂固定用于 AnyGrasp 拍摄、过滤、规划和执行；也可以显式指定 `left` 或
+`right`。每个 episode 只向 planner 提供当前 candidate，因此不可达候选不会
+回退到其他候选。规划失败、未抓稳、搬运或放置失败都不会写入；只有 task evaluator 的
+稳定成功条件通过后，原始 object-frame candidate 才会保存到物体 USD 同目录
+的 `<usd文件名>_grasps.yml`。重复运行会校验文件中的 robot/TCP 契约并追加，
+不会覆盖既有数据。该 YAML 与运行时 `GraspCatalogConfig` 格式兼容。
+
+此模式下 `--episodes` 是独立 AnyGrasp 采集轮数，每轮先生成一批 candidate
+episode；`--num-envs` 只控制这些 candidate episode 的并行数。
+
 相机刷新不调用 `env.step()`，不会推进 episode，也不会写入 recorder。默认只请求一次服务；目标点不足时的重拍发生在请求之前。
 
 ## 坐标约定

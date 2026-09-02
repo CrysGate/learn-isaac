@@ -7,7 +7,7 @@ import math
 from collections import Counter
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Literal, Protocol, TypeAlias
 
 from .commands import MoveToJoints, MoveToPose
 from .context import (
@@ -38,6 +38,16 @@ from .models import Arm, ArmSelection, PickAndPlace, Pose
 
 LOGGER = logging.getLogger(__name__)
 
+PlanningStage: TypeAlias = Literal[
+    "pre_grasp",
+    "grasp",
+    "lift",
+    "pre_place",
+    "place",
+    "retreat",
+    "clear",
+]
+
 
 class MotionPlanner(Protocol):
     """Plan one collision-aware joint trajectory for a fixed arm."""
@@ -50,6 +60,7 @@ class MotionPlanner(Protocol):
         start: JointState,
         target_tcp_pose_env: Pose,
         scene: PlanningScene,
+        stage: PlanningStage,
     ) -> JointTrajectory: ...
 
     def plan_joints(
@@ -57,7 +68,13 @@ class MotionPlanner(Protocol):
         start: JointState,
         target_joint_state: JointState,
         scene: PlanningScene,
+        stage: PlanningStage,
     ) -> JointTrajectory: ...
+
+    def commit_inspection_stages(
+        self,
+        stages: tuple[PlanningStage, ...],
+    ) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -251,6 +268,9 @@ class OperationSkillPlanner:
                         },
                     },
                 )
+                self._motion_planners[selected_arm].commit_inspection_stages(
+                    ("pre_grasp", "grasp")
+                )
                 return PickPlan(
                     source_object.name,
                     selected_arm,
@@ -302,13 +322,15 @@ class OperationSkillPlanner:
             unmanipulated_objects,
             HeldObject(source_object, grasp.tcp_pose_object),
         )
-        return self._move(
+        lift = self._move(
             plan.arm,
             snapshot.robot(plan.arm).joints,
             lift_tcp_pose_env,
             held_object_scene,
             "lift",
         )
+        self._motion_planners[plan.arm].commit_inspection_stages(("lift",))
+        return lift
 
     def plan_place(
         self,
@@ -378,6 +400,14 @@ class OperationSkillPlanner:
             unmanipulated_objects,
             HeldObject(source_object, grasp.tcp_pose_object),
         )
+        # The gripper stays closed through place; EmptyTool only omits its
+        # collision geometry for the final descent and the released retreat.
+        object_contact_scene = _planning_scene(
+            snapshot,
+            arm,
+            unmanipulated_objects,
+            EmptyTool(),
+        )
         pre_place = self._move(
             arm,
             snapshot.robot(arm).joints,
@@ -389,7 +419,7 @@ class OperationSkillPlanner:
             arm,
             pre_place.trajectory.end,
             place_tcp_pose_env,
-            held_object_scene,
+            object_contact_scene,
             "place",
         )
         placed_object = SceneObject(
@@ -403,17 +433,11 @@ class OperationSkillPlanner:
             (*unmanipulated_objects, placed_object),
             EmptyTool(),
         )
-        release_contact_scene = _planning_scene(
-            snapshot,
-            arm,
-            unmanipulated_objects,
-            EmptyTool(),
-        )
         retreat = self._move(
             arm,
             place.trajectory.end,
             pre_place_tcp_pose_env,
-            release_contact_scene,
+            object_contact_scene,
             "retreat",
         )
         clear_target_joint_state = JointState(
@@ -428,6 +452,9 @@ class OperationSkillPlanner:
             released_object_scene,
             "clear",
         )
+        self._motion_planners[arm].commit_inspection_stages(
+            ("pre_place", "place", "retreat", "clear")
+        )
         return PlacePlan(arm, pre_place, place, retreat, clear)
 
     def _move(
@@ -436,13 +463,14 @@ class OperationSkillPlanner:
         start: JointState,
         target_tcp_pose_env: Pose,
         scene: PlanningScene,
-        stage: str,
+        stage: PlanningStage,
     ) -> MoveToPose:
         try:
             trajectory = self._motion_planners[arm].plan_pose(
                 start,
                 target_tcp_pose_env,
                 scene,
+                stage,
             )
         except PlanningError as error:
             raise PlanningError(arm, stage, error.reason) from error
@@ -454,13 +482,14 @@ class OperationSkillPlanner:
         start: JointState,
         target_joint_state: JointState,
         scene: PlanningScene,
-        stage: str,
+        stage: PlanningStage,
     ) -> MoveToJoints:
         try:
             trajectory = self._motion_planners[arm].plan_joints(
                 start,
                 target_joint_state,
                 scene,
+                stage,
             )
         except PlanningError as error:
             raise PlanningError(arm, stage, error.reason) from error
@@ -499,6 +528,7 @@ def _planning_scene(
     other_arm: Arm = "right" if active_arm == "left" else "left"
     return PlanningScene(
         table=snapshot.table,
+        camera_stand=snapshot.camera_stand,
         objects=objects,
         other_arm=other_arm,
         other_robot=snapshot.robot(other_arm),
@@ -607,6 +637,7 @@ __all__ = [
     "MotionPlanner",
     "OperationSkillPlanner",
     "PickPlan",
+    "PlanningStage",
     "PlacePlan",
     "SkillPlanner",
 ]
