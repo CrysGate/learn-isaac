@@ -108,12 +108,6 @@ class CuroboMotionPlanner(MotionPlannerProtocol):
         current = self._joint_state(planning_start)
         goal = self._goal_from_env_pose(target_tcp_pose_env)
         result = self._planner.plan_pose(goal, current)
-        if result is None or result.success is None or not result.success.any().item():
-            raise PlanningError(
-                self._arm,
-                stage,
-                self._pose_failure_reason(goal, current, scene),
-            )
         return self._trajectory(result, stage, start.positions)
 
     def plan_joints(
@@ -425,62 +419,6 @@ class CuroboMotionPlanner(MotionPlannerProtocol):
         return CuroboJointState.from_position(
             positions.unsqueeze(0),
             joint_names=list(self._joint_names),
-        )
-
-    def _pose_failure_reason(
-        self,
-        goal: GoalToolPose,
-        current: CuroboJointState,
-        scene: PlanningScene,
-    ) -> str:
-        """Separate target IK failure from target collision and path failure."""
-
-        ik_solver = self._planner.ik_solver
-        seed_count = ik_solver.config.num_seeds
-        result = ik_solver.solve_pose(
-            goal,
-            return_seeds=seed_count,
-            current_state=current,
-        )
-        successful = result.success.reshape(-1)
-        if successful.any().item():
-            count = int(successful.count_nonzero().item())
-            return (
-                "trajectory search failed after IK found "
-                f"{count} collision-free goal configurations"
-            )
-
-        position_error = result.position_error.reshape(-1)
-        rotation_error = result.rotation_error.reshape(-1)
-        converged = (position_error < ik_solver.config.position_tolerance) & (
-            rotation_error < ik_solver.config.orientation_tolerance
-        )
-        if converged.any().item():
-            index = int(converged.nonzero()[0].item())
-            violations = self._configuration_violations(
-                scene,
-                result.solution.reshape(-1, result.solution.shape[-1])[index],
-            )
-            return (
-                f"IK reached the target in {int(converged.count_nonzero().item())} "
-                "configurations, but a representative goal is infeasible: "
-                f"{'; '.join(violations)}"
-            )
-
-        normalized_error = (
-            position_error / ik_solver.config.position_tolerance
-            + rotation_error / ik_solver.config.orientation_tolerance
-        )
-        index = int(normalized_error.argmin().item())
-        feasible_count = int(result.feasible.count_nonzero().item())
-        return (
-            "IK did not converge: best position error="
-            f"{float(position_error[index]):.6g} m "
-            f"(tolerance={ik_solver.config.position_tolerance:.6g}), "
-            "rotation error="
-            f"{float(rotation_error[index]):.6g} rad "
-            f"(tolerance={ik_solver.config.orientation_tolerance:.6g}), "
-            f"constraint-feasible seeds={feasible_count}/{seed_count}"
         )
 
     def _trajectory(
