@@ -61,7 +61,7 @@ class CuroboMotionPlanner(MotionPlannerProtocol):
         visualizer: CuroboPlanningVisualizer | None,
     ) -> None:
         self._planner = planner
-        self._arm = arm
+        self._arm: Arm = arm
         self._arm_base_pose_env = Pose(
             (*mount.position_xy_m, table_top_z_m),
             mount.orientation_xyzw,
