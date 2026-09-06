@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import itertools
+import logging
 import math
 import xml.etree.ElementTree as ET
 from collections.abc import Mapping
@@ -15,8 +16,9 @@ from curobo.motion_planner import MotionPlanner, MotionPlannerCfg
 from curobo.scene import Cuboid
 from curobo.scene import Scene as SceneCfg
 from curobo.trajectory_optimizer import TrajectoryOptimizerResult
-from curobo.types import DeviceCfg, GoalToolPose
+from curobo.types import DeviceCfg, GoalToolPose, ToolPoseCriteria
 from curobo.types import JointState as CuroboJointState
+from curobo.types import Pose as CuroboPose
 from torch import Tensor
 
 from scale_bench.config.models.robot import RobotConfig, TcpConfig
@@ -30,7 +32,13 @@ from scale_bench.skills.context import (
     SceneObject,
 )
 from scale_bench.skills.errors import PlanningError
-from scale_bench.skills.geometry import compose_pose, inverse_pose, relative_pose
+from scale_bench.skills.geometry import (
+    compose_pose,
+    conjugate_quaternion_xyzw,
+    inverse_pose,
+    relative_pose,
+    rotate_vector_xyzw,
+)
 from scale_bench.skills.models import Arm, Pose
 from scale_bench.skills.planner import (
     MotionPlanner as MotionPlannerProtocol,
@@ -45,6 +53,8 @@ if TYPE_CHECKING:
     )
 
 START_JOINT_LIMIT_TOLERANCE_RAD = 1.0e-5
+TCP_FRAME = "scale_bench_tcp"
+LOGGER = logging.getLogger(__name__)
 
 
 class CuroboMotionPlanner(MotionPlannerProtocol):
@@ -91,7 +101,14 @@ class CuroboMotionPlanner(MotionPlannerProtocol):
         target_tcp_pose_env: Pose,
         scene: PlanningScene,
         stage: PlanningStage,
+        linear_axis_env: tuple[float, float, float] | None,
     ) -> JointTrajectory:
+        """Normalize contact directions; transit uses None and may reorient."""
+        if linear_axis_env is not None:
+            linear_axis_norm = math.hypot(*linear_axis_env)
+            linear_axis_env = tuple(
+                component_env / linear_axis_norm for component_env in linear_axis_env
+            )
         planning_start = self._planning_start(start.positions, stage)
         collision_cuboids_base = self._sync_scene(scene)
         self._capture_visualization(
@@ -108,8 +125,124 @@ class CuroboMotionPlanner(MotionPlannerProtocol):
             )
         current = self._joint_state(planning_start)
         goal = self._goal_from_env_pose(target_tcp_pose_env)
-        result = self._planner.plan_pose(goal, current)
-        return self._trajectory(result, stage)
+        criteria = self._motion_criteria(target_tcp_pose_env, linear_axis_env)
+        try:
+            self._planner.update_tool_pose_criteria(
+                {frame: criteria for frame in self._planner.tool_frames}
+            )
+            result = self._planner.plan_pose(goal, current)
+            trajectory = self._trajectory(result, stage)
+            if linear_axis_env is not None:
+                self._validate_tcp_path(
+                    trajectory, target_tcp_pose_env, stage, linear_axis_env
+                )
+            return trajectory
+        finally:
+            self._planner.update_tool_pose_criteria(
+                {
+                    frame: ToolPoseCriteria(device_cfg=self._planner.device_cfg)
+                    for frame in self._planner.tool_frames
+                }
+            )
+
+    def _motion_criteria(
+        self,
+        target_tcp_pose_env: Pose,
+        linear_axis_env: tuple[float, float, float] | None,
+    ) -> ToolPoseCriteria:
+        if linear_axis_env is None:
+            return ToolPoseCriteria(device_cfg=self._planner.device_cfg)
+
+        motion_axis_base = rotate_vector_xyzw(
+            conjugate_quaternion_xyzw(self._arm_base_pose_env.orientation_xyzw),
+            linear_axis_env,
+        )
+        motion_axis_tcp = rotate_vector_xyzw(
+            conjugate_quaternion_xyzw(target_tcp_pose_env.orientation_xyzw),
+            linear_axis_env,
+        )
+        _, axis_index, project_to_goal = max(
+            (abs(component), index, project)
+            for project, components in (
+                (False, motion_axis_base), (True, motion_axis_tcp)
+            )
+            for index, component in enumerate(components)
+        )
+        non_terminal_axes_weight = [1.0] * 6
+        non_terminal_axes_weight[axis_index] = 0.0
+        return ToolPoseCriteria(
+            non_terminal_pose_axes_weight_factor=non_terminal_axes_weight,
+            project_distance_to_goal=project_to_goal,
+            device_cfg=self._planner.device_cfg,
+        )
+
+    def _validate_tcp_path(
+        self,
+        trajectory: JointTrajectory,
+        target_tcp_pose_env: Pose,
+        stage: PlanningStage,
+        linear_axis_env: tuple[float, float, float],
+    ) -> None:
+        """Check the executed interpolation: pose costs alone are soft constraints."""
+        kinematics = self._planner.compute_kinematics(
+            self._joint_state(trajectory.positions)
+        )
+        tcp_poses_base = kinematics.tool_poses.get_link_pose(TCP_FRAME)
+        tcp_poses_env = self._curobo_pose(self._arm_base_pose_env).multiply(
+            tcp_poses_base
+        )
+        target_tcp_pose_env_curobo = self._curobo_pose(target_tcp_pose_env)
+        position_tolerance_m = self._planner.trajopt_solver.config.position_tolerance
+        orientation_tolerance_rad = (
+            self._planner.trajopt_solver.config.orientation_tolerance
+        )
+        motion_axis_env = trajectory.positions.new_tensor(linear_axis_env)
+        tcp_offsets_env_m = tcp_poses_env.position - target_tcp_pose_env_curobo.position
+        remaining_m = -(tcp_offsets_env_m @ motion_axis_env)
+        lateral_error_m = torch.linalg.vector_norm(
+            tcp_offsets_env_m + remaining_m[:, None] * motion_axis_env, dim=-1
+        ).max()
+        overshoot_m = torch.maximum(
+            -remaining_m.min(), remaining_m.max() - remaining_m[0]
+        )
+        reversal_m = (remaining_m - remaining_m.cummin(dim=0).values).max()
+        orientation_error_rad = 2.0 * torch.acos(
+            (tcp_poses_env.quaternion * target_tcp_pose_env_curobo.quaternion)
+            .sum(dim=-1)
+            .abs()
+            .clamp(max=1.0)
+        ).max()
+        endpoint_error_m = torch.linalg.vector_norm(tcp_offsets_env_m[-1])
+        metrics = {
+            "lateral_error_m": float(lateral_error_m),
+            "overshoot_m": float(overshoot_m),
+            "reversal_m": float(reversal_m),
+            "endpoint_error_m": float(endpoint_error_m),
+            "orientation_error_rad": float(orientation_error_rad),
+        }
+        if (
+            max(lateral_error_m, overshoot_m, reversal_m, endpoint_error_m)
+            > position_tolerance_m
+            or orientation_error_rad > orientation_tolerance_rad
+        ):
+            raise PlanningError(self._arm, stage, f"TCP path constraint failed: {metrics}")
+        LOGGER.debug(
+            "%s %s TCP path: %s",
+            self._arm,
+            stage,
+            metrics,
+            extra={
+                "event": "PATH",
+                "event_fields": {"arm": self._arm, "stage": stage, **metrics},
+            },
+        )
+
+    def _curobo_pose(self, frame_pose_parent: Pose) -> CuroboPose:
+        return CuroboPose.from_list(
+            [*frame_pose_parent.position_m, *frame_pose_parent.orientation_xyzw],
+            device_cfg=self._planner.device_cfg,
+            q_xyzw=True,
+        )
 
     def plan_joints(
         self,
@@ -396,24 +529,9 @@ class CuroboMotionPlanner(MotionPlannerProtocol):
             self._arm_base_pose_env,
             target_tcp_pose_env,
         )
-        parent_pose_tcp = inverse_pose(self._tcp_pose_parent)
-        parent_pose_base = compose_pose(
-            tcp_pose_base,
-            parent_pose_tcp,
-        )
-        return GoalToolPose(
-            tool_frames=self._planner.tool_frames,
-            position=self._planner.device_cfg.to_device(
-                parent_pose_base.position_m
-            ).view(1, 1, 1, 1, 3),
-            quaternion=self._planner.device_cfg.to_device(
-                (
-                    parent_pose_base.orientation_xyzw[3],
-                    parent_pose_base.orientation_xyzw[0],
-                    parent_pose_base.orientation_xyzw[1],
-                    parent_pose_base.orientation_xyzw[2],
-                )
-            ).view(1, 1, 1, 1, 4),
+        return GoalToolPose.from_poses(
+            {TCP_FRAME: self._curobo_pose(tcp_pose_base)},
+            ordered_tool_frames=self._planner.tool_frames,
         )
 
     def _joint_state(self, positions: Tensor) -> CuroboJointState:
@@ -476,7 +594,7 @@ def build_curobo_motion_planners(
 ) -> Mapping[Arm, CuroboMotionPlanner]:
     """Share one statelessly synchronized backend per kinematic profile."""
 
-    backends: dict[tuple[Path, str, str, tuple[str, ...]], MotionPlanner] = {}
+    backends: dict[tuple[Path, str, TcpConfig, tuple[str, ...]], MotionPlanner] = {}
     visualizer = None
     if visualize:
         from scale_bench.isaaclab.runtime.curobo_visualization import (
@@ -503,7 +621,7 @@ def build_curobo_motion_planners(
         key = (
             Path(robot_config.urdf_path).resolve(),
             robot_config.kinematics.base_body,
-            robot_config.kinematics.tcp.parent_frame,
+            robot_config.kinematics.tcp,
             joint_names,
         )
         backend = backends.get(key)
@@ -568,7 +686,20 @@ def _load_collision_robot_config(robot_config: RobotConfig) -> dict[str, Any]:
     kinematics["urdf_path"] = str(urdf_path)
     kinematics["asset_root_path"] = str(asset_root)
     kinematics["base_link"] = robot_config.kinematics.base_body
-    kinematics["tool_frames"] = [robot_config.kinematics.tcp.parent_frame]
+    
+    tcp = robot_config.kinematics.tcp
+    kinematics["tool_frames"] = [TCP_FRAME]
+    kinematics["extra_links"][TCP_FRAME] = {
+        "link_name": TCP_FRAME,
+        "parent_link_name": tcp.parent_frame,
+        "joint_name": f"{TCP_FRAME}_joint",
+        "joint_type": "FIXED",
+        "fixed_transform": [
+            *tcp.position_m,
+            tcp.orientation_xyzw[3],
+            *tcp.orientation_xyzw[:3],
+        ],
+    }
 
     arm_joints = tuple(robot_config.kinematics.arm_joint_names)
     cspace = kinematics["cspace"]

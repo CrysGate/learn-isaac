@@ -120,6 +120,8 @@ class _RichEventHandler(logging.Handler):
             message = record.getMessage()
             if message:
                 line.append(f" {message}")
+            if fields.get("termination_message"):
+                line.append(f" reason={fields['termination_message']}")
             self._console.print(line)
             if record.exc_info is not None:
                 self._console.print(
