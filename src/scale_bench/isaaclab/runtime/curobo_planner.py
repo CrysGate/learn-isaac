@@ -14,6 +14,7 @@ import yaml
 from curobo.motion_planner import MotionPlanner, MotionPlannerCfg
 from curobo.scene import Cuboid
 from curobo.scene import Scene as SceneCfg
+from curobo.trajectory_optimizer import TrajectoryOptimizerResult
 from curobo.types import DeviceCfg, GoalToolPose
 from curobo.types import JointState as CuroboJointState
 from torch import Tensor
@@ -108,7 +109,7 @@ class CuroboMotionPlanner(MotionPlannerProtocol):
         current = self._joint_state(planning_start)
         goal = self._goal_from_env_pose(target_tcp_pose_env)
         result = self._planner.plan_pose(goal, current)
-        return self._trajectory(result, stage, start.positions)
+        return self._trajectory(result, stage)
 
     def plan_joints(
         self,
@@ -135,7 +136,7 @@ class CuroboMotionPlanner(MotionPlannerProtocol):
             self._joint_state(target_joint_state.positions),
             self._joint_state(planning_start),
         )
-        return self._trajectory(result, stage, start.positions)
+        return self._trajectory(result, stage)
 
     def commit_inspection_stages(
         self,
@@ -423,40 +424,42 @@ class CuroboMotionPlanner(MotionPlannerProtocol):
 
     def _trajectory(
         self,
-        result: Any,
+        result: TrajectoryOptimizerResult | None,
         stage: str,
-        live_start: Tensor,
     ) -> JointTrajectory:
-        success = result is not None and result.success is not None
-        if not success or not result.success.any().item():
-            reason = (
-                "CuRobo returned no result"
-                if result is None
-                else str(result.debug_info or "no feasible trajectory")
-            )
-            raise PlanningError(self._arm, stage, reason)
-        interpolated = result.get_interpolated_plan()
-        if interpolated is None or interpolated.joint_names is None:
-            raise PlanningError(self._arm, stage, "CuRobo returned no trajectory")
-        try:
-            indices = tuple(
-                interpolated.joint_names.index(name) for name in self._joint_names
-            )
-        except ValueError as error:
+        """Convert a plan; None means planning produced no trajectory optimizer result."""
+        if result is None:
             raise PlanningError(
                 self._arm,
                 stage,
-                "CuRobo trajectory has the wrong joint order",
-            ) from error
+                "CUROBO_NO_RESULT: planning returned no trajectory optimization "
+                "result; failure details are unavailable",
+            )
+        if result.success is None:
+            raise PlanningError(
+                self._arm,
+                stage,
+                "CUROBO_MISSING_SUCCESS: the returned trajectory optimization "
+                "result has no success status",
+            )
+        successful_count = int(result.success.count_nonzero().item())
+        if successful_count == 0:
+            raise PlanningError(
+                self._arm,
+                stage,
+                "CUROBO_NO_SUCCESSFUL_TRAJECTORY: the latest trajectory "
+                "optimization result contains no successful trajectory "
+                f"(successful_candidates={successful_count}/{result.success.numel()}); "
+                "attempt history is unavailable",
+            )
+        interpolated = result.get_interpolated_plan()
+        indices = tuple(interpolated.joint_names.index(name) for name in self._joint_names)
         positions = (
             interpolated.position.reshape(
                 -1,
                 interpolated.position.shape[-1],
-            )[:, indices]
-            .contiguous()
-            .clone()
+            )[:, indices].contiguous()
         )
-        positions[0] = live_start
         return JointTrajectory(positions)
 
 
