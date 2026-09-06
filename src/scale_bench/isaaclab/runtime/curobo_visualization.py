@@ -23,6 +23,7 @@ STAGE_ORDER: tuple[PlanningStage, ...] = (
     "grasp",
     "lift",
     "pre_place",
+    "adjust",
     "place",
     "retreat",
     "clear",

@@ -43,6 +43,7 @@ PlanningStage: TypeAlias = Literal[
     "grasp",
     "lift",
     "pre_place",
+    "adjust",
     "place",
     "retreat",
     "clear",
@@ -63,7 +64,7 @@ class MotionPlanner(Protocol):
         stage: PlanningStage,
         linear_axis_env: tuple[float, float, float] | None,
     ) -> JointTrajectory:
-        """An axis fixes contact motion; None allows pre-grasp/pre-place transit."""
+        """An axis fixes contact motion; None allows transit and adjustment."""
         ...
 
     def plan_joints(
@@ -92,7 +93,7 @@ class PickPlan:
 @dataclass(frozen=True, slots=True)
 class PlacePlan:
     arm: Arm
-    pre_place: MoveToPose
+    adjust: MoveToPose
     place: MoveToPose
     retreat: MoveToPose
     clear: MoveToJoints
@@ -108,6 +109,14 @@ class SkillPlanner(Protocol):
 
     def plan_lift(
         self,
+        plan: PickPlan,
+        grasp: GraspState,
+        context: SkillContext,
+    ) -> MoveToPose: ...
+
+    def plan_pre_place(
+        self,
+        request: PickAndPlace,
         plan: PickPlan,
         grasp: GraspState,
         context: SkillContext,
@@ -368,6 +377,73 @@ class OperationSkillPlanner:
             (0.0, 0.0, 1.0),
         )
 
+    def plan_pre_place(
+        self,
+        request: PickAndPlace,
+        plan: PickPlan,
+        grasp: GraspState,
+        context: SkillContext,
+    ) -> MoveToPose:
+        """Plan transport; placement uses a fresh grasp measurement on arrival."""
+        snapshot = context.snapshot()
+        source_object = snapshot.object(request.object_name)
+        held_object_scene = _planning_scene(
+            snapshot,
+            plan.arm,
+            _objects_excluding(snapshot.objects, source_object.name),
+            HeldObject(source_object, grasp.tcp_pose_object),
+        )
+        target_object_orientations_env_xyzw = _target_object_orientations_env_xyzw(
+            request,
+            grasp.tcp_pose_object,
+            grasp.tcp_pose_env.orientation_xyzw,
+        )
+        failures: list[str] = []
+        for target_object_orientation_env_xyzw in target_object_orientations_env_xyzw:
+            target_object_pose_env = Pose(
+                request.target_object_pose_env.position_m,
+                target_object_orientation_env_xyzw,
+            )
+            place_tcp_pose_env = compose_pose(target_object_pose_env, grasp.tcp_pose_object)
+            try:
+                pre_place = self._move_above_place(
+                    plan.arm,
+                    snapshot.robot(plan.arm).joints,
+                    place_tcp_pose_env,
+                    held_object_scene,
+                    "pre_place",
+                )
+            except PlanningError as error:
+                failures.append(f"{error.stage}: {error.reason}")
+                continue
+            self._motion_planners[plan.arm].commit_inspection_stages(("pre_place",))
+            return pre_place
+        raise SkillError(
+            f"actual-grasp pre-place planning failed for {request.object_name!r}: "
+            + "; ".join(failures)
+        )
+
+    def _move_above_place(
+        self,
+        arm: Arm,
+        joint_state: JointState,
+        place_tcp_pose_env: Pose,
+        scene: PlanningScene,
+        stage: Literal["pre_place", "adjust"],
+    ) -> MoveToPose:
+        above_place_tcp_pose_env = Pose(
+            offset_z_env(place_tcp_pose_env.position_m, self._lift_height_m),
+            place_tcp_pose_env.orientation_xyzw,
+        )
+        return self._move(
+            arm,
+            joint_state,
+            above_place_tcp_pose_env,
+            scene,
+            stage,
+            None,
+        )
+
     def plan_place(
         self,
         request: PickAndPlace,
@@ -421,10 +497,6 @@ class OperationSkillPlanner:
             target_object_pose_env,
             grasp.tcp_pose_object,
         )
-        pre_place_tcp_pose_env = Pose(
-            (*place_tcp_pose_env.position_m[:2], place_tcp_pose_env.position_m[2] + self._lift_height_m),
-            place_tcp_pose_env.orientation_xyzw,
-        )
         unmanipulated_objects = _objects_excluding(
             snapshot.objects,
             source_object.name,
@@ -443,17 +515,16 @@ class OperationSkillPlanner:
             unmanipulated_objects,
             EmptyTool(),
         )
-        pre_place = self._move(
+        adjust = self._move_above_place(
             arm,
             snapshot.robot(arm).joints,
-            pre_place_tcp_pose_env,
+            place_tcp_pose_env,
             held_object_scene,
-            "pre_place",
-            None,
+            "adjust",
         )
         place = self._move(
             arm,
-            pre_place.trajectory.end,
+            adjust.trajectory.end,
             place_tcp_pose_env,
             object_contact_scene,
             "place",
@@ -503,9 +574,9 @@ class OperationSkillPlanner:
             "clear",
         )
         self._motion_planners[arm].commit_inspection_stages(
-            ("pre_place", "place", "retreat", "clear")
+            ("adjust", "place", "retreat", "clear")
         )
-        return PlacePlan(arm, pre_place, place, retreat, clear)
+        return PlacePlan(arm, adjust, place, retreat, clear)
 
     def _move(
         self,

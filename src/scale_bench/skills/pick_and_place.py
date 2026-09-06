@@ -30,8 +30,13 @@ def pick_and_place(
     yield Hold(steps=request.grasp_settle_steps, label="lifted")
 
     lifted_grasp = context.measure_grasp(request.object_name, plan.arm)
-    place = planner.plan_place(request, plan, lifted_grasp, context)
-    yield place.pre_place
+    pre_place = planner.plan_pre_place(request, plan, lifted_grasp, context)
+    yield pre_place
+
+    # Transport can change the object-to-TCP relation through finger slip.
+    transported_grasp = context.measure_grasp(request.object_name, plan.arm)
+    place = planner.plan_place(request, plan, transported_grasp, context)
+    yield place.adjust
     yield place.place
     yield SetGripper(place.arm, closed=False, label="release")
     yield Hold(steps=request.release_settle_steps, label="released")
