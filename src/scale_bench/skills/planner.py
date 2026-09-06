@@ -29,7 +29,6 @@ from .geometry import (
     multiply_quaternions_xyzw,
     normalize_quaternion_xyzw,
     offset_z_env,
-    quaternion_angular_distance_rad,
     quaternion_xyzw_from_axis_angle,
     quaternion_xyzw_from_rpy,
     relative_pose,
@@ -178,18 +177,10 @@ class OperationSkillPlanner:
         for candidate_index, candidate in enumerate(
             sorted(candidates, key=lambda item: item.score, reverse=True)
         ):
-            for symmetry_index, grasp_tcp_pose_env in enumerate(
-                _parallel_jaw_grasp_poses(
-                    source_object.pose_env,
-                    candidate,
-                    snapshot.robot(selected_arm).tcp_pose_env.orientation_xyzw,
-                )
+            for grasp_tcp_pose_env in _parallel_jaw_grasp_poses(
+                source_object.pose_env,
+                candidate,
             ):
-                symmetry_variant = (
-                    "smaller_wrist_rotation",
-                    "larger_wrist_rotation",
-                )[symmetry_index]
-                symmetry_label = ("small", "large")[symmetry_index]
                 pre_grasp_tcp_pose_env = approach_start_pose(
                     grasp_tcp_pose_env,
                     candidate.approach_axis_tcp,
@@ -197,6 +188,13 @@ class OperationSkillPlanner:
                 )
                 attempt_count += 1
                 try:
+                    camera_side_up_dot = _camera_side_up_dot(
+                        grasp_tcp_pose_env,
+                        snapshot.robot(selected_arm).camera_position_tcp_m,
+                        candidate.approach_axis_tcp,
+                    )
+                    if camera_side_up_dot <= 0.0:
+                        continue
                     pre_grasp = self._move(
                         selected_arm,
                         snapshot.robot(selected_arm).joints,
@@ -236,9 +234,8 @@ class OperationSkillPlanner:
                     failures.append(f"{error.stage}: {error.reason}")
                     failure_stage_counts[error.stage] += 1
                     LOGGER.debug(
-                        "candidate=%d symmetry=%s score=%.4f stage=%s rejected: %s",
+                        "candidate=%d score=%.4f stage=%s rejected: %s",
                         candidate_index,
-                        symmetry_label,
                         candidate.score,
                         error.stage,
                         error.reason,
@@ -248,7 +245,6 @@ class OperationSkillPlanner:
                                 "object": object_name,
                                 "arm": selected_arm,
                                 "candidate_index": candidate_index,
-                                "symmetry_variant": symmetry_variant,
                                 "score": candidate.score,
                                 "stage": error.stage,
                                 "reason": error.reason,
@@ -272,9 +268,8 @@ class OperationSkillPlanner:
                     round(value, 4) for value in grasp_tcp_pose_env.position_m
                 )
                 LOGGER.info(
-                    "selected #%d/%s score=%.3f tries=%d",
+                    "selected #%d score=%.3f tries=%d",
                     candidate_index,
-                    symmetry_label,
                     candidate.score,
                     attempt_count,
                     extra={
@@ -284,12 +279,12 @@ class OperationSkillPlanner:
                             "arm": selected_arm,
                             "candidate_count": len(candidates),
                             "candidate_index": candidate_index,
-                            "symmetry_variant": symmetry_variant,
                             "score": candidate.score,
                             "attempt_count": attempt_count,
                             "failure_stage_counts": dict(failure_stage_counts),
                             "base_distance_m": base_distance_m,
                             "tcp_position_env_m": tcp_position_env_m,
+                            "camera_side_up_dot": camera_side_up_dot,
                         },
                     },
                 )
@@ -321,7 +316,7 @@ class OperationSkillPlanner:
             },
         )
         raise SkillError(
-            f"{selected_arm} arm could not plan a grasp and lift for any of "
+            f"{selected_arm} arm could not plan an upright grasp and lift for any of "
             f"{len(candidates)} valid {object_name!r} candidates; "
             f"last failure: {failures[-1]}"
         )
@@ -603,12 +598,40 @@ def _objects_excluding(
     )
 
 
+def _camera_side_up_dot(
+    tcp_pose_env: Pose,
+    camera_position_tcp_m: tuple[float, float, float],
+    approach_axis_tcp: tuple[float, float, float],
+) -> float:
+    """Measure the camera mounting side, excluding its axial TCP offset."""
+    camera_axial_offset_m = sum(
+        component_m * axis_component
+        for component_m, axis_component in zip(
+            camera_position_tcp_m, approach_axis_tcp, strict=True
+        )
+    )
+    camera_side_tcp_m = tuple(
+        component_m - camera_axial_offset_m * axis_component
+        for component_m, axis_component in zip(
+            camera_position_tcp_m, approach_axis_tcp, strict=True
+        )
+    )
+    camera_side_length_m = math.hypot(*camera_side_tcp_m)
+    camera_side_axis_tcp = tuple(
+        component_m / camera_side_length_m for component_m in camera_side_tcp_m
+    )
+    camera_side_axis_env = rotate_vector_xyzw(
+        tcp_pose_env.orientation_xyzw,
+        camera_side_axis_tcp,
+    )
+    return camera_side_axis_env[2]
+
+
 def _parallel_jaw_grasp_poses(
     object_pose_env: Pose,
     candidate: GraspCandidate,
-    reference_tcp_orientation_env_xyzw: tuple[float, float, float, float],
 ) -> tuple[Pose, Pose]:
-    """Prefer the equivalent pose requiring less rotation from the live TCP."""
+    """Return the original grasp and its half-turn equivalent for upright filtering."""
 
     canonical_tcp_pose_env = compose_pose(
         object_pose_env,
@@ -627,17 +650,7 @@ def _parallel_jaw_grasp_poses(
             )
         ),
     )
-    canonical_rotation_from_reference_rad = quaternion_angular_distance_rad(
-        reference_tcp_orientation_env_xyzw,
-        canonical_tcp_pose_env.orientation_xyzw,
-    )
-    alternate_rotation_from_reference_rad = quaternion_angular_distance_rad(
-        reference_tcp_orientation_env_xyzw,
-        alternate_tcp_pose_env.orientation_xyzw,
-    )
-    if canonical_rotation_from_reference_rad <= alternate_rotation_from_reference_rad:
-        return canonical_tcp_pose_env, alternate_tcp_pose_env
-    return alternate_tcp_pose_env, canonical_tcp_pose_env
+    return canonical_tcp_pose_env, alternate_tcp_pose_env
 
 
 def _target_object_orientations_env_xyzw(

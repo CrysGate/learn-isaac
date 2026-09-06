@@ -45,6 +45,7 @@ class JointTrajectory:
 class RobotState:
     joints: JointState
     tcp_pose_env: Pose
+    camera_position_tcp_m: tuple[float, float, float]
 
 
 @dataclass(frozen=True, slots=True)
