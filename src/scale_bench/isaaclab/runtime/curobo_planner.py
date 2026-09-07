@@ -52,7 +52,6 @@ if TYPE_CHECKING:
         CuroboPlanningVisualizer,
     )
 
-START_JOINT_LIMIT_TOLERANCE_RAD = 1.0e-5
 TCP_FRAME = "scale_bench_tcp"
 LOGGER = logging.getLogger(__name__)
 
@@ -94,6 +93,56 @@ class CuroboMotionPlanner(MotionPlannerProtocol):
     @property
     def arm(self) -> Arm:
         return self._arm
+
+    def solve_ik(
+        self,
+        start: JointState,
+        target_tcp_pose_env: Pose,
+        scene: PlanningScene,
+        stage: PlanningStage,
+    ) -> tuple[JointState, ...]:
+        """Keep distinct feasible joint solutions, in the solver's ranked order."""
+        planning_start = self._planning_start(start.positions, stage)
+        self._sync_scene(scene)
+        result = self._planner.ik_solver.solve_pose(
+            self._goal_from_env_pose(target_tcp_pose_env),
+            current_state=self._joint_state(planning_start),
+            return_seeds=self._planner.ik_solver.config.num_seeds,
+        )
+        indices = tuple(
+            self._planner.ik_solver.joint_names.index(name) for name in self._joint_names
+        )
+        # Subsequent plans reuse the backend's buffers; own the candidate pool.
+        joint_positions = result.solution[result.success][:, indices].clone()
+        if len(joint_positions) == 0:
+            raise PlanningError(self._arm, stage, "IK found no feasible joint configuration")
+
+        # Compare bounded joint coordinates directly and retain unrounded targets.
+        duplicates = (
+            (joint_positions[:, None] - joint_positions[None, :]).abs().amax(dim=-1)
+            <= 0.01
+        ).cpu().tolist()
+        selected_indices: list[int] = []
+        for index, row in enumerate(duplicates):
+            if not any(row[selected] for selected in selected_indices):
+                selected_indices.append(index)
+        LOGGER.debug(
+            "%s %s IK: successful=%d distinct=%d",
+            self._arm,
+            stage,
+            len(joint_positions),
+            len(selected_indices),
+            extra={
+                "event": "IK",
+                "event_fields": {
+                    "arm": self._arm,
+                    "stage": stage,
+                    "successful_count": len(joint_positions),
+                    "distinct_count": len(selected_indices),
+                },
+            },
+        )
+        return tuple(JointState(joint_positions[index]) for index in selected_indices)
 
     def plan_pose(
         self,
@@ -289,7 +338,7 @@ class CuroboMotionPlanner(MotionPlannerProtocol):
             max=graph_planner.action_bound_highs,
         )
         excess = (start - clipped).abs()
-        invalid = excess > START_JOINT_LIMIT_TOLERANCE_RAD
+        invalid = excess > 1.0e-5
         if invalid.any().item():
             details = ", ".join(
                 f"{name}={float(start[index]):.9g} exceeds limit by "
@@ -686,7 +735,7 @@ def _load_collision_robot_config(robot_config: RobotConfig) -> dict[str, Any]:
     kinematics["urdf_path"] = str(urdf_path)
     kinematics["asset_root_path"] = str(asset_root)
     kinematics["base_link"] = robot_config.kinematics.base_body
-    
+
     tcp = robot_config.kinematics.tcp
     kinematics["tool_frames"] = [TCP_FRAME]
     kinematics["extra_links"][TCP_FRAME] = {

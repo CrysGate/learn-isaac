@@ -56,6 +56,14 @@ class MotionPlanner(Protocol):
     @property
     def arm(self) -> Arm: ...
 
+    def solve_ik(
+        self,
+        start: JointState,
+        target_tcp_pose_env: Pose,
+        scene: PlanningScene,
+        stage: PlanningStage,
+    ) -> tuple[JointState, ...]: ...
+
     def plan_pose(
         self,
         start: JointState,
@@ -404,20 +412,12 @@ class OperationSkillPlanner:
                 target_object_orientation_env_xyzw,
             )
             try:
-                pre_place = self._move_above_place(
+                pre_place, _, _, _ = self._plan_place_with_ik(
                     plan,
                     grasp,
                     target_object_pose_env,
                     snapshot,
                     "pre_place",
-                )
-                # Screen the complete continuation before committing to transport.
-                self._place_from_state(
-                    plan,
-                    grasp,
-                    target_object_pose_env,
-                    pre_place.trajectory.end,
-                    snapshot,
                 )
             except PlanningError as error:
                 failures.append(f"{error.stage}: {error.reason}")
@@ -429,14 +429,15 @@ class OperationSkillPlanner:
             + "; ".join(failures)
         )
 
-    def _move_above_place(
+    def _plan_place_with_ik(
         self,
         plan: PickPlan,
         grasp: GraspState,
         target_object_pose_env: Pose,
         snapshot: SceneSnapshot,
         stage: Literal["pre_place", "adjust"],
-    ) -> MoveToPose:
+    ) -> tuple[MoveToPose, MoveToPose, MoveToPose, MoveToJoints]:
+        """Accept an above-place IK solution only with a feasible continuation."""
         place_tcp_pose_env = compose_pose(target_object_pose_env, grasp.tcp_pose_object)
         above_place_tcp_pose_env = Pose(
             offset_z_env(place_tcp_pose_env.position_m, self._lift_height_m),
@@ -449,13 +450,57 @@ class OperationSkillPlanner:
             _objects_excluding(snapshot.objects, source_object.name),
             HeldObject(source_object, grasp.tcp_pose_object),
         )
-        return self._move(
-            plan.arm,
+        motion_planner = self._motion_planners[plan.arm]
+        candidates = motion_planner.solve_ik(
             snapshot.robot(plan.arm).joints,
             above_place_tcp_pose_env,
             held_object_scene,
             stage,
-            None,
+        )
+        failures: list[str] = []
+        for candidate_index, target_joint_state in enumerate(candidates):
+            try:
+                trajectory = motion_planner.plan_joints(
+                    snapshot.robot(plan.arm).joints,
+                    target_joint_state,
+                    held_object_scene,
+                    stage,
+                )
+                above_place = MoveToPose(
+                    plan.arm, above_place_tcp_pose_env, trajectory, stage
+                )
+                place, retreat, clear = self._place_from_state(
+                    plan,
+                    grasp,
+                    target_object_pose_env,
+                    trajectory.end,
+                    snapshot,
+                )
+            except PlanningError as error:
+                failures.append(f"IK #{candidate_index} {error.stage}: {error.reason}")
+                LOGGER.debug(
+                    "%s IK #%d rejected at %s: %s",
+                    stage,
+                    candidate_index,
+                    error.stage,
+                    error.reason,
+                    extra={
+                        "event": "PLAN-TRY",
+                        "event_fields": {
+                            "object": plan.object_name,
+                            "arm": plan.arm,
+                            "ik_candidate_index": candidate_index,
+                            "stage": error.stage,
+                            "reason": error.reason,
+                        },
+                    },
+                )
+                continue
+            return above_place, place, retreat, clear
+        raise PlanningError(
+            plan.arm,
+            stage,
+            "no IK configuration supports placement: " + "; ".join(failures),
         )
 
     def plan_place(
@@ -467,19 +512,12 @@ class OperationSkillPlanner:
     ) -> PlacePlan:
         """Correct the TCP for the measured grasp while keeping the object target."""
         snapshot = context.snapshot()
-        adjust = self._move_above_place(
+        adjust, place, retreat, clear = self._plan_place_with_ik(
             plan,
             grasp,
             target_object_pose_env,
             snapshot,
             "adjust",
-        )
-        place, retreat, clear = self._place_from_state(
-            plan,
-            grasp,
-            target_object_pose_env,
-            adjust.trajectory.end,
-            snapshot,
         )
         self._motion_planners[plan.arm].commit_inspection_stages(
             ("adjust", "place", "retreat", "clear")
