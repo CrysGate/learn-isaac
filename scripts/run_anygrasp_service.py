@@ -8,6 +8,7 @@ import threading
 from typing import Any
 
 import numpy as np
+import torch
 from flask import Flask, jsonify, request
 from gsnet import create_detector
 
@@ -186,8 +187,13 @@ def create_app(detector: Any) -> Flask:
                 "approach_steering": data.get("approach_steering"),
                 "approach_thresh": float(data.get("approach_thresh", math.pi)),
             }
-            with inference_lock:
-                grasps = detector.get_grasp(points, optional_params)
+            with inference_lock, torch.no_grad():
+                try:
+                    grasps = detector.get_grasp(points, optional_params)
+                finally:
+                    # SDK results are CPU arrays; release variable-size point
+                    # cloud inference caches before serving the next request.
+                    torch.cuda.empty_cache()
 
             if grasps is None:
                 grasp_list = []
