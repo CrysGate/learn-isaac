@@ -6,7 +6,7 @@ import logging
 import math
 from collections import Counter
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal, Protocol, TypeAlias
 
 from .commands import MoveToJoints, MoveToPose
@@ -153,10 +153,14 @@ class OperationSkillPlanner:
         motion_planners: Mapping[Arm, MotionPlanner],
         arm_base_positions_env_m: Mapping[Arm, tuple[float, float, float]],
         lift_height_m: float,
+        gripper_open_positions: Mapping[Arm, Mapping[str, float]],
     ) -> None:
         self._motion_planners = dict(motion_planners)
         self._arm_base_positions_env_m = dict(arm_base_positions_env_m)
         self._lift_height_m = lift_height_m
+        self._gripper_open_positions = {
+            arm: dict(positions) for arm, positions in gripper_open_positions.items()
+        }
 
     def plan_pick(
         self,
@@ -568,6 +572,13 @@ class OperationSkillPlanner:
             (*unmanipulated_objects, placed_object),
             EmptyTool(),
         )
+        open_gripper_positions = self._gripper_open_positions[plan.arm]
+        retreat_scene = replace(
+            object_contact_scene, gripper_joint_positions=open_gripper_positions
+        )
+        released_object_scene = replace(
+            released_object_scene, gripper_joint_positions=open_gripper_positions
+        )
         retreat_tcp_pose_env = approach_start_pose(
             place_tcp_pose_env,
             plan.candidate.approach_axis_tcp,
@@ -584,7 +595,7 @@ class OperationSkillPlanner:
             plan.arm,
             place.trajectory.end,
             retreat_tcp_pose_env,
-            object_contact_scene,
+            retreat_scene,
             "retreat",
             retreat_axis_env,
         )
@@ -681,6 +692,7 @@ def _planning_scene(
         other_arm=other_arm,
         other_robot=snapshot.robot(other_arm),
         tool=tool,
+        gripper_joint_positions=snapshot.robot(active_arm).gripper_joint_positions,
     )
 
 

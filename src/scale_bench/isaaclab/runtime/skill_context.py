@@ -109,6 +109,7 @@ class IsaacLabSkillContext:
         self._tcp_body_indices = {}
         self._arm_joint_indices = {}
         self._gripper_joint_indices = {}
+        self._gripper_joint_names = {}
         self._gripper_aperture_multipliers = {}
         self._minimum_grasp_apertures_m = {}
         self._tcp_poses_ee_body = {}
@@ -145,6 +146,7 @@ class IsaacLabSkillContext:
             if tuple(gripper_names) != gripper.joint_names:
                 raise ValueError(f"{arm} robot gripper joints do not match its profile")
             self._gripper_joint_indices[arm] = gripper_indices
+            self._gripper_joint_names[arm] = gripper.joint_names
             self._gripper_aperture_multipliers[arm] = tuple(
                 gripper.aperture_joint_multipliers[name] for name in gripper.joint_names
             )
@@ -344,6 +346,15 @@ class IsaacLabSkillContext:
             JointState(joints),
             self._tcp_pose_env(arm),
             self._camera_positions_tcp_m[arm],
+            dict(
+                zip(
+                    self._gripper_joint_names[arm],
+                    robot.data.joint_pos.torch[
+                        self._env_id, self._gripper_joint_indices[arm]
+                    ].detach().cpu().tolist(),
+                    strict=True,
+                )
+            ),
         )
 
     def _tcp_pose_env(self, arm: Arm) -> Pose:

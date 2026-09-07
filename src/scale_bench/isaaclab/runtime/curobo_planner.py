@@ -68,6 +68,7 @@ class CuroboMotionPlanner(MotionPlannerProtocol):
         arm: Arm,
         table_top_z_m: float,
         arm_joint_names: tuple[str, ...],
+        robot_config: RobotConfig,
         visualizer: CuroboPlanningVisualizer | None,
     ) -> None:
         self._planner = planner
@@ -83,6 +84,7 @@ class CuroboMotionPlanner(MotionPlannerProtocol):
         self._tcp_pose_parent = Pose(tcp.position_m, tcp.orientation_xyzw)
         self._joint_names = arm_joint_names
         self._visualizer = visualizer
+        self._initialize_gripper_transforms(robot_config)
         attached_indices = (
             planner.kinematics.config.kinematics_config.get_sphere_index_from_link_name(
                 "attached_object"
@@ -93,6 +95,67 @@ class CuroboMotionPlanner(MotionPlannerProtocol):
     @property
     def arm(self) -> Arm:
         return self._arm
+
+    def _initialize_gripper_transforms(self, robot_config: RobotConfig) -> None:
+        """Keep zero-opening transforms for the robot's prismatic fingers."""
+        kinematics = self._planner.kinematics.config.kinematics_config
+        # MotionPlannerCfg.create shares one RobotCfg among all solver rollouts.
+        for solver in (self._planner.ik_solver, self._planner.graph_planner):
+            if solver.kinematics.config.kinematics_config is not kinematics:
+                raise ValueError("CuRobo solvers must share the collision kinematics")
+        joints = {
+            joint.attrib["name"]: joint
+            for joint in ET.parse(robot_config.urdf_path).getroot().findall("joint")
+        }
+        self._gripper_mimics: dict[str, tuple[str, float, float]] = {}
+        self._gripper_transforms: list[tuple[str, int, Tensor, Tensor]] = []
+        for name in robot_config.gripper.joint_names:
+            joint = joints[name]
+            mimic = joint.find("mimic")
+            reference_position = robot_config.initial_joint_positions[name]
+            if mimic is not None:
+                master = mimic.attrib["joint"]
+                multiplier = float(mimic.get("multiplier", "1"))
+                offset = float(mimic.get("offset", "0"))
+                self._gripper_mimics[name] = (master, multiplier, offset)
+                reference_position = (
+                    robot_config.initial_joint_positions[master] * multiplier + offset
+                )
+            link_name = joint.find("child").attrib["link"]
+            link_index = kinematics.link_name_to_idx_map[link_name]
+            finger_transform_parent = kinematics.fixed_transforms[link_index].clone()
+            finger_axis_parent = (
+                finger_transform_parent[:, :3]
+                @ finger_transform_parent.new_tensor(
+                    [float(value) for value in joint.find("axis").attrib["xyz"].split()]
+                )
+            )
+            finger_transform_parent[:, 3] -= reference_position * finger_axis_parent
+            self._gripper_transforms.append(
+                (name, link_index, finger_transform_parent, finger_axis_parent)
+            )
+
+    def _sync_gripper(self, joint_positions: Mapping[str, float]) -> None:
+        """Use both measured fingers; open commands derive followers from URDF mimic."""
+        kinematics = self._planner.kinematics.config.kinematics_config
+        for (
+            name,
+            link_index,
+            finger_transform_parent,
+            finger_axis_parent,
+        ) in self._gripper_transforms:
+            if name in joint_positions:
+                finger_joint_position_m = joint_positions[name]
+            else:
+                master, multiplier, offset = self._gripper_mimics[name]
+                finger_joint_position_m = joint_positions[master] * multiplier + offset
+            # In-place updates preserve the buffers captured by CUDA graphs.
+            kinematics.fixed_transforms[link_index, :, 3].copy_(
+                finger_transform_parent[:, 3] + finger_joint_position_m * finger_axis_parent
+            )
+        locked_joint_state = kinematics.lock_jointstate
+        for index, name in enumerate(locked_joint_state.joint_names):
+            locked_joint_state.position[..., index] = joint_positions[name]
 
     def solve_ik(
         self,
@@ -411,7 +474,11 @@ class CuroboMotionPlanner(MotionPlannerProtocol):
             self._scene_object_cuboid(scene_object, -0.001)
             for scene_object in scene.objects
         ]
-        other_robot = self._other_robot_cuboids(scene.other_robot.joints)
+        self._sync_gripper(scene.other_robot.gripper_joint_positions)
+        try:
+            other_robot = self._other_robot_cuboids(scene.other_robot.joints)
+        finally:
+            self._sync_gripper(scene.gripper_joint_positions)
         return table, camera_stand, objects, other_robot
 
     def _configuration_violations(
@@ -690,6 +757,7 @@ def build_curobo_motion_planners(
             arm,
             scene_config.table_top_z_m,
             joint_names,
+            robot_config,
             visualizer,
         )
     return planners
