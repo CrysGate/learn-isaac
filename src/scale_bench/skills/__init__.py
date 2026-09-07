@@ -32,7 +32,14 @@ from .models import (
 )
 from .pick import pick
 from .pick_and_place import pick_and_place
-from .planner import MotionPlanner, OperationSkillPlanner, PickPlan, PlacePlan, SkillPlanner
+from .planner import (
+    MotionPlanner,
+    OperationSkillPlanner,
+    PickPlan,
+    PlacePlan,
+    PrePlacePlan,
+    SkillPlanner,
+)
 
 __all__ = [
     "Arm",
@@ -59,6 +66,7 @@ __all__ = [
     "PlanningError",
     "PlanningScene",
     "Pose",
+    "PrePlacePlan",
     "RobotState",
     "SceneObject",
     "SceneSnapshot",

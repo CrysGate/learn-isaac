@@ -91,6 +91,12 @@ class PickPlan:
 
 
 @dataclass(frozen=True, slots=True)
+class PrePlacePlan:
+    target_object_pose_env: Pose
+    pre_place: MoveToPose
+
+
+@dataclass(frozen=True, slots=True)
 class PlacePlan:
     arm: Arm
     adjust: MoveToPose
@@ -120,11 +126,11 @@ class SkillPlanner(Protocol):
         plan: PickPlan,
         grasp: GraspState,
         context: SkillContext,
-    ) -> MoveToPose: ...
+    ) -> PrePlacePlan: ...
 
     def plan_place(
         self,
-        request: PickAndPlace,
+        target_object_pose_env: Pose,
         plan: PickPlan,
         grasp: GraspState,
         context: SkillContext,
@@ -383,16 +389,9 @@ class OperationSkillPlanner:
         plan: PickPlan,
         grasp: GraspState,
         context: SkillContext,
-    ) -> MoveToPose:
-        """Plan transport; placement uses a fresh grasp measurement on arrival."""
+    ) -> PrePlacePlan:
+        """Select a fixed object target with a feasible transport and placement."""
         snapshot = context.snapshot()
-        source_object = snapshot.object(request.object_name)
-        held_object_scene = _planning_scene(
-            snapshot,
-            plan.arm,
-            _objects_excluding(snapshot.objects, source_object.name),
-            HeldObject(source_object, grasp.tcp_pose_object),
-        )
         target_object_orientations_env_xyzw = _target_object_orientations_env_xyzw(
             request,
             grasp.tcp_pose_object,
@@ -404,20 +403,27 @@ class OperationSkillPlanner:
                 request.target_object_pose_env.position_m,
                 target_object_orientation_env_xyzw,
             )
-            place_tcp_pose_env = compose_pose(target_object_pose_env, grasp.tcp_pose_object)
             try:
                 pre_place = self._move_above_place(
-                    plan.arm,
-                    snapshot.robot(plan.arm).joints,
-                    place_tcp_pose_env,
-                    held_object_scene,
+                    plan,
+                    grasp,
+                    target_object_pose_env,
+                    snapshot,
                     "pre_place",
+                )
+                # Screen the complete continuation before committing to transport.
+                self._place_from_state(
+                    plan,
+                    grasp,
+                    target_object_pose_env,
+                    pre_place.trajectory.end,
+                    snapshot,
                 )
             except PlanningError as error:
                 failures.append(f"{error.stage}: {error.reason}")
                 continue
             self._motion_planners[plan.arm].commit_inspection_stages(("pre_place",))
-            return pre_place
+            return PrePlacePlan(target_object_pose_env, pre_place)
         raise SkillError(
             f"actual-grasp pre-place planning failed for {request.object_name!r}: "
             + "; ".join(failures)
@@ -425,74 +431,70 @@ class OperationSkillPlanner:
 
     def _move_above_place(
         self,
-        arm: Arm,
-        joint_state: JointState,
-        place_tcp_pose_env: Pose,
-        scene: PlanningScene,
+        plan: PickPlan,
+        grasp: GraspState,
+        target_object_pose_env: Pose,
+        snapshot: SceneSnapshot,
         stage: Literal["pre_place", "adjust"],
     ) -> MoveToPose:
+        place_tcp_pose_env = compose_pose(target_object_pose_env, grasp.tcp_pose_object)
         above_place_tcp_pose_env = Pose(
             offset_z_env(place_tcp_pose_env.position_m, self._lift_height_m),
             place_tcp_pose_env.orientation_xyzw,
         )
+        source_object = snapshot.object(plan.object_name)
+        held_object_scene = _planning_scene(
+            snapshot,
+            plan.arm,
+            _objects_excluding(snapshot.objects, source_object.name),
+            HeldObject(source_object, grasp.tcp_pose_object),
+        )
         return self._move(
-            arm,
-            joint_state,
+            plan.arm,
+            snapshot.robot(plan.arm).joints,
             above_place_tcp_pose_env,
-            scene,
+            held_object_scene,
             stage,
             None,
         )
 
     def plan_place(
         self,
-        request: PickAndPlace,
+        target_object_pose_env: Pose,
         plan: PickPlan,
         grasp: GraspState,
         context: SkillContext,
     ) -> PlacePlan:
+        """Correct the TCP for the measured grasp while keeping the object target."""
         snapshot = context.snapshot()
-        source_object = snapshot.object(request.object_name)
-        target_object_orientations_env_xyzw = _target_object_orientations_env_xyzw(
-            request,
-            grasp.tcp_pose_object,
-            grasp.tcp_pose_env.orientation_xyzw,
+        adjust = self._move_above_place(
+            plan,
+            grasp,
+            target_object_pose_env,
+            snapshot,
+            "adjust",
         )
-        failures: list[str] = []
-        for target_object_orientation_env_xyzw in target_object_orientations_env_xyzw:
-            try:
-                return self._plan_measured_place(
-                    plan.arm,
-                    source_object,
-                    grasp,
-                    plan.candidate.approach_axis_tcp,
-                    plan.candidate.approach_distance_m,
-                    target_object_orientation_env_xyzw,
-                    request.target_object_pose_env.position_m,
-                    snapshot,
-                )
-            except PlanningError as error:
-                failures.append(f"{error.stage}: {error.reason}")
-        raise SkillError(
-            f"actual-grasp place planning failed for {request.object_name!r}: "
-            + "; ".join(failures)
+        place, retreat, clear = self._place_from_state(
+            plan,
+            grasp,
+            target_object_pose_env,
+            adjust.trajectory.end,
+            snapshot,
         )
+        self._motion_planners[plan.arm].commit_inspection_stages(
+            ("adjust", "place", "retreat", "clear")
+        )
+        return PlacePlan(plan.arm, adjust, place, retreat, clear)
 
-    def _plan_measured_place(
+    def _place_from_state(
         self,
-        arm: Arm,
-        source_object: SceneObject,
+        plan: PickPlan,
         grasp: GraspState,
-        approach_axis_tcp: tuple[float, float, float],
-        approach_distance_m: float,
-        target_object_orientation_env_xyzw: tuple[float, float, float, float],
-        target_object_position_env_m: tuple[float, float, float],
+        target_object_pose_env: Pose,
+        joint_state: JointState,
         snapshot: SceneSnapshot,
-    ) -> PlacePlan:
-        target_object_pose_env = Pose(
-            target_object_position_env_m,
-            target_object_orientation_env_xyzw,
-        )
+    ) -> tuple[MoveToPose, MoveToPose, MoveToJoints]:
+        source_object = snapshot.object(plan.object_name)
         place_tcp_pose_env = compose_pose(
             target_object_pose_env,
             grasp.tcp_pose_object,
@@ -501,30 +503,17 @@ class OperationSkillPlanner:
             snapshot.objects,
             source_object.name,
         )
-        held_object_scene = _planning_scene(
-            snapshot,
-            arm,
-            unmanipulated_objects,
-            HeldObject(source_object, grasp.tcp_pose_object),
-        )
         # The gripper stays closed through place; EmptyTool only omits its
         # collision geometry for the final descent and the released retreat.
         object_contact_scene = _planning_scene(
             snapshot,
-            arm,
+            plan.arm,
             unmanipulated_objects,
             EmptyTool(),
         )
-        adjust = self._move_above_place(
-            arm,
-            snapshot.robot(arm).joints,
-            place_tcp_pose_env,
-            held_object_scene,
-            "adjust",
-        )
         place = self._move(
-            arm,
-            adjust.trajectory.end,
+            plan.arm,
+            joint_state,
             place_tcp_pose_env,
             object_contact_scene,
             "place",
@@ -537,24 +526,24 @@ class OperationSkillPlanner:
         )
         released_object_scene = _planning_scene(
             snapshot,
-            arm,
+            plan.arm,
             (*unmanipulated_objects, placed_object),
             EmptyTool(),
         )
         retreat_tcp_pose_env = approach_start_pose(
             place_tcp_pose_env,
-            approach_axis_tcp,
-            approach_distance_m,
+            plan.candidate.approach_axis_tcp,
+            plan.candidate.approach_distance_m,
         )
         retreat_axis_env = tuple(
             -component_env
             for component_env in rotate_vector_xyzw(
                 place_tcp_pose_env.orientation_xyzw,
-                approach_axis_tcp,
+                plan.candidate.approach_axis_tcp,
             )
         )
         retreat = self._move(
-            arm,
+            plan.arm,
             place.trajectory.end,
             retreat_tcp_pose_env,
             object_contact_scene,
@@ -567,16 +556,13 @@ class OperationSkillPlanner:
             )
         )
         clear = self._move_joints(
-            arm,
+            plan.arm,
             retreat.trajectory.end,
             clear_target_joint_state,
             released_object_scene,
             "clear",
         )
-        self._motion_planners[arm].commit_inspection_stages(
-            ("adjust", "place", "retreat", "clear")
-        )
-        return PlacePlan(arm, adjust, place, retreat, clear)
+        return place, retreat, clear
 
     def _move(
         self,
@@ -781,5 +767,6 @@ __all__ = [
     "PickPlan",
     "PlanningStage",
     "PlacePlan",
+    "PrePlacePlan",
     "SkillPlanner",
 ]

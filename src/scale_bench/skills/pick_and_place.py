@@ -31,11 +31,13 @@ def pick_and_place(
 
     lifted_grasp = context.measure_grasp(request.object_name, plan.arm)
     pre_place = planner.plan_pre_place(request, plan, lifted_grasp, context)
-    yield pre_place
+    yield pre_place.pre_place
 
     # Transport can change the object-to-TCP relation through finger slip.
     transported_grasp = context.measure_grasp(request.object_name, plan.arm)
-    place = planner.plan_place(request, plan, transported_grasp, context)
+    place = planner.plan_place(
+        pre_place.target_object_pose_env, plan, transported_grasp, context
+    )
     yield place.adjust
     yield place.place
     yield SetGripper(place.arm, closed=False, label="release")
