@@ -61,12 +61,12 @@ parser.add_argument(
 parser.add_argument(
     "--left-robot-config",
     type=Path,
-    default=Path("configs/robots/piper.yml"),
+    default=Path("configs/robots/x5.yml"),
 )
 parser.add_argument(
     "--right-robot-config",
     type=Path,
-    default=Path("configs/robots/piper.yml"),
+    default=Path("configs/robots/x5.yml"),
 )
 parser.add_argument(
     "--max-steps",
