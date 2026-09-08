@@ -1,0 +1,68 @@
+name: arx-x5
+usd_path: Assets/Robots/x5/ARX.usd
+urdf_path: Assets/Robots/x5/X5A.urdf
+curobo_config_path: curobo/x5.yml
+fixed_base: true
+disable_gravity: false
+self_collisions: false
+
+initial_joint_positions:
+  joint1: 0.0
+  joint2: 0.0
+  joint3: 0.0
+  joint4: 0.0
+  joint5: 0.0
+  joint6: 0.0
+  joint7: 0.044
+  joint8: 0.044
+
+kinematics:
+  base_body: base_link
+  arm_joint_names: [joint1, joint2, joint3, joint4, joint5, joint6]
+  ee_body: link6
+  tcp:
+    parent_frame: link6
+    # Grasp reference point calibrated for the AnyGrasp pick-and-place workflow.
+    # +X approaches the object; +Y is the finger-opening axis, both in link6.
+    position_m: [0.118, 0.0, 0.0]
+    orientation_xyzw: [0.0, 0.0, 0.0, 1.0]
+
+actuators:
+  arm:
+    joint_names: [joint1, joint2, joint3, joint4, joint5, joint6]
+    # Preserve the USD's drive gains and physical force/velocity limits.
+    stiffness: null
+    damping: null
+    effort_limit_sim: null
+    velocity_limit_sim: null
+  gripper:
+    joint_names: [joint7, joint8]
+    stiffness: null
+    damping: null
+    effort_limit_sim: null
+    velocity_limit_sim: null
+
+gripper:
+  joint_names: [joint7, joint8]
+  command_joint_names: [joint7]
+  finger_body_names: [link7, link8]
+  min_aperture_m: 0.0
+  max_aperture_m: 0.088
+  aperture_joint_multipliers:
+    joint7: 1.0
+    joint8: 1.0
+  minimum_grasp_aperture_m: 0.002807166
+  closed_positions:
+    joint7: 0.0
+  open_positions:
+    joint7: 0.044
+
+camera:
+  profile_path: ../cameras/d435.yml
+  parent_prim_path: camera
+  sensor_prim_name: D435Sensor
+  # The camera housing front is x=0 in the authored camera link frame.
+  position_m: [0.001, 0.0, 0.0]
+  # OpenGL -Z looks along camera-link +X; image up is camera-link +Z.
+  orientation_xyzw: [0.5, -0.5, -0.5, 0.5]
+  convention: opengl
