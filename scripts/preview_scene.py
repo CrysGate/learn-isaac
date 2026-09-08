@@ -75,6 +75,11 @@ parser.add_argument(
     help="Exit after this many environment steps; useful for headless smoke tests.",
 )
 parser.add_argument(
+    "--physics-inspector",
+    action="store_true",
+    help="Stop the main simulation and enable interactive Physics Inspector joint authoring.",
+)
+parser.add_argument(
     "--camera-frustum-length-m",
     type=float,
     default=0.75,
@@ -99,12 +104,18 @@ try:
     sim_config = load_config(args.sim_config, SimulationConfig)
 except ValueError as error:
     parser.error(str(error))
-if args.device is None:
+if args.physics_inspector:
+    # Inspector authors joint drives through APIs incompatible with direct GPU physics.
+    args.device = "cpu"
+    sim_config = sim_config.model_copy(update={"use_fabric": False})
+elif args.device is None:
     args.device = sim_config.device
 if args.rendering_mode is None:
     args.rendering_mode = sim_config.render.rendering_mode
 
 preview_overlays_enabled = not args.headless and "kit" in (args.visualizer or ())
+if args.physics_inspector and not preview_overlays_enabled:
+    parser.error("--physics-inspector requires the Kit GUI (no --headless or --viz none)")
 camera_frustum_length_m = args.camera_frustum_length_m
 
 app_launcher = AppLauncher(args)
@@ -116,10 +127,13 @@ if preview_overlays_enabled:
     from isaacsim.core.experimental.utils.app import enable_extension
 
     enable_extension("isaacsim.util.debug_draw")
+    if args.physics_inspector:
+        enable_extension("omni.physx.supportui")
 
     import omni.ui
     from isaacsim.util.debug_draw import _debug_draw
-    from pxr import Gf
+    from pxr import Gf, Usd, UsdGeom
+    from isaaclab.sim import find_matching_prims
 
 from scale_bench.api import create_env
 from scale_bench.config.models.environment import EnvironmentConfig
@@ -170,6 +184,26 @@ def _camera_frustum_lines(camera, length_m: float) -> list[Line]:
         origin = tuple(position)
         lines.extend((origin, corner) for corner in corners)
         lines.extend((corners[index], corners[(index + 1) % 4]) for index in range(4))
+    return lines
+
+
+def _usd_camera_frustum_lines(camera, length_m: float) -> list[Line]:
+    """Read authoring poses from USD after stopping invalidates sensor views."""
+
+    lines: list[Line] = []
+    for camera_prim in find_matching_prims(camera.cfg.prim_path):
+        frustum = UsdGeom.Camera(camera_prim).GetCamera(Usd.TimeCode.Default()).frustum
+        camera_position_world_m = tuple(frustum.position)
+        corners_world_m = [
+            tuple(corner_world_m)
+            for corner_world_m in frustum.ComputeCornersAtDistance(length_m)
+        ]
+        lines.extend((camera_position_world_m, corner_world_m) for corner_world_m in corners_world_m)
+        # Gf orders the corners bottom-left, bottom-right, top-left, top-right.
+        lines.extend(
+            (corners_world_m[start], corners_world_m[end])
+            for start, end in ((0, 1), (1, 3), (3, 2), (2, 0))
+        )
     return lines
 
 
@@ -255,7 +289,11 @@ class ScenePreviewOverlay:
                 if camera is not None:
                     groups.append(
                         (
-                            _camera_frustum_lines(camera, self._frustum_length_m),
+                            (
+                                _usd_camera_frustum_lines(camera, self._frustum_length_m)
+                                if args.physics_inspector
+                                else _camera_frustum_lines(camera, self._frustum_length_m)
+                            ),
                             color,
                             2.0,
                         )
@@ -376,6 +414,27 @@ def main() -> None:
             f"{runtime_descriptor['physics_frequency_hz']:g} Hz physics from "
             f"{args.sim_config}. {layout_message}Close the window to exit."
         )
+
+        if args.physics_inspector:
+            import carb
+            from omni.physxsupportui.bindings import _physxSupportUi
+            from omni.physxsupportui import get_physx_supportui_private_interface
+
+            env.sim.stop()
+            carb.settings.get_settings().set_bool(
+                _physxSupportUi.SETTINGS_PHYSICS_INSPECTOR_ENABLED, True
+            )
+            simulation_app.update()
+            get_physx_supportui_private_interface().enable_inspector_authoring_mode()
+            print("Physics Inspector ready (CPU physics). Select an articulation to inspect its joints.")
+            step_count = 0
+            while simulation_app.is_running():
+                simulation_app.update()
+                overlay.draw()
+                step_count += 1
+                if args.max_steps is not None and step_count >= args.max_steps:
+                    break
+            return
 
         action = env.action_manager.action.new_zeros(
             (env.num_envs, env.action_manager.total_action_dim)
