@@ -408,6 +408,8 @@ class IsaacLabSkillContext:
             object_position_env_m,
             arm,
             config.capture_distance_m,
+            config.capture_elevation_deg,
+            config.capture_azimuth_offset_deg,
         )
         masked_depth, target_points_env_m = self._mask_anygrasp_target(
             object_name,
@@ -764,25 +766,49 @@ class IsaacLabSkillContext:
         object_position_env_m: tuple[float, float, float],
         arm: Arm,
         capture_distance_m: float,
+        capture_elevation_deg: float,
+        capture_azimuth_offset_deg: float,
     ) -> _AnyGraspCapture:
-        """Capture from the selected arm's side at a 45-degree elevation."""
+        """Capture from the selected arm's side at the configured elevation."""
 
         arm_base_position_env_m = self._arm_base_poses_env[arm].position_m
         horizontal_x = arm_base_position_env_m[0] - object_position_env_m[0]
         horizontal_y = arm_base_position_env_m[1] - object_position_env_m[1]
         horizontal_norm = math.hypot(horizontal_x, horizontal_y)
+
         if horizontal_norm <= 1.0e-9:
             raise SkillError(
                 f"cannot build an arm-side AnyGrasp view for {arm}: "
                 "object and robot base have the same XY position"
             )
-        diagonal_offset_m = capture_distance_m / math.sqrt(2.0)
+
+        direction_x = horizontal_x / horizontal_norm
+        direction_y = horizontal_y / horizontal_norm
+
+        azimuth_rad = math.radians(capture_azimuth_offset_deg)
+        cos_azimuth = math.cos(azimuth_rad)
+        sin_azimuth = math.sin(azimuth_rad)
+
+        rotated_direction_x = (
+            cos_azimuth * direction_x
+            - sin_azimuth * direction_y
+        )
+        rotated_direction_y = (
+            sin_azimuth * direction_x
+            + cos_azimuth * direction_y
+        )
+
+        elevation_rad = math.radians(capture_elevation_deg)
+
+        horizontal_offset_m = capture_distance_m * math.cos(elevation_rad)
+        vertical_offset_m = capture_distance_m * math.sin(elevation_rad)
+
         eye_position_env_m = (
             object_position_env_m[0]
-            + diagonal_offset_m * horizontal_x / horizontal_norm,
+            + horizontal_offset_m * rotated_direction_x,
             object_position_env_m[1]
-            + diagonal_offset_m * horizontal_y / horizontal_norm,
-            object_position_env_m[2] + diagonal_offset_m,
+            + horizontal_offset_m * rotated_direction_y,
+            object_position_env_m[2] + vertical_offset_m,
         )
         return self._capture_anygrasp_view(
             object_position_env_m,

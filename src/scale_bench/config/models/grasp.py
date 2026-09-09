@@ -28,6 +28,8 @@ class AnyGraspConfig(FrozenModel):
     service_url: Name = "http://127.0.0.1:5001"
     request_timeout_s: PositiveFloat = 60.0
     capture_distance_m: PositiveFloat
+    capture_elevation_deg: float
+    capture_azimuth_offset_deg: float
     depth_trunc_m: PositiveFloat = 2.0
     top_k: PositiveInt = 100
     min_score: UnitIntervalFloat = 0.0
