@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from typing import Self
-
 from pydantic import field_validator, model_validator
 
 from scale_bench.config.base import (
@@ -97,29 +96,6 @@ class TaskObjectPlacementArea(FrozenModel):
         return value
 
 
-class OcclusionConfig(FrozenModel):
-    """Visual occluder used for AnyGrasp viewpoint experiments."""
-
-    enabled: bool = False
-    size_m: tuple[PositiveFloat, PositiveFloat, PositiveFloat] = (
-        0.10,
-        0.015,
-        0.14,
-    )
-    line_fraction_min: UnitIntervalFloat = 0.55
-    line_fraction_max: UnitIntervalFloat = 0.80
-    lateral_offset_m: NonNegativeFloat = 0.05
-    vertical_offset_m: NonNegativeFloat = 0.05
-
-    @model_validator(mode="after")
-    def _validate_line_fraction_range(self) -> Self:
-        if self.line_fraction_min >= self.line_fraction_max:
-            raise ValueError(
-                "line_fraction_min must be less than line_fraction_max"
-            )
-        return self
-
-
 class SceneConfig(FrozenModel):
     """Static scene description, excluding environment lifecycle settings."""
 
@@ -132,7 +108,6 @@ class SceneConfig(FrozenModel):
     camera: OverheadCameraConfig
     anygrasp: AnyGraspConfig | None = None
     lighting: LightingConfig
-    occlusion: OcclusionConfig = OcclusionConfig()
 
     @property
     def table_top_z_m(self) -> float:

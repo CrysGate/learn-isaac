@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import MISSING
 
 import isaaclab.sim as sim_utils
-from isaaclab.assets import ArticulationCfg, AssetBaseCfg, RigidObjectCfg
+from isaaclab.assets import ArticulationCfg, AssetBaseCfg
 from isaaclab.scene import InteractiveSceneCfg
 from isaaclab.sensors import CameraCfg
 from isaaclab.sim.spawners.materials import RigidBodyMaterialBaseCfg
@@ -17,7 +17,6 @@ from scale_bench.config.models.environment import EnvironmentConfig
 from scale_bench.config.models.robot import RobotConfig
 from scale_bench.config.models.scene import (
     LightingConfig,
-    OcclusionConfig,
     OverheadCameraConfig,
     RobotMountConfig,
     RoomConfig,
@@ -45,7 +44,6 @@ class DualArmTabletopSceneCfg(InteractiveSceneCfg):
     left_robot_camera: CameraCfg | None = MISSING
     right_robot_camera: CameraCfg | None = MISSING
     overhead_camera: CameraCfg = MISSING
-    occluder: RigidObjectCfg = MISSING
     environment_light: AssetBaseCfg = MISSING
 
 
@@ -96,7 +94,6 @@ def build_scene_cfg(
             robot_prim_path="{ENV_REGEX_NS}/RightRobot",
         ),
         overhead_camera=_overhead_camera_cfg(scene_config.camera),
-        occluder=_occluder_cfg(scene_config.occlusion),
         environment_light=_light_cfg(scene_config.lighting),
     )
     return scene_cfg
@@ -174,28 +171,6 @@ def _overhead_camera_cfg(spec: OverheadCameraConfig) -> CameraCfg:
         position_m=spec.sensor_local_position_m,
         orientation_xyzw=spec.sensor_local_orientation_xyzw,
         convention=spec.convention,
-    )
-
-
-def _occluder_cfg(spec: OcclusionConfig) -> RigidObjectCfg:
-    return RigidObjectCfg(
-        prim_path="{ENV_REGEX_NS}/Occluder",
-        init_state=RigidObjectCfg.InitialStateCfg(
-            pos=(0.0, 0.0, -10.0),
-        ),
-        spawn=sim_utils.CuboidCfg(
-            size=spec.size_m,
-            rigid_props=sim_utils.RigidBodyPropertiesCfg(
-                kinematic_enabled=True,
-                disable_gravity=True,
-            ),
-            collision_props=sim_utils.CollisionPropertiesCfg(
-                collision_enabled=False,
-            ),
-            visual_material=sim_utils.PreviewSurfaceCfg(
-                diffuse_color=(0.8, 0.2, 0.2),
-            ),
-        ),
     )
 
 

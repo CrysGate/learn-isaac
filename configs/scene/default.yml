@@ -69,11 +69,3 @@ anygrasp:
 lighting:
   texture_path: Assets/Background/brown_photostudio_02_4k.hdr
   intensity: 1000.0
-
-occlusion:
-  enabled: false
-  size_m: [0.10, 0.015, 0.14]
-  line_fraction_min: 0.55
-  line_fraction_max: 0.80
-  lateral_offset_m: 0.05
-  vertical_offset_m: 0.05
