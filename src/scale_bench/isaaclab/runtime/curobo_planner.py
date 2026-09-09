@@ -779,7 +779,7 @@ def _build_backend(
         num_ik_seeds=64,
         num_trajopt_seeds=4,
         interpolation_dt=interpolation_dt_s,
-        interpolation_buffer_size=500,
+        interpolation_buffer_size=600,
     )
     return MotionPlanner(cfg)
 

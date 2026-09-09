@@ -112,6 +112,9 @@ class IsaacLabSkillContext:
         self._gripper_joint_names = {}
         self._gripper_aperture_multipliers = {}
         self._minimum_grasp_apertures_m = {}
+        self._gripper_configs = {
+            arm: robot_config.gripper for arm, robot_config in robot_configs.items()
+        }
         self._tcp_poses_ee_body = {}
         self._camera_positions_tcp_m = {}
         for arm in ("left", "right"):
@@ -330,7 +333,9 @@ class IsaacLabSkillContext:
             self._gripper_joint_indices[arm],
         ]
         multipliers = positions.new_tensor(self._gripper_aperture_multipliers[arm])
-        return float((positions * multipliers).sum().item())
+        return self._gripper_configs[arm].min_aperture_m + float(
+            (positions * multipliers).sum().item()
+        )
 
     def _robot_state(self, arm: Arm) -> RobotState:
         robot = self._env.scene[f"{arm}_robot"]

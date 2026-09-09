@@ -13,6 +13,11 @@ python scripts/run_anygrasp_service.py \
   --port 5001
 ```
 
+服务在请求线程内禁用梯度，并在每次 SDK 推理结束后、释放推理锁前清理
+CUDA 闲置缓存，避免不同规模点云使预留显存长期停留在历史峰值。模型保持
+常驻；清理不会降低单次推理所需的峰值显存，并会增加少量显存释放和后续
+重新分配的开销。更新脚本后需要重启已部署的服务才能生效。
+
 本机验证：
 
 ```bash
@@ -100,13 +105,15 @@ episode；`--num-envs` 只控制这些 candidate episode 的并行数。
 
 ## 坐标约定
 
-Isaac Lab 的相机 optical pose 直接用于 AnyGrasp 的 `+Z` 向前、`+Y` 向下坐标系。AnyGrasp tip 按官方定义计算：
+Isaac Lab 的相机 optical pose 直接用于 AnyGrasp 的 `+Z` 向前、`+Y` 向下坐标系。检测的 `translation` 和 `rotation_matrix` 定义抓取中心，运行时将其变换为 benchmark TCP 位姿。AnyGrasp tip 用于诊断显示，按官方定义计算：
 
 ```text
 tip = translation + depth * rotation_matrix[:, 0]
 ```
 
-检测 tip 先解释为机器人 `tcp.parent_frame`，再应用 `RobotConfig.kinematics.tcp` 得到 benchmark TCP。运行时不硬编码 Piper offset；修改 TCP 时必须同步验证在线抓取和离线 catalog。
+`RobotConfig.kinematics.tcp` 定义机器人 TCP 相对 URDF 父帧的固定变换，由 CuRobo 和仿真状态读取共同使用。检测位姿本身不再叠加该偏移。修改 TCP 时必须同步验证在线抓取和离线 catalog。
+
+X5 使用 `configs/robots/x5.yml`：TCP 是用于 AnyGrasp 抓放的夹持参考点，`tcp_position_parent_m = [0.118, 0.0, 0.0]`，`parent=link6`，姿态为单位旋转。TCP 的 `+X` 为接近方向，`+Y` 为开合轴。指尖闭合时的最小间距约为 `0.000807166 m`，夹爪总开度为该间距加 `joint7 + joint8`，最大约 `0.088807166 m`。
 
 ## 运行与诊断
 

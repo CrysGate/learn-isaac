@@ -31,6 +31,7 @@ class GuiReplayRequest:
     episode_ids: tuple[str, ...]
     task_id: str
     scene_config: Path
+    robot_config: Path
     camera_config: Path
     sim_config: Path
     env_config: Path
@@ -46,6 +47,7 @@ class GuiReplayRequest:
                     "episode_ids": self.episode_ids,
                     "task_id": self.task_id,
                     "scene_config": str(self.scene_config),
+                    "robot_config": str(self.robot_config),
                     "camera_config": str(self.camera_config),
                     "sim_config": str(self.sim_config),
                     "env_config": str(self.env_config),
@@ -65,6 +67,7 @@ class GuiReplayRequest:
             episode_ids=tuple(payload["episode_ids"]),
             task_id=payload["task_id"],
             scene_config=Path(payload["scene_config"]),
+            robot_config=Path(payload["robot_config"]),
             camera_config=Path(payload["camera_config"]),
             sim_config=Path(payload["sim_config"]),
             env_config=Path(payload["env_config"]),
@@ -96,6 +99,8 @@ def _run_gui_replays(request: GuiReplayRequest) -> int:
             request.task_id,
             "--scene-config",
             str(request.scene_config),
+            "--robot-config",
+            str(request.robot_config),
             "--camera-config",
             str(request.camera_config),
             "--sim-config",
@@ -345,6 +350,12 @@ parser.add_argument(
     type=Path,
     default=Path("configs/cameras/d435.yml"),
     help="Camera profile used for AnyGrasp RGB-D inference.",
+)
+parser.add_argument(
+    "--robot-config",
+    type=Path,
+    default=Path("configs/robots/x5.yml"),
+    help="Robot profile used by both arms and by recorded-episode replay.",
 )
 parser.add_argument(
     "--sim-config",
@@ -654,7 +665,7 @@ def main() -> int:
     if args.grasp_source == "catalog":
         scene_config = scene_config.model_copy(update={"anygrasp": None})
     robot_config = load_config(
-        PROJECT_ROOT / "configs/robots/piper.yml",
+        PROJECT_ROOT / args.robot_config,
         RobotConfig,
         asset_root=asset_root,
     )
@@ -1188,6 +1199,7 @@ def main() -> int:
                 episode_ids=tuple(spec.episode_id for spec in specs),
                 task_id=task.task_id,
                 scene_config=(PROJECT_ROOT / args.scene_config).resolve(),
+                robot_config=(PROJECT_ROOT / args.robot_config).resolve(),
                 camera_config=(PROJECT_ROOT / args.camera_config).resolve(),
                 sim_config=args.sim_config.resolve(),
                 env_config=args.env_config.resolve(),

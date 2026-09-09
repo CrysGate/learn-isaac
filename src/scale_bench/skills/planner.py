@@ -405,9 +405,11 @@ class OperationSkillPlanner:
         """Select a fixed object target with a feasible transport and placement."""
         snapshot = context.snapshot()
         target_object_orientations_env_xyzw = _target_object_orientations_env_xyzw(
-            request,
+            request.target_object_pose_env,
             grasp.tcp_pose_object,
             grasp.tcp_pose_env.orientation_xyzw,
+            plan.candidate.approach_axis_tcp,
+            self._arm_base_positions_env_m[plan.arm],
         )
         failures: list[str] = []
         for target_object_orientation_env_xyzw in target_object_orientations_env_xyzw:
@@ -418,7 +420,7 @@ class OperationSkillPlanner:
             try:
                 pre_place, _, _, _ = self._plan_place_with_ik(
                     plan,
-                    grasp,
+                    grasp.tcp_pose_object,
                     target_object_pose_env,
                     snapshot,
                     "pre_place",
@@ -436,13 +438,13 @@ class OperationSkillPlanner:
     def _plan_place_with_ik(
         self,
         plan: PickPlan,
-        grasp: GraspState,
+        tcp_pose_object: Pose,
         target_object_pose_env: Pose,
         snapshot: SceneSnapshot,
         stage: Literal["pre_place", "adjust"],
     ) -> tuple[MoveToPose, MoveToPose, MoveToPose, MoveToJoints]:
         """Accept an above-place IK solution only with a feasible continuation."""
-        place_tcp_pose_env = compose_pose(target_object_pose_env, grasp.tcp_pose_object)
+        place_tcp_pose_env = compose_pose(target_object_pose_env, tcp_pose_object)
         above_place_tcp_pose_env = Pose(
             offset_z_env(place_tcp_pose_env.position_m, self._lift_height_m),
             place_tcp_pose_env.orientation_xyzw,
@@ -452,7 +454,7 @@ class OperationSkillPlanner:
             snapshot,
             plan.arm,
             _objects_excluding(snapshot.objects, source_object.name),
-            HeldObject(source_object, grasp.tcp_pose_object),
+            HeldObject(source_object, tcp_pose_object),
         )
         motion_planner = self._motion_planners[plan.arm]
         candidates = motion_planner.solve_ik(
@@ -475,7 +477,7 @@ class OperationSkillPlanner:
                 )
                 place, retreat, clear = self._place_from_state(
                     plan,
-                    grasp,
+                    tcp_pose_object,
                     target_object_pose_env,
                     trajectory.end,
                     snapshot,
@@ -516,13 +518,22 @@ class OperationSkillPlanner:
     ) -> PlacePlan:
         """Correct the TCP for the measured grasp while keeping the object target."""
         snapshot = context.snapshot()
-        adjust, place, retreat, clear = self._plan_place_with_ik(
-            plan,
-            grasp,
-            target_object_pose_env,
-            snapshot,
-            "adjust",
-        )
+        try:
+            place, retreat, clear = self._place_from_state(
+                plan, grasp.tcp_pose_object, target_object_pose_env,
+                snapshot.robot(plan.arm).joints, snapshot,
+            )
+        except PlanningError:
+            adjust, place, retreat, clear = self._plan_place_with_ik(
+                plan, grasp.tcp_pose_object, target_object_pose_env,
+                snapshot, "adjust",
+            )
+        else:
+            adjust = MoveToPose(
+                plan.arm, grasp.tcp_pose_env,
+                JointTrajectory(snapshot.robot(plan.arm).joints.positions.unsqueeze(0)),
+                "adjust",
+            )
         self._motion_planners[plan.arm].commit_inspection_stages(
             ("adjust", "place", "retreat", "clear")
         )
@@ -531,7 +542,7 @@ class OperationSkillPlanner:
     def _place_from_state(
         self,
         plan: PickPlan,
-        grasp: GraspState,
+        tcp_pose_object: Pose,
         target_object_pose_env: Pose,
         joint_state: JointState,
         snapshot: SceneSnapshot,
@@ -539,7 +550,7 @@ class OperationSkillPlanner:
         source_object = snapshot.object(plan.object_name)
         place_tcp_pose_env = compose_pose(
             target_object_pose_env,
-            grasp.tcp_pose_object,
+            tcp_pose_object,
         )
         unmanipulated_objects = _objects_excluding(
             snapshot.objects,
@@ -761,12 +772,14 @@ def _parallel_jaw_grasp_poses(
 
 
 def _target_object_orientations_env_xyzw(
-    request: PickAndPlace,
+    target_object_pose_env: Pose,
     tcp_pose_object: Pose,
     reference_tcp_orientation_env_xyzw: tuple[float, float, float, float],
+    approach_axis_tcp: tuple[float, float, float],
+    arm_base_position_env_m: tuple[float, float, float],
 ) -> tuple[tuple[float, float, float, float], ...]:
     target_tcp_pose_env = compose_pose(
-        request.target_object_pose_env,
+        target_object_pose_env,
         tcp_pose_object,
     )
     target_finger_open_axis_env = rotate_vector_xyzw(
@@ -787,7 +800,7 @@ def _target_object_orientations_env_xyzw(
     aligned_object_orientation_env_xyzw = normalize_quaternion_xyzw(
         multiply_quaternions_xyzw(
             quaternion_xyzw_from_rpy(0.0, 0.0, alignment_yaw_env_rad),
-            request.target_object_pose_env.orientation_xyzw,
+            target_object_pose_env.orientation_xyzw,
         )
     )
     yaw_offsets_env_rad = (
@@ -800,7 +813,34 @@ def _target_object_orientations_env_xyzw(
         -3.0 * math.pi / 4.0,
         math.pi,
     )
-    return tuple(
+    target_approach_axis_env = rotate_vector_xyzw(
+        target_tcp_pose_env.orientation_xyzw, approach_axis_tcp
+    )
+    approach_xy_norm = math.hypot(
+        target_approach_axis_env[0],
+        target_approach_axis_env[1],
+    )
+    if approach_xy_norm < 1e-5:
+        return tuple(
+            normalize_quaternion_xyzw(
+                multiply_quaternions_xyzw(
+                    quaternion_xyzw_from_rpy(0.0, 0.0, yaw_offset_env_rad),
+                    aligned_object_orientation_env_xyzw,
+                )
+            )
+            for yaw_offset_env_rad in yaw_offsets_env_rad
+        )
+    radial_yaw_env_rad = math.atan2(
+        target_object_pose_env.position_m[1] - arm_base_position_env_m[1],
+        target_object_pose_env.position_m[0] - arm_base_position_env_m[0],
+    ) - math.atan2(target_approach_axis_env[1], target_approach_axis_env[0])
+    radial_object_orientation_env_xyzw = normalize_quaternion_xyzw(
+        multiply_quaternions_xyzw(
+            quaternion_xyzw_from_rpy(0.0, 0.0, radial_yaw_env_rad),
+            target_object_pose_env.orientation_xyzw,
+        )
+    )
+    return (radial_object_orientation_env_xyzw, *(
         normalize_quaternion_xyzw(
             multiply_quaternions_xyzw(
                 quaternion_xyzw_from_rpy(0.0, 0.0, yaw_offset_env_rad),
@@ -808,7 +848,7 @@ def _target_object_orientations_env_xyzw(
             )
         )
         for yaw_offset_env_rad in yaw_offsets_env_rad
-    )
+    ))
 
 
 __all__ = [
