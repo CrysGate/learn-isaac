@@ -11,6 +11,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 import numpy as np
+import torch
 from isaaclab.sensors import Camera
 from pxr import Usd, UsdGeom, UsdPhysics
 
@@ -99,6 +100,7 @@ class IsaacLabSkillContext:
         self._env = env
         self._task = task
         self._env_id = env_id
+        self._occlusion_config = scene_config.occlusion
         self._table = SceneObject(
             "table",
             Pose(scene_config.table.position_m, (0.0, 0.0, 0.0, 1.0)),
@@ -812,6 +814,103 @@ class IsaacLabSkillContext:
             eye_position_env_m,
         )
 
+    def _place_random_occluder(
+        self,
+        object_position_env_m: tuple[float, float, float],
+        eye_position_env_m: tuple[float, float, float],
+    ) -> None:
+        """Place the visual occluder near the camera-to-target line."""
+
+        config = self._occlusion_config
+
+        eye = np.asarray(eye_position_env_m, dtype=np.float64)
+        target = np.asarray(object_position_env_m, dtype=np.float64)
+        view = target - eye
+
+        horizontal_norm = math.hypot(view[0], view[1])
+        if horizontal_norm <= 1.0e-9:
+            raise SkillError("cannot place occluder for a vertical camera view")
+
+        line_fraction = np.random.uniform(
+            config.line_fraction_min,
+            config.line_fraction_max,
+        )
+        lateral_offset = np.random.uniform(
+            -config.lateral_offset_m,
+            config.lateral_offset_m,
+        )
+        vertical_offset = np.random.uniform(
+            -config.vertical_offset_m,
+            config.vertical_offset_m,
+        )
+
+        position_env = eye + line_fraction * view
+
+        lateral_direction = np.asarray(
+            (-view[1] / horizontal_norm, view[0] / horizontal_norm, 0.0),
+            dtype=np.float64,
+        )
+
+        position_env += lateral_offset * lateral_direction
+        position_env[2] += vertical_offset
+
+        # The cuboid's thin axis is local Y. Rotate it so the board faces
+        # approximately along the horizontal camera-to-target direction.
+        yaw = math.atan2(view[1], view[0]) - math.pi / 2.0
+        orientation_xyzw = (
+            0.0,
+            0.0,
+            math.sin(yaw / 2.0),
+            math.cos(yaw / 2.0),
+        )
+
+        env_ids = torch.tensor(
+            [self._env_id],
+            device=self._env.scene.env_origins.device,
+            dtype=torch.long,
+        )
+        env_origins = self._env.scene.env_origins[env_ids]
+
+        root_pose = torch.tensor(
+            [
+                (
+                    *position_env,
+                    *orientation_xyzw,
+                )
+            ],
+            device=env_origins.device,
+            dtype=env_origins.dtype,
+        )
+        root_pose[:, :3] += env_origins
+
+        self._env.scene["occluder"].write_root_pose_to_sim_index(
+            root_pose=root_pose,
+            env_ids=env_ids,
+        )
+
+
+    def _hide_occluder(self) -> None:
+        """Move the experimental occluder below the scene."""
+
+        env_ids = torch.tensor(
+            [self._env_id],
+            device=self._env.scene.env_origins.device,
+            dtype=torch.long,
+        )
+        env_origins = self._env.scene.env_origins[env_ids]
+
+        root_pose = torch.tensor(
+            [[0.0, 0.0, -10.0, 0.0, 0.0, 0.0, 1.0]],
+            device=env_origins.device,
+            dtype=env_origins.dtype,
+        )
+        root_pose[:, :3] += env_origins
+
+        self._env.scene["occluder"].write_root_pose_to_sim_index(
+            root_pose=root_pose,
+            env_ids=env_ids,
+        )
+
     def _capture_anygrasp_view(
         self,
         object_position_env_m: tuple[float, float, float],
@@ -837,6 +936,12 @@ class IsaacLabSkillContext:
             env_ids=[self._env_id],
         )
         try:
+            if self._occlusion_config.enabled:
+                self._place_random_occluder(
+                object_position_env_m,
+                eye_position_env_m,
+            )
+
             self._refresh_camera_without_recording(camera)
             output = camera.data.output
             if output is None or not {
@@ -879,6 +984,9 @@ class IsaacLabSkillContext:
                 ),
             )
         finally:
+            if self._occlusion_config.enabled:
+                self._hide_occluder()
+
             camera.set_world_poses(
                 positions=original_position_world.reshape(1, 3),
                 orientations=original_orientation_ros.reshape(1, 4),
