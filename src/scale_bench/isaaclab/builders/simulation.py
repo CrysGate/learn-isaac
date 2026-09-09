@@ -23,6 +23,7 @@ def build_simulation_cfg(
 
     return SimulationCfg(
         device=resolved_device,
+        use_fabric=config.use_fabric,
         dt=config.physics_dt_s,
         gravity=config.gravity_m_s2,
         render_interval=config.render_interval,

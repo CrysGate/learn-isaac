@@ -44,6 +44,12 @@ parser.add_argument(
     default=Path("configs/cameras/d435_smoke.yml"),
 )
 parser.add_argument(
+    "--robot-config",
+    type=Path,
+    default=Path("configs/robots/piper.yml"),
+    help="Robot profile used when recording the episode.",
+)
+parser.add_argument(
     "--sim-config",
     type=Path,
     default=Path("configs/sim/default.yml"),
@@ -118,7 +124,7 @@ def main() -> int:
         asset_root=PROJECT_ROOT,
     )
     robot_config = load_config(
-        PROJECT_ROOT / "configs/robots/piper.yml",
+        PROJECT_ROOT / args.robot_config,
         RobotConfig,
         asset_root=PROJECT_ROOT,
     )

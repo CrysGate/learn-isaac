@@ -13,7 +13,7 @@ from pathlib import Path
 import numpy as np
 import torch
 from isaaclab.sensors import Camera
-from pxr import Usd, UsdGeom, UsdPhysics
+from pxr import Gf, Usd, UsdGeom, UsdPhysics
 
 from scale_bench.config.loader import load_config
 from scale_bench.config.models.grasp import GraspCatalogConfig
@@ -111,9 +111,11 @@ class IsaacLabSkillContext:
         self._tcp_body_indices = {}
         self._arm_joint_indices = {}
         self._gripper_joint_indices = {}
+        self._gripper_joint_names = {}
         self._gripper_aperture_multipliers = {}
         self._minimum_grasp_apertures_m = {}
         self._tcp_poses_ee_body = {}
+        self._camera_positions_tcp_m = {}
         for arm in ("left", "right"):
             robot_config = robot_configs[arm]
             kinematics = robot_config.kinematics
@@ -146,6 +148,7 @@ class IsaacLabSkillContext:
             if tuple(gripper_names) != gripper.joint_names:
                 raise ValueError(f"{arm} robot gripper joints do not match its profile")
             self._gripper_joint_indices[arm] = gripper_indices
+            self._gripper_joint_names[arm] = gripper.joint_names
             self._gripper_aperture_multipliers[arm] = tuple(
                 gripper.aperture_joint_multipliers[name] for name in gripper.joint_names
             )
@@ -153,6 +156,10 @@ class IsaacLabSkillContext:
             self._tcp_poses_ee_body[arm] = compose_pose(
                 tcp_parent_pose_ee_body,
                 Pose(tcp.position_m, tcp.orientation_xyzw),
+            )
+            self._camera_positions_tcp_m[arm] = _camera_position_tcp_m(
+                robot_config,
+                inverse_pose(self._tcp_poses_ee_body[arm]),
             )
         self._arm_base_poses_env = {
             "left": Pose(
@@ -337,7 +344,20 @@ class IsaacLabSkillContext:
             .detach()
             .clone()
         )
-        return RobotState(JointState(joints), self._tcp_pose_env(arm))
+        return RobotState(
+            JointState(joints),
+            self._tcp_pose_env(arm),
+            self._camera_positions_tcp_m[arm],
+            dict(
+                zip(
+                    self._gripper_joint_names[arm],
+                    robot.data.joint_pos.torch[
+                        self._env_id, self._gripper_joint_indices[arm]
+                    ].detach().cpu().tolist(),
+                    strict=True,
+                )
+            ),
+        )
 
     def _tcp_pose_env(self, arm: Arm) -> Pose:
         robot = self._env.scene[f"{arm}_robot"]
@@ -1098,6 +1118,34 @@ class IsaacLabSkillContext:
                     )
                 )
         return tuple(candidates)
+
+
+def _camera_position_tcp_m(
+    robot_config: RobotConfig,
+    ee_body_pose_tcp: Pose,
+) -> tuple[float, float, float]:
+    """Read the mounted sensor's fixed position for upright grasp filtering."""
+    camera = robot_config.camera
+    robot_stage = Usd.Stage.Open(robot_config.usd_path)
+    robot_prim = robot_stage.GetDefaultPrim()
+    camera_mount_prim = robot_stage.GetPrimAtPath(
+        robot_prim.GetPath().AppendPath(camera.parent_prim_path)
+    )
+    ee_body_prim = robot_prim.GetChild(robot_config.kinematics.ee_body)
+    camera_offset_tcp_m = rotate_vector_xyzw(
+        ee_body_pose_tcp.orientation_xyzw,
+        tuple(
+            UsdGeom.XformCache().ComputeRelativeTransform(
+                camera_mount_prim, ee_body_prim
+            )[0].Transform(Gf.Vec3d(*camera.position_m))
+        ),
+    )
+    return tuple(
+        coordinate_tcp_m + offset_tcp_m
+        for coordinate_tcp_m, offset_tcp_m in zip(
+            ee_body_pose_tcp.position_m, camera_offset_tcp_m, strict=True
+        )
+    )
 
 
 def _camera_stand_collision_objects_env(

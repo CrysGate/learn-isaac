@@ -1,4 +1,4 @@
-"""Inspect ScaleBench HDF5 recordings with a NiceGUI application."""
+"""Inspect HDF5 recordings with a NiceGUI application."""
 
 from __future__ import annotations
 
@@ -126,9 +126,7 @@ def _depth_range(dataset: h5py.Dataset, frame_count: int) -> tuple[float, float]
 
 
 def _episode_frame_count(episode: h5py.Group, observations: h5py.Group) -> int:
-    if "num_samples" not in episode.attrs:
-        raise ValueError(f"{episode.name} has no num_samples attribute")
-    frame_count = int(episode.attrs["num_samples"])
+    frame_count = int(episode.attrs.get("num_samples", 0))
     if frame_count > 0:
         return frame_count
     observation_lengths: set[int] = set()
@@ -181,20 +179,34 @@ class HDF5Viewer:
 
     def _inspect_recording(self) -> dict[str, Any]:
         with h5py.File(self.recording_path, "r") as recording:
-            if "data" not in recording or not isinstance(recording["data"], h5py.Group):
-                raise ValueError("the recording has no HDF5 group at /data")
-            data_group = recording["data"]
-            fps = _recording_fps(data_group)
+            if isinstance(recording.get("data"), h5py.Group):
+                data_group = recording["data"]
+                fps = _recording_fps(data_group)
+                episodes = {
+                    name: data_group[name]
+                    for name in sorted(data_group.keys(), key=_natural_key)
+                    if isinstance(data_group[name], h5py.Group)
+                }
+            elif all(
+                isinstance(recording.get(name), h5py.Group)
+                for name in ("state", "action", "vision")
+            ):
+                data_group = recording
+                fps = float(recording["additional_info/frequency"][()])
+                if not np.isfinite(fps) or fps <= 0:
+                    raise ValueError("additional_info/frequency must be positive")
+                episodes = {self.recording_path.stem: recording}
+            else:
+                raise ValueError(
+                    "expected /data episodes or root /state, /action, /vision groups"
+                )
             public_episodes: list[dict[str, Any]] = []
-            for episode_name in sorted(data_group.keys(), key=_natural_key):
-                episode = data_group[episode_name]
-                if not isinstance(episode, h5py.Group):
-                    continue
+            for episode_name, episode in episodes.items():
                 episode_info = self._inspect_episode(episode_name, episode, fps)
                 self._episodes[episode_name] = episode_info
                 public_episodes.append(episode_info["public"])
             if not public_episodes:
-                raise ValueError("the /data group contains no viewable episodes")
+                raise ValueError("the recording contains no viewable episodes")
             return {
                 "file": {
                     "name": self.recording_path.name,
@@ -207,18 +219,10 @@ class HDF5Viewer:
                 "episodes": public_episodes,
             }
 
-    def _inspect_episode(
-        self,
-        episode_name: str,
-        episode: h5py.Group,
-        fps: float,
-    ) -> dict[str, Any]:
-        observations = episode.get("obs")
-        if observations is None:
-            raise ValueError(f"/data/{episode_name} has no observation group")
-        if not isinstance(observations, h5py.Group):
-            raise TypeError(f"/data/{episode_name}/obs is not an HDF5 group")
-        frame_count = _episode_frame_count(episode, observations)
+    def _inspect_obs_cameras(
+        self, episode: h5py.Group, frame_count: int
+    ) -> list[dict[str, Any]]:
+        observations = episode["obs"]
         rgb_camera_names = {
             key.removesuffix("_camera_rgb")
             for key in observations
@@ -253,7 +257,6 @@ class HDF5Viewer:
         )
 
         cameras: list[dict[str, Any]] = []
-        image_paths: set[str] = set()
         for camera_name in camera_names:
             rgb_path = f"obs/{camera_name}_camera_rgb"
             depth_path = f"obs/{camera_name}_camera_depth"
@@ -283,7 +286,57 @@ class HDF5Viewer:
                     "depth_max": maximum,
                 }
             )
-            image_paths.update((rgb_path, depth_path))
+        return cameras
+
+    def _inspect_vision_cameras(
+        self, episode: h5py.Group, frame_count: int
+    ) -> list[dict[str, Any]]:
+        cameras: list[dict[str, Any]] = []
+        for name in sorted(episode["vision"], key=_natural_key):
+            rgb_path = f"vision/{name}/colors"
+            colors = episode[rgb_path]
+            if colors.shape != (frame_count,) or colors.dtype.kind != "S":
+                raise ValueError(f"unexpected encoded RGB dataset at {colors.name}")
+            rgb_bgr = self._decode_color(colors[0])
+            cameras.append(
+                {
+                    "name": name,
+                    "rgb_path": rgb_path,
+                    "width": int(rgb_bgr.shape[1]),
+                    "height": int(rgb_bgr.shape[0]),
+                }
+            )
+        return cameras
+
+    @staticmethod
+    def _decode_color(encoded: np.bytes_) -> np.ndarray:
+        rgb_bgr = cv2.imdecode(np.frombuffer(encoded, dtype=np.uint8), cv2.IMREAD_COLOR)
+        if rgb_bgr is None:
+            raise ValueError("failed to decode camera image")
+        return rgb_bgr
+
+    def _inspect_episode(
+        self,
+        episode_name: str,
+        episode: h5py.Group,
+        fps: float,
+    ) -> dict[str, Any]:
+        observation_path = "state" if episode.name == "/" else "obs"
+        observations = episode.get(observation_path)
+        if not isinstance(observations, h5py.Group):
+            raise ValueError(f"{episode.name} has no {observation_path} observation group")
+        frame_count = _episode_frame_count(episode, observations)
+        cameras = (
+            self._inspect_vision_cameras(episode, frame_count)
+            if observation_path == "state"
+            else self._inspect_obs_cameras(episode, frame_count)
+        )
+        image_paths = {
+            camera[key]
+            for camera in cameras
+            for key in ("rgb_path", "depth_path")
+            if key in camera
+        }
 
         frame_fields: list[dict[str, Any]] = []
         static_fields: dict[str, dict[str, Any]] = {}
@@ -296,7 +349,7 @@ class HDF5Viewer:
             info = {"dtype": str(node.dtype), "shape": list(node.shape)}
             is_episode_level = relative_path.startswith(
                 ("initial_state/", "termination/")
-            )
+            ) or relative_path.endswith(("/intrinsic_matrix", "/shape"))
             if node.ndim > 0 and node.shape[0] == frame_count and not is_episode_level:
                 frame_fields.append({"path": relative_path, **info})
             else:
@@ -313,8 +366,8 @@ class HDF5Viewer:
         joint_fields = [
             {"path": field["path"], "joint_count": field["shape"][1]}
             for field in frame_fields
-            if field["path"].startswith("obs/")
-            and field["path"].endswith("_joint_pos")
+            if field["path"].startswith(f"{observation_path}/")
+            and field["path"].endswith(("_joint_pos", "_joint_states"))
             and len(field["shape"]) == 2
             and field["shape"][1] > 0
             and np.issubdtype(episode[field["path"]].dtype, np.number)
@@ -325,6 +378,7 @@ class HDF5Viewer:
             "frame_count": frame_count,
             "duration_seconds": frame_count / fps,
             "success": bool(attrs.get("success", False)),
+            "success_known": "success" in attrs,
             "attrs": attrs,
             "cameras": cameras,
             "joint_fields": joint_fields,
@@ -332,21 +386,22 @@ class HDF5Viewer:
             "static_fields": static_fields,
         }
         episode_info = {
+            "path": episode.name,
             "public": public,
             "frame_count": frame_count,
             "cameras": cameras,
             "frame_paths": [field["path"] for field in frame_fields],
         }
         if cameras:
-            first_rgb = observations[f"{camera_names[0]}_camera_rgb"]
+            first_camera = cameras[0]
             tile_height = max(
                 2,
-                round(TILE_WIDTH * first_rgb.shape[1] / first_rgb.shape[2]) // 2 * 2,
+                round(TILE_WIDTH * first_camera["height"] / first_camera["width"]) // 2 * 2,
             )
             episode_info.update(
                 tile_height=tile_height,
                 video_width=TILE_WIDTH * len(cameras),
-                video_height=tile_height * 2,
+                video_height=tile_height * (2 if "depth_path" in first_camera else 1),
             )
         return episode_info
 
@@ -359,7 +414,7 @@ class HDF5Viewer:
                 return cached
         episode_info = self._episodes[episode_name]
         with h5py.File(self.recording_path, "r") as recording:
-            episode = recording[f"data/{episode_name}"]
+            episode = recording[episode_info["path"]]
             state_arrays = {
                 path: np.asarray(episode[path][()])
                 for path in episode_info["frame_paths"]
@@ -385,12 +440,11 @@ class HDF5Viewer:
         with self._video_locks[episode_name]:
             if output_path.is_file():
                 return output_path
-            self._encode_video(episode_name, episode_info, output_path)
+            self._encode_video(episode_info, output_path)
         return output_path
 
     def _encode_video(
         self,
-        episode_name: str,
         episode_info: dict[str, Any],
         output_path: Path,
     ) -> None:
@@ -447,14 +501,15 @@ class HDF5Viewer:
             raise RuntimeError("failed to open ffmpeg pipes")
         try:
             with h5py.File(self.recording_path, "r") as recording:
-                episode = recording[f"data/{episode_name}"]
+                episode = recording[episode_info["path"]]
                 for start in range(0, int(episode_info["frame_count"]), BLOCK_SIZE):
                     stop = min(start + BLOCK_SIZE, int(episode_info["frame_count"]))
                     image_blocks = [
-                        (
-                            np.asarray(episode[camera["rgb_path"]][start:stop]),
-                            np.asarray(episode[camera["depth_path"]][start:stop]),
-                        )
+                        {
+                            key: np.asarray(episode[camera[key]][start:stop])
+                            for key in ("rgb_path", "depth_path")
+                            if key in camera
+                        }
                         for camera in episode_info["cameras"]
                     ]
                     for offset in range(stop - start):
@@ -482,28 +537,35 @@ class HDF5Viewer:
 
     @staticmethod
     def _render_sheet(
-        image_blocks: list[tuple[np.ndarray, np.ndarray]],
+        image_blocks: list[dict[str, np.ndarray]],
         cameras: list[dict[str, Any]],
         tile_height: int,
         offset: int,
     ) -> np.ndarray:
+        rows = 2 if "depth_path" in cameras[0] else 1
         sheet = np.zeros(
-            (tile_height * 2, TILE_WIDTH * len(image_blocks), 3), dtype=np.uint8
+            (tile_height * rows, TILE_WIDTH * len(image_blocks), 3), dtype=np.uint8
         )
-        for camera_index, ((rgb_frames, depth_frames), camera) in enumerate(
+        for camera_index, (blocks, camera) in enumerate(
             zip(image_blocks, cameras, strict=True)
         ):
-            rgb = rgb_frames[offset]
-            if rgb.dtype != np.uint8:
-                rgb = np.clip(rgb, 0, 255).astype(np.uint8)
+            rgb = blocks["rgb_path"][offset]
+            if blocks["rgb_path"].dtype.kind == "S":
+                rgb_bgr = HDF5Viewer._decode_color(rgb)
+            else:
+                if rgb.dtype != np.uint8:
+                    rgb = np.clip(rgb, 0, 255).astype(np.uint8)
+                rgb_bgr = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
             rgb_bgr = cv2.resize(
-                cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR),
+                rgb_bgr,
                 (TILE_WIDTH, tile_height),
                 interpolation=cv2.INTER_AREA,
             )
             left = camera_index * TILE_WIDTH
             sheet[:tile_height, left : left + TILE_WIDTH] = rgb_bgr
-            depth = depth_frames[offset]
+            if "depth_path" not in blocks:
+                continue
+            depth = blocks["depth_path"][offset]
             if depth.ndim == 3:
                 depth = depth[..., 0]
             valid = np.isfinite(depth) & (depth > 0.0)
@@ -857,7 +919,7 @@ class ViewerPage:
         episode_options = {
             episode["name"]: (
                 f"{episode['name']} · {episode['frame_count']} 帧 · "
-                f"{'成功' if episode['success'] else '未成功'}"
+                f"{('成功' if episode['success'] else '未成功') if episode['success_known'] else '未记录结果'}"
             )
             for episode in self.viewer.metadata["episodes"]
         }
@@ -1103,7 +1165,7 @@ class ViewerPage:
         self.camera_legend.set_visibility(False)
         cameras = self.episode["cameras"]
         self.loading_label.set_text(
-            "正在准备 RGB-D 视频" if cameras else "正在载入状态数据"
+            "正在准备视频" if cameras else "正在载入状态数据"
         )
         self.loading_line.set_visibility(True)
         try:
@@ -1152,10 +1214,16 @@ class ViewerPage:
 
     def _update_episode_header(self) -> None:
         success = bool(self.episode["success"])
-        self.status_badge.set_text("成功" if success else "未成功")
+        self.status_badge.set_text(
+            ("成功" if success else "未成功")
+            if self.episode["success_known"] else "未记录结果"
+        )
         self.status_badge.classes(
-            add="success" if success else "failure",
-            remove="failure" if success else "success",
+            remove="success failure",
+        )
+        self.status_badge.classes(
+            add=("success" if success else "failure")
+            if self.episode["success_known"] else "",
         )
         frame_count = int(self.episode["frame_count"])
         self.timeline._props["max"] = frame_count - 1
@@ -1200,10 +1268,13 @@ class ViewerPage:
             for camera in cameras:
                 with ui.element("div").classes("camera-label"):
                     ui.label(camera["name"]).classes("camera-name")
-                    ui.label(
-                        f"RGB + DEPTH · {camera['width']}x{camera['height']} · "
-                        f"{camera['depth_min']:.3g}-{camera['depth_max']:.3g} m"
-                    ).classes("camera-meta")
+                    camera_meta = f"RGB · {camera['width']}x{camera['height']}"
+                    if "depth_path" in camera:
+                        camera_meta = (
+                            f"RGB + DEPTH · {camera['width']}x{camera['height']} · "
+                            f"{camera['depth_min']:.3g}-{camera['depth_max']:.3g} m"
+                        )
+                    ui.label(camera_meta).classes("camera-meta")
         self.camera_legend.set_visibility(True)
 
     def _build_state_fields(self) -> None:
@@ -1260,7 +1331,11 @@ class ViewerPage:
         with self.joint_container:
             for field in joint_fields:
                 path = field["path"]
-                group_name = path.removeprefix("obs/").removesuffix("_joint_pos")
+                group_name = (
+                    path.split("/", 1)[1]
+                    .removesuffix("_joint_pos")
+                    .removesuffix("_joint_states")
+                )
                 with ui.element("section").classes("joint-group"):
                     with ui.element("div").classes("joint-group-head"):
                         ui.label(group_name).classes("joint-group-title")

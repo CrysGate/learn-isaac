@@ -8,6 +8,7 @@ one parallel environment rather than Isaac Sim's shared absolute world frame.
 from __future__ import annotations
 
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Protocol, TypeAlias
 
@@ -45,6 +46,8 @@ class JointTrajectory:
 class RobotState:
     joints: JointState
     tcp_pose_env: Pose
+    camera_position_tcp_m: tuple[float, float, float]
+    gripper_joint_positions: Mapping[str, float]
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,6 +135,7 @@ class PlanningScene:
     other_arm: Arm
     other_robot: RobotState
     tool: ToolState
+    gripper_joint_positions: Mapping[str, float]
 
 
 class SkillContext(Protocol):

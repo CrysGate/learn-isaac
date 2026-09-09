@@ -995,6 +995,9 @@ def main() -> int:
             curobo_planners,
             arm_base_positions_env_m,
             scene_config.manipulation.lift_height_m,
+            gripper_open_positions={
+                arm: robot_config.gripper.open_positions for arm in ("left", "right")
+            },
         )
 
     executor = CommandExecutor(env, action_layout)

@@ -45,7 +45,6 @@ actuators:
 
 gripper:
   joint_names: [gripper_joint, joint8]
-  # joint8 mimics the master gripper_joint in the robot model.
   command_joint_names: [gripper_joint]
   finger_body_names: [link7, link8]
   min_aperture_m: 0.0

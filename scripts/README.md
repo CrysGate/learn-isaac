@@ -14,6 +14,18 @@ uv run python scripts/preview_scene.py \
 
 支持的 task 为 `sort_dolls_by_size` 和 `single_object_pick_and_place`。`--seed` 与 `--layout` 互斥；`--export-layout` 保存本次布局。
 
+使用 Physics Inspector 手动检查机械臂关节：
+
+```bash
+uv run python scripts/preview_scene.py \
+  --task single_object_pick_and_place \
+  --physics-inspector
+```
+
+此模式固定使用 CPU 物理（覆盖 `--device` 和仿真配置中的设备，渲染仍使用 GPU），以兼容 Inspector 的关节驱动接口。加载场景后停止主仿真并打开 Inspector，不再下发环境动作。在 Inspector 中使用 `Select Articulation` 选择机械臂，通过关节滑块检查运动。Inspector 使用局部关节调试仿真，不代表完整任务执行或与整个场景的碰撞验证；无需点击主时间轴的 Play。该模式要求 Kit 图形界面，`--max-steps` 限制界面更新次数。
+
+Inspector 模式同时关闭 Fabric，启用物理状态到 USD 的同步，并在场景初始化完成后启用 authoring。选择机械臂或修改场景后若出现 `Re-Enable authoring`，点击它重新解析场景。调整关节位置请使用 `Joint States Position`（直接改变关节位置）或 `Joint Drives Target Position`（通过驱动运动到目标）；修改 Limits/Gains 只改变约束或驱动参数，不会直接指定新位置。
+
 无界面检查：
 
 ```bash

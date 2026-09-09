@@ -1,0 +1,153 @@
+{
+  "authoritative_urdf": "Assets/Robots/x5/X5A.urdf",
+  "base_mount_clip": {
+    "base_link": [
+      "z",
+      0.0
+    ]
+  },
+  "collision_pruning_enabled": false,
+  "convex_fit_links": [
+    "link1",
+    "camera"
+  ],
+  "full_curobo_cuda_load_validated": true,
+  "generator": "scripts/generate_curobo_robot_config.py",
+  "ignored_collision_pairs": [
+    "link7:link8"
+  ],
+  "links": {
+    "base_link": {
+      "coverage": 0.46629998087882996,
+      "max_uncovered_gap": 0.029397543519735336,
+      "num_spheres": 6,
+      "protrusion": 0.5425000190734863,
+      "protrusion_dist_mean": 0.002310364041477442,
+      "protrusion_dist_p95": 0.006352532655000687,
+      "surface_gap_mean": 0.006033958401530981,
+      "surface_gap_p95": 0.02029229886829853,
+      "volume_ratio": 0.5000832990148909
+    },
+    "camera": {
+      "coverage": 0.9615999460220337,
+      "max_uncovered_gap": 0.003645608201622963,
+      "num_spheres": 3,
+      "protrusion": 0.6983333230018616,
+      "protrusion_dist_mean": 0.0025873584672808647,
+      "protrusion_dist_p95": 0.0056708501651883125,
+      "surface_gap_mean": 0.0002179404691560194,
+      "surface_gap_p95": 0.0014321114867925644,
+      "volume_ratio": 1.4164423876286882
+    },
+    "camera_base": {
+      "coverage": 0.8729321956634521,
+      "max_uncovered_gap": 0.004594411700963974,
+      "num_spheres": 6,
+      "protrusion": 0.875,
+      "protrusion_dist_mean": 0.006467715837061405,
+      "protrusion_dist_p95": 0.012829386629164219,
+      "surface_gap_mean": 0.0002915346994996071,
+      "surface_gap_p95": 0.0022493035066872835,
+      "volume_ratio": 1.1406629125323522
+    },
+    "link1": {
+      "coverage": 0.974399983882904,
+      "max_uncovered_gap": 0.004380306228995323,
+      "num_spheres": 6,
+      "protrusion": 0.4741666913032532,
+      "protrusion_dist_mean": 0.003998174797743559,
+      "protrusion_dist_p95": 0.008504780940711498,
+      "surface_gap_mean": 0.00020954126375727355,
+      "surface_gap_p95": 0.0016476484015583992,
+      "volume_ratio": 1.6782560710453875
+    },
+    "link2": {
+      "coverage": 0.9626999497413635,
+      "max_uncovered_gap": 0.0068328604102134705,
+      "num_spheres": 10,
+      "protrusion": 0.8170000314712524,
+      "protrusion_dist_mean": 0.004189813043922186,
+      "protrusion_dist_p95": 0.010442030616104603,
+      "surface_gap_mean": 0.00018851296044886112,
+      "surface_gap_p95": 0.0014594478998333216,
+      "volume_ratio": 1.3012448643882304
+    },
+    "link3": {
+      "coverage": 0.965175449848175,
+      "max_uncovered_gap": 0.012277226895093918,
+      "num_spheres": 9,
+      "protrusion": 0.8700000047683716,
+      "protrusion_dist_mean": 0.0062117185443639755,
+      "protrusion_dist_p95": 0.016140535473823547,
+      "surface_gap_mean": 0.0003239239740651101,
+      "surface_gap_p95": 0.0022832511458545923,
+      "volume_ratio": 0.42087842740164366
+    },
+    "link4": {
+      "coverage": 0.9715999960899353,
+      "max_uncovered_gap": 0.009014107286930084,
+      "num_spheres": 2,
+      "protrusion": 0.6974999904632568,
+      "protrusion_dist_mean": 0.006480582058429718,
+      "protrusion_dist_p95": 0.013160728849470615,
+      "surface_gap_mean": 0.00039247411768883467,
+      "surface_gap_p95": 0.0031004466582089663,
+      "volume_ratio": 1.5166624886099753
+    },
+    "link5": {
+      "coverage": 0.971299946308136,
+      "max_uncovered_gap": 0.0050891973078250885,
+      "num_spheres": 3,
+      "protrusion": 0.6800000071525574,
+      "protrusion_dist_mean": 0.0035185564775019884,
+      "protrusion_dist_p95": 0.00829234253615141,
+      "surface_gap_mean": 0.00022280709526967257,
+      "surface_gap_p95": 0.0019272002391517162,
+      "volume_ratio": 2.1589319629746258
+    },
+    "link6": {
+      "coverage": 0.9612458944320679,
+      "max_uncovered_gap": 0.008450143039226532,
+      "num_spheres": 7,
+      "protrusion": 0.7699999809265137,
+      "protrusion_dist_mean": 0.0029418463818728924,
+      "protrusion_dist_p95": 0.008045130409300327,
+      "surface_gap_mean": 0.0002305049420101568,
+      "surface_gap_p95": 0.0019274887163192034,
+      "volume_ratio": 2.8637828345695038
+    },
+    "link7": {
+      "coverage": 0.9365413784980774,
+      "max_uncovered_gap": 0.00461796298623085,
+      "num_spheres": 5,
+      "protrusion": 0.8090000152587891,
+      "protrusion_dist_mean": 0.004807167686522007,
+      "protrusion_dist_p95": 0.011085426434874535,
+      "surface_gap_mean": 0.0001547323481645435,
+      "surface_gap_p95": 0.0013786827912554145,
+      "volume_ratio": 3.979005436551215
+    },
+    "link8": {
+      "coverage": 0.9581263065338135,
+      "max_uncovered_gap": 0.004077836871147156,
+      "num_spheres": 5,
+      "protrusion": 0.8440000414848328,
+      "protrusion_dist_mean": 0.004969489295035601,
+      "protrusion_dist_p95": 0.012256333604454994,
+      "surface_gap_mean": 0.00010957995255012065,
+      "surface_gap_p95": 0.0009045881452038884,
+      "volume_ratio": 4.0780097227878365
+    }
+  },
+  "refit_links": [
+    "link8:2.0",
+    "link7:2.0",
+    "camera_base:2.0"
+  ],
+  "reused_generated_source": null,
+  "robot_config": "configs/robots/x5.yml",
+  "seed": 42,
+  "sphere_density": 1.0,
+  "stale_refit_non_neighbor_ignores_removed": false,
+  "total_fitted_spheres": 62
+}

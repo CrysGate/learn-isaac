@@ -32,6 +32,7 @@ class SimulationConfig(FrozenModel):
     """Top-level simulator-independent simulation configuration."""
 
     device: Device = "cuda:0"
+    use_fabric: StrictBool = True
     physics_dt_s: PositiveFloat = 1.0 / 120.0
     gravity_m_s2: tuple[FiniteFloat, FiniteFloat, FiniteFloat] = (0.0, 0.0, -9.81)
     render_interval: PositiveInt = 4

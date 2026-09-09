@@ -104,7 +104,7 @@ _Execution: TypeAlias = _HoldExecution | _GripperExecution | _MotionExecution
 
 
 class CommandExecutor:
-    """Play trajectories and preserve latched gripper targets."""
+    """Play trajectories and preserve latched arm and gripper targets."""
 
     def __init__(self, env: CommandEnvironment, layout: CommandActionLayout) -> None:
         self._env = env
@@ -119,6 +119,11 @@ class CommandExecutor:
 
     def begin(self, env_id: int, command: SkillCommand) -> None:
         hold = self._env.hold_action()
+        # The first command runs after the environment has reset its joints.
+        for arm in ("left", "right"):
+            if (env_id, arm) not in self._arm_targets:
+                start, stop = self._layout.arm_range(arm)
+                self._arm_targets[(env_id, arm)] = hold[env_id, start:stop].clone()
         if isinstance(command, Hold):
             execution: _Execution = _HoldExecution(command)
         elif isinstance(command, SetGripper):

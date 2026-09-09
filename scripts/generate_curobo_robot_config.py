@@ -25,6 +25,7 @@ import yaml
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT_ROOT / "src"))
 
+from curobo._src.geom.sphere_fit.fit_spheres import fit_spheres_to_mesh
 from curobo._src.geom.sphere_fit.types import SphereFitMetrics
 from curobo._src.robot.builder.builder_robot import RobotBuilder
 from curobo._src.types.robot import RobotCfg
@@ -43,6 +44,11 @@ def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     parser.add_argument("--robot-config", type=Path, default=DEFAULT_PROFILE)
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT)
+    parser.add_argument(
+        "--export-asset-configs",
+        action="store_true",
+        help="Also export RoboDojo curobo.yml and curobo_tmp.yml beside the URDF.",
+    )
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument(
         "--reuse-generated",
@@ -59,6 +65,20 @@ def _parser() -> argparse.ArgumentParser:
         default=["link8:2.0"],
         metavar="LINK:DENSITY",
         help="Refit a difficult link at a different density; repeatable.",
+    )
+    parser.add_argument(
+        "--convex-fit-link",
+        action="append",
+        default=[],
+        metavar="LINK",
+        help="Fit a link's convex hull when it matches the PhysX collision shape.",
+    )
+    parser.add_argument(
+        "--ignore-collision-pair",
+        action="append",
+        default=[],
+        metavar="LINK:LINK",
+        help="Ignore a geometrically verified self-collision pair; repeatable.",
     )
     parser.add_argument(
         "--prune-collisions",
@@ -114,6 +134,9 @@ def main() -> int:
                 iterations=args.iterations,
                 compute_metrics=True,
             )
+        for index, link_name in enumerate(args.convex_fit_link):
+            _seed(args.seed + index)
+            _refit_convex_link(builder, link_name, args.sphere_density, args.iterations)
 
         builder.compute_collision_matrix(
             prune_collisions=args.prune_collisions,
@@ -147,6 +170,7 @@ def main() -> int:
             document["kinematics"]["collision_spheres"],
             device_cfg=device_cfg,
             seed=args.seed,
+            convex_fit_links=args.convex_fit_link,
         )
 
     _validate_metrics(
@@ -165,6 +189,19 @@ def main() -> int:
         urdf_path=Path(robot_config.urdf_path),
         config_path=output,
     )
+    kinematics = document["kinematics"]
+    for pair in args.ignore_collision_pair:
+        links = pair.split(":")
+        if (
+            len(links) != 2
+            or links[0] == links[1]
+            or any(link not in kinematics["collision_link_names"] for link in links)
+        ):
+            raise ValueError(f"invalid --ignore-collision-pair {pair!r}; expected LINK:LINK")
+        first, second = links
+        ignored = kinematics["self_collision_ignore"].setdefault(first, [])
+        if second not in ignored:
+            ignored.append(second)
     expected_joints = tuple(robot_config.kinematics.arm_joint_names)
     actual_joints = tuple(document["kinematics"]["cspace"]["joint_names"])
     if actual_joints != expected_joints:
@@ -192,6 +229,8 @@ def main() -> int:
         yaml.safe_dump(document, sort_keys=False),
         encoding="utf-8",
     )
+    if args.export_asset_configs:
+        _export_asset_configs(document, Path(robot_config.urdf_path))
 
     xrdf_path = output.with_suffix(".xrdf")
     write_yaml(convert_curobo_to_xrdf(document), str(xrdf_path))
@@ -239,14 +278,14 @@ def _load_source_robot_config(profile_path: Path) -> RobotConfig:
         return robot_config
     urdf_path = Path(robot_config.urdf_path)
     if not urdf_path.is_absolute():
-        urdf_path = (PROJECT_ROOT / urdf_path).resolve()
+        urdf_path = PROJECT_ROOT / urdf_path
     if not urdf_path.is_file():
         raise FileNotFoundError(f"authoritative URDF does not exist: {urdf_path}")
     return robot_config.model_copy(update={"urdf_path": str(urdf_path)})
 
 
 def _robot_asset_root(urdf_path: Path) -> Path:
-    resolved = urdf_path.resolve()
+    resolved = urdf_path.absolute()
     for parent in resolved.parents:
         if parent.name == "piper":
             return parent
@@ -320,6 +359,7 @@ def _compute_existing_metrics(
     *,
     device_cfg: DeviceCfg,
     seed: int,
+    convex_fit_links: list[str],
 ) -> dict[str, Any]:
     metrics = {}
     for index, (link_name, spheres) in enumerate(collision_spheres.items()):
@@ -335,6 +375,8 @@ def _compute_existing_metrics(
         if not meshes:
             raise ValueError(f"generated collision link has no mesh: {link_name}")
         mesh = meshes[0] if len(meshes) == 1 else trimesh.util.concatenate(meshes)
+        if link_name in convex_fit_links:
+            mesh = mesh.convex_hull
         _seed(seed + index)
         metrics[link_name] = _compute_sphere_fit_metrics_cpu(
             mesh,
@@ -342,6 +384,34 @@ def _compute_existing_metrics(
             np.asarray([value["radius"] for value in spheres]),
         )
     return metrics
+
+
+def _refit_convex_link(
+    builder: RobotBuilder,
+    link_name: str,
+    sphere_density: float,
+    iterations: int,
+) -> None:
+    geometry = builder._parser.get_link_geometry(  # noqa: SLF001
+        link_name, use_collision_mesh=False
+    )
+    meshes = [value.get_trimesh_mesh(transform_with_pose=True) for value in geometry]
+    meshes = [mesh for mesh in meshes if mesh is not None]
+    if not meshes:
+        raise ValueError(f"convex-fit link has no geometry: {link_name}")
+    mesh = meshes[0] if len(meshes) == 1 else trimesh.util.concatenate(meshes)
+    mesh = mesh.convex_hull
+    fitted = fit_spheres_to_mesh(
+        mesh,
+        sphere_density=sphere_density,
+        iterations=iterations,
+        compute_metrics=True,
+    )
+    builder.collision_spheres[link_name] = [
+        {"center": center, "radius": radius}
+        for center, radius in zip(fitted.centers.tolist(), fitted.radii.tolist(), strict=True)
+    ]
+    builder.link_metrics[link_name] = fitted.metrics
 
 
 def _compute_sphere_fit_metrics_cpu(
@@ -474,7 +544,7 @@ def _apply_authoritative_robot_contract(
 
     config_dir = config_path.resolve().parent
     kinematics["urdf_path"] = os.path.relpath(
-        urdf_path.resolve(),
+        urdf_path,
         start=config_dir,
     )
     kinematics["asset_root_path"] = os.path.relpath(
@@ -532,6 +602,22 @@ def _apply_authoritative_robot_contract(
             ignored.append(attached_link)
 
 
+def _export_asset_configs(document: dict[str, Any], urdf_path: Path) -> None:
+    """Keep RoboDojo's wrapper and project-root-relative path convention."""
+    exported = deepcopy(document)
+    kinematics = exported["kinematics"]
+    kinematics["urdf_path"] = os.path.relpath(urdf_path, PROJECT_ROOT)
+    kinematics["asset_root_path"] = os.path.relpath(
+        _robot_asset_root(urdf_path), PROJECT_ROOT
+    )
+    contents = yaml.safe_dump(
+        {"robot_cfg": exported, "planner": {"frame_bias": [0.0, 0.0, 0.0]}},
+        sort_keys=False,
+    )
+    for name in ("curobo.yml", "curobo_tmp.yml"):
+        (urdf_path.parent / name).write_text(contents, encoding="utf-8")
+
+
 def _urdf_reference_positions(
     urdf_path: Path,
     joint_names: tuple[str, ...],
@@ -567,11 +653,13 @@ def _metrics_document(
         "generator": "scripts/generate_curobo_robot_config.py",
         "robot_config": str(Path(args.robot_config).resolve().relative_to(PROJECT_ROOT)),
         "authoritative_urdf": str(
-            Path(robot_config.urdf_path).resolve().relative_to(PROJECT_ROOT)
+            Path(robot_config.urdf_path).relative_to(PROJECT_ROOT)
         ),
         "seed": args.seed,
         "sphere_density": args.sphere_density,
         "refit_links": list(args.refit_link),
+        "convex_fit_links": list(args.convex_fit_link),
+        "ignored_collision_pairs": list(args.ignore_collision_pair),
         "base_mount_clip": {robot_config.kinematics.base_body: ["z", 0.0]},
         "collision_pruning_enabled": (
             args.prune_collisions
