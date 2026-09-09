@@ -47,9 +47,12 @@ camera:
 anygrasp:
   service_url: http://127.0.0.1:5001
   request_timeout_s: 60.0
-  # Capture 0.4 m from the target on the selected arm's side at 45 degrees.
+  # Capture from the selected arm's side using configurable distance,
+  # elevation, and arm-relative azimuth offset.
   # If too few target points are visible, retry once from directly overhead.
-  capture_distance_m: 0.4
+  capture_distance_m: 0.3
+  capture_elevation_deg: 30.0
+  capture_azimuth_offset_deg: 20.0
   depth_trunc_m: 2.0
   # Request a wide hypothesis pool, then plan geometry-valid poses by score.
   top_k: 200
